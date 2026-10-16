@@ -20,7 +20,7 @@ session start, closing the window only hides it, and the panel's MAX
 button brings the same process back (one instance through D-Bus). The
 unread count of dialogs and groups (channels left out) goes to
 $XDG_RUNTIME_DIR/b8k-badge/max, which b8k-launch shows on the button, and
-the panel is told at once (SIGRTMIN+7). Chats open from a cache: the last
+the panel is told at once (b8k_ui.badge, with the button's own signal). Chats open from a cache: the last
 messages of each chat on disk (~/.cache/b8k-max/chats, mode 600) and the
 last six chats kept built in memory; only newer messages are fetched.
 """
