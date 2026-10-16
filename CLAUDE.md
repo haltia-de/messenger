@@ -1,0 +1,73 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## What this is
+
+`b8k-max` is a native GTK 3 client for the MAX messenger, written for the tablet shell of
+[lenovo-b8000h-linux](https://github.com/trudenboy/lenovo-b8000h-linux) (Lenovo YOGA Tablet 10
+B8000-H, Alpine). The whole program is one Python 3 script, `b8k-max` (no `.py` extension). It
+was split out of the lenovo-b8000h-linux repo; that repo's image build installs it from here by tag.
+
+There is no build step, test suite or linter config. GPL-2.0; every source file starts with an
+`SPDX-License-Identifier: GPL-2.0` line.
+
+## Commands
+
+```sh
+sh install.sh            # install into / (root needed)
+sh install.sh /mnt/root  # install into another root, e.g. while building an image
+b8k-max                  # run with a window
+b8k-max --background     # start hidden (what b8k-launcher does at session start)
+python3 -m py_compile b8k-max   # quick syntax check
+```
+
+Runtime deps (Alpine): `apk add python3 py3-gobject3 gtk+3.0`, plus `wget`/`unzip`/`sha256sum`
+for `install.sh`. `install.sh` downloads the pinned PyMax wheel (`maxapi_python-2.4.1`), checks
+its sha256 and unpacks it into `/usr/local/lib/b8k-max`; the download is cached in `$B8K_CACHE`
+(default `.cache/` here, git-ignored). Bumping PyMax means changing both the wheel name and the
+sha256 in `install.sh`. The script does `sys.path.insert(0, "/usr/local/lib/b8k-max")`, so running
+it from the checkout still needs PyMax installed there.
+
+## Architecture
+
+- **Two threads.** `Backend` runs PyMax's `WebClient` (MAX's web protocol over a WebSocket, no
+  web engine) in its own thread with its own asyncio loop. The GTK side calls into it only through
+  `Backend.run(coro, done)`; results and events come back to GTK only via `GLib.idle_add`. Keep
+  this rule: never touch GTK widgets from the MAX thread, never await PyMax from the GTK thread.
+  Some calls reach into PyMax internals (`client._app.api.chats.fetch_chats`, `...users.get_users`),
+  so a PyMax upgrade can break them.
+- **Login.** `Backend` is PyMax's QR provider (`show_qr`): the first start renders a QR code to
+  scan with MAX on a phone. The session lives in `~/.local/share/b8k-max/web.db` (chmod 600).
+  Telemetry is turned off in `ExtraConfig`.
+- **Single instance, background life.** `Max` is a `Gtk.Application` with id `b8k.Max`; a second
+  launch just activates the first process over D-Bus. Closing the window hides it. With
+  `--background` the window is not shown at start.
+- **Caches.** `~/.cache/b8k-max/chats/<id>.json` keeps the last `KEEP` messages per chat and
+  `list.json` the chat list (all mode 600, written atomically via `.new` + `os.replace`); only newer
+  messages are fetched when a chat opens. The last `VIEWS` chat views stay built in memory. Photos
+  are cached in `~/.cache/b8k-max/` by URL hash and pruned after `PHOTO_DAYS`.
+- **Photo fetch is a security boundary.** Photo URLs arrive inside messages (sender-controlled), so
+  `photo_ok` allows only `https` on `oneme.ru`/`max.ru` hosts, and `PhotoRedirect` refuses
+  redirects off those hosts. Preserve both checks when touching photo loading.
+- **Optional shell module.** If `/usr/local/share/b8k/python/b8k_ui.py` exists, the program uses
+  `b8k_ui.Buzz` (haptic buzz on every `Gtk.Button` "pressed"), `b8k_ui.HEADER_CSS` and
+  `b8k_ui.badge("max", n)` (unread count of dialogs and groups, channels excluded, on the panel
+  button). Without it (`b8k_ui = None`) the program must still run on any GTK 3 desktop — guard
+  every `b8k_ui` use.
+- **Shell integration files.** `max.conf` is installed to `/usr/local/share/b8k/apps.d/max.conf`
+  and registers the panel button (`signal = 7`, `app_ids` must match the application id);
+  `max.png` is its icon.
+
+## Conventions
+
+- UI text is Russian; code comments, docstrings and commit messages are English. The README is
+  Russian.
+- Large type is the point ("MAX in large type"): font and widget sizes live in the `CSS` block at
+  the top of `b8k-max`.
+- Commit subjects are full sentences ending with a period (older ones carry a `b8k-max:` prefix
+  from the monorepo days).
+- `.gitattributes` forces LF for `*.sh`, `*.py` and `b8k-*`.
+- This is an unofficial client (see the README's disclaimer): call it "a client for MAX", keep the
+  icon free of MAX's logo or wordmark, and don't add bulk-sending, scraping or other automation
+  features — MAX's terms (legal.max.ru/ps, 4.3.7, 4.3.10) forbid them and it blocks such clients.

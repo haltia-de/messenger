@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0
-"""MAX messenger in large type, without a web browser.
+# Copyright (C) 2026 Mikhail Nevskiy
+"""An unofficial client for the MAX messenger: large type, no web browser.
 
 PyMax (MIT, vendored in /usr/local/lib/b8k-max) speaks MAX's web protocol
 over a WebSocket, as web.max.ru does, so no web engine is loaded: about

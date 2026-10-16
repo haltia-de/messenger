@@ -1,5 +1,6 @@
 #!/bin/sh
 # SPDX-License-Identifier: GPL-2.0
+# Copyright (C) 2026 Mikhail Nevskiy
 # Install b8k-max into a root file system: sh install.sh [ROOT]
 # (ROOT empty or / for this system). The tablet shell's build runs it for
 # its image; on another system it installs the program the same way.
