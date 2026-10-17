@@ -3,6 +3,9 @@
 The words this program's code and reviews use for what it deals with. Each
 line: the term, its name in the code, what it is.
 
+- **Связь с MAX** (MAX link, `PyMaxLink`; `FakeLink` in tests): every request
+  to MAX and every event from it, in PyMax's objects; nothing above it knows
+  PyMax's internals.
 - **Окно чата** (Chat view, `ChatView`): one chat on screen, with its
   bubbles, day labels, reactions, media controls, older pages and place.
   Built per chat, kept for the last `VIEWS` chats.

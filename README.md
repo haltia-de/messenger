@@ -101,6 +101,13 @@ sh install.sh /mnt/root  # в другой корень, например при
 `install.sh` кладёт программу в `/usr/local/bin/b8k-max`, значок и раздел для
 панели оболочки в `/usr/local/share/b8k/apps.d/max.conf`.
 
+## Проверка
+
+`sh tests/run.sh` — тесты: Backend и окно на подменном MAX в памяти
+(`tests/fake_link.py`), без аккаунта и без сети (сеть нужна один раз, чтобы
+поставить PyMax в `.cache/venv`), окну нужен `broadwayd`. Посмотреть окно на
+выдуманных чатах: `.cache/venv/bin/python tests/demo.py`.
+
 ## Оболочка планшета
 
 Программа сделана для оболочки

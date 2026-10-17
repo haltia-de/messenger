@@ -443,11 +443,183 @@ def attach_summary(a):
 
 
 # --- MAX, in its own thread -------------------------------------------------
-class Backend:
-    def __init__(self, ui):
-        self.ui = ui
-        self.loop = None
+# --- the link to MAX -------------------------------------------------------------
+class PyMaxLink:
+    """The link to MAX (CONTEXT.md: Связь с MAX) through PyMax's web client:
+    every request this program makes, and the events it gets, in one place.
+    It hands out PyMax's own objects (Chat, Message, User, ReactionInfo) and
+    keeps everything else of PyMax, its internals included, to itself, so a
+    PyMax upgrade is checked here. tests/fake_link.py is the other one.
+
+    run(events) logs in and lives as long as the connection: it calls
+    events.on_qr(url) when a QR code is to be scanned, on_login(me, chats,
+    contacts, agent, session_id) after every (re)login, on_message(msg) and
+    on_reaction(chat_id, msg_id, reactions) as they come. All of it runs in
+    the caller's asyncio loop."""
+
+    def __init__(self, work_dir):
+        self.work_dir = work_dir
         self.client = None
+        self.events = None
+
+    async def run(self, events):
+        from pymax import WebClient
+        from pymax.config import ExtraConfig
+
+        self.events = events
+        # PyMax's own telemetry (a random simulation) stays off: Telemetry
+        # sends what really happens instead.
+        self.client = WebClient(session_name="web.db", work_dir=self.work_dir,
+                                extra_config=ExtraConfig(telemetry=False, log_level="WARNING",
+                                                         reconnect_delay=3.0),
+                                qr_provider=self)
+        self.client.on_start()(self._started)
+        self.client.on_message()(self._message)
+        self.client.on_reaction_update()(self._reaction)
+        await self.client.start()
+
+    async def show_qr(self, qr_url):  # PyMax's QrHandler
+        await self.events.on_qr(qr_url)
+
+    async def _started(self, client):
+        try:
+            os.chmod(os.path.join(self.work_dir, "web.db"), 0o600)
+        except OSError:
+            pass
+        device = client._app.config.device
+        try:  # the browser PyMax presents itself as; media links want the same
+            agent = device.user_agent.header_user_agent
+        except AttributeError:
+            agent = None
+        await self.events.on_login(client.me.contact if client.me else None,
+                                   list(client.chats or []), list(client.contacts or []),
+                                   agent, device.client_session_id)
+
+    async def _message(self, msg, _client):
+        await self.events.on_message(msg)
+
+    async def _reaction(self, event, _client):
+        reactions = [[c.reaction, c.count] for c in event.counters or [] if c.count]
+        await self.events.on_reaction(event.chat_id, int(event.message_id), reactions)
+
+    @property
+    def _api(self):
+        return self.client._app.api
+
+    # chats and people
+    async def chats_page(self, marker=None):
+        """A page of the chat list, the newest first, older than marker (ms)."""
+        return await self._api.chats.fetch_chats(marker)
+
+    async def chats(self, ids):
+        return await self._api.chats.get_chats(list(ids))
+
+    async def users(self, ids):
+        return await self._api.users.get_users(list(ids))
+
+    async def find_phone(self, phone):
+        """The user with this phone number; an error if nobody in MAX has it."""
+        return await self._api.users.search_by_phone(phone)
+
+    async def add_contact(self, user_id):
+        return await self._api.users.add_contact(user_id)
+
+    async def link_info(self, link):
+        """The channel or group behind a link, or None. PyMax's own call
+        takes invite links only (join/…), so public max.ru/name links go
+        as the web client sends them."""
+        from pymax.api.chats.enums import ChatPayloadKey
+        from pymax.api.chats.payloads import LinkInfoPayload
+        from pymax.api.response import parse_payload_item_model
+        from pymax.protocol import Opcode
+        from pymax.types.domain import Chat
+
+        at = link.find("join/")  # invite links go as join/…, public ones whole
+        frame = LinkInfoPayload(link=link[at:] if at != -1 else link)
+        response = await self.client._app.invoke(Opcode.LINK_INFO, frame.to_payload())
+        return parse_payload_item_model(response, ChatPayloadKey.CHAT, Chat)
+
+    async def join(self, link):
+        return await self._api.chats.join_channel(link)  # groups too
+
+    async def leave(self, chat_id):
+        """Out of a group or channel."""
+        await self._api.chats.leave_group(chat_id)
+
+    async def delete(self, chat_id, last_event_time=None):
+        """A chat off this account's list. Only for this account: there is
+        no way here to delete it for the others in it."""
+        await self._api.chats.delete_chat(chat_id, last_event_time=last_event_time,
+                                          for_all=False)
+
+    # messages
+    async def history(self, chat_id, backward, before=None):
+        """Up to backward messages, the newest ones, or those older than
+        before (ms)."""
+        if before is None:
+            return await self._api.messages.fetch_history(chat_id=chat_id, backward=backward)
+        msgs = await self._api.messages.fetch_history(chat_id=chat_id, backward=backward,
+                                                      forward=0, from_=before - 1)
+        return [m for m in msgs if m.time < before]
+
+    async def read(self, chat_id, msg_id):
+        await self._api.messages.read_message(msg_id, chat_id)
+
+    async def send(self, chat_id, text):
+        return await self._api.messages.send_message(chat_id, text)
+
+    async def react(self, chat_id, msg_id, emoji):
+        """The account's reaction put on (None: taken off); MAX's counts
+        afterwards (ReactionInfo), or None when it sends none."""
+        if emoji:
+            return await self._api.messages.add_reaction(chat_id, msg_id, emoji)
+        return await self._api.messages.remove_reaction(chat_id, msg_id)
+
+    async def media_url(self, chat_id, msg_id, item):
+        """The short-lived link MAX gives for a video or a file of a message.
+        Only MAX's own link: an "external" one (a video elsewhere) is not
+        given, since the player would fetch whatever it names."""
+        if item["kind"] == "video":
+            got = await self._api.messages.get_video_by_id(chat_id, msg_id, item["id"])
+        else:
+            got = await self._api.messages.get_file_by_id(chat_id, msg_id, item["id"])
+        return getattr(got, "url", None) if got else None
+
+    # the account
+    async def chat_invites(self, contacts_only):
+        """Who may add the account to chats, in MAX's privacy settings."""
+        from pymax.api.self.enums import PrivacyAccess
+        from pymax.api.self.payloads import PrivacySettingsUpdate
+
+        await self._api.account.change_profile_settings(PrivacySettingsUpdate(
+            chat_invites=PrivacyAccess.CONTACTS if contacts_only else PrivacyAccess.ALL))
+
+    async def log(self, events):
+        """Telemetry events (dicts shaped as PyMax's TelemetryEvent); dropped
+        while not connected."""
+        from pymax.protocol import Opcode
+        from pymax.telemetry.payloads import TelemetryEvent, TelemetryPayload
+
+        app = self.client._app if self.client else None
+        if not (app and app.started and app.me and app.connection.is_open):
+            return
+        payload = TelemetryPayload(events=[TelemetryEvent(**e) for e in events]).to_payload()
+        await app.invoke(Opcode.LOG, payload, timeout=app.config.request_timeout)
+
+
+class Backend:
+    """What the window asks of MAX, and what MAX tells it, on top of a link
+    (PyMaxLink, or tests/fake_link.py): the chat list and its summaries,
+    names, known people, the message cache and its gaps, pages, reactions,
+    the invites setting. It runs in its own thread with an asyncio loop;
+    the window calls it only through run(), and hears back through
+    GLib.idle_add. It is also the link's events object (on_qr, on_login,
+    on_message, on_reaction)."""
+
+    def __init__(self, ui, link=None):
+        self.ui = ui
+        self.link = link  # PyMaxLink unless given (tests)
+        self.loop = None
         self.me = None
         self.names = {}
         self.chats = {}
@@ -482,50 +654,38 @@ class Backend:
             fut.add_done_callback(back)
 
     async def _main(self):
-        from pymax import WebClient
-        from pymax.config import ExtraConfig
-
         os.makedirs(DATA, mode=0o700, exist_ok=True)
-        self.client = WebClient(session_name="web.db", work_dir=DATA,
-                                extra_config=ExtraConfig(telemetry=False, log_level="WARNING",
-                                                         reconnect_delay=3.0),
-                                qr_provider=self)
-        self.client.on_start()(self._started)
-        self.client.on_message()(self._message)
-        self.client.on_reaction_update()(self._reaction)
-        await self.client.start()
+        if self.link is None:
+            self.link = PyMaxLink(DATA)
+        await self.link.run(self)
 
-    # QrHandler for PyMax
-    async def show_qr(self, qr_url):
+    # --- the link's events ------------------------------------------------------
+    async def on_qr(self, qr_url):
         import qrcode
 
         path = os.path.join(DATA, "qr.png")
         qrcode.make(qr_url, box_size=12, border=2).save(path)
         GLib.idle_add(self.ui.show_qr, path)
 
-    async def _started(self, client):
+    async def on_login(self, me, chats, contacts, agent, session_id):
+        global AGENT
         try:
-            os.chmod(os.path.join(DATA, "web.db"), 0o600)
             os.remove(os.path.join(DATA, "qr.png"))
         except OSError:
             pass
-        self.me = client.me.contact.id if client.me else None
-        global AGENT
-        try:  # the browser PyMax presents itself as; media links want the same
-            self.agent = client._app.config.device.user_agent.header_user_agent
-        except AttributeError:
-            self.agent = None
-        if self.agent:
-            AGENT = self.agent
-        if self.me and client.me:
-            self.names[self.me] = user_name(client.me.contact)
+        self.me = me.id if me else None
+        self.agent = agent
+        if agent:
+            AGENT = agent
+        if me:
+            self.names[self.me] = user_name(me)
         # On a reconnect the sync only brings chats that changed since the
         # last one, so page through the whole list as well.
-        found = {c.id: c for c in client.chats or []}
+        found = {c.id: c for c in chats or []}
         marker = None
         for _page in range(5):
             try:
-                page = await client._app.api.chats.fetch_chats(marker)
+                page = await self.link.chats_page(marker)
             except Exception:
                 break
             fresh = [c for c in page if c.id not in found]
@@ -539,7 +699,7 @@ class Backend:
         # The contacts come whole on the first login, then only what changed:
         # keep them on disk. The first time, everyone already in a dialog
         # counts too, so that nobody known goes quiet after an update.
-        for u in client.contacts or []:
+        for u in contacts or []:
             if u:
                 self.known.add(u.id)
                 self.names.setdefault(u.id, user_name(u))
@@ -557,14 +717,34 @@ class Backend:
                 want.update(u for u in c.participants if u != self.me)
         await self.lookup(want)
         if self.me:
-            GLib.idle_add(self.ui.logged_in, self.me, client._app.config.device.client_session_id)
+            GLib.idle_add(self.ui.logged_in, self.me, session_id)
         GLib.idle_add(self.ui.show_chats, [self.summary(c) for c in chats])
 
+    async def on_message(self, msg):
+        await self.lookup({msg.sender})
+        known = msg.chat_id in self.chats  # a new chat comes with its count
+        chat = await self.chat(msg.chat_id) if msg.chat_id is not None else None
+        if chat is not None:
+            chat.last_message = msg
+            if msg.sender != self.me and known:
+                chat.new_messages = (chat.new_messages or 0) + 1
+        out = self.message(msg)
+        if msg.chat_id is not None:
+            cache_add(msg.chat_id, [out])
+        GLib.idle_add(self.ui.incoming, out, self.summary(chat) if chat is not None else None)
+
+    async def on_reaction(self, chat_id, msg_id, reactions):
+        """Someone's reaction changed; the event does not say whose, so the
+        account's own stays as it was known."""
+        cache_react(chat_id, msg_id, reactions)
+        GLib.idle_add(self.ui.reacted, chat_id, msg_id, reactions, ...)
+
+    # --- names, summaries, messages ---------------------------------------------
     async def lookup(self, ids):
         ids = [i for i in ids if i and i not in self.names]
         for k in range(0, len(ids), 50):
             try:
-                users = await self.client._app.api.users.get_users(ids[k:k + 50])
+                users = await self.link.users(ids[k:k + 50])
             except Exception:
                 continue
             for u in users or []:
@@ -643,13 +823,14 @@ class Backend:
         chat = self.chats.get(chat_id)
         if chat is None:
             try:
-                found = await self.client._app.api.chats.get_chats([chat_id])
+                found = await self.link.chats([chat_id])
             except Exception:
                 found = []
             if found:
                 chat = self.chats[chat_id] = found[0]
         return chat
 
+    # --- what the window asks -----------------------------------------------------
     async def history(self, chat_id):
         """The newest PAGE messages of a chat, and whether they leave a gap
         after the cache (more came meanwhile than a page): then the cache is
@@ -657,21 +838,22 @@ class Backend:
         chat = await self.chat(chat_id)
         if not chat:
             return [], False  # a dialog nobody has written to yet
-        # Nothing new since the cache: no request at all (new messages and
-        # reactions while running come as events).
+        # Nothing new since a full cache: no request at all (new messages
+        # and reactions while running come as events). A cache of a few
+        # messages (a chat that came by an event) is not full: asked for.
         cached = cache_read(chat_id)
         last = chat.last_message
-        if cached and last and not chat.new_messages and \
+        if len(cached) >= PAGE and last and not chat.new_messages and \
                 any(m["id"] == last.id for m in cached[-5:]):
             return [], False
-        msgs = await chat.history(backward=PAGE)
+        msgs = await self.link.history(chat_id, PAGE)
         if any(m.sender == self.me for m in msgs):
             self.remember(self.peer(chat))
         await self.lookup({m.sender for m in msgs})
         msgs.sort(key=lambda m: m.time)
         if msgs:
             try:
-                await self.client._app.api.messages.read_message(msgs[-1].id, chat_id)
+                await self.link.read(chat_id, msgs[-1].id)
                 chat.new_messages = 0
             except Exception:
                 pass
@@ -687,10 +869,9 @@ class Backend:
     async def older(self, chat_id, before):
         """PAGE messages older than the time before (ms), oldest first; not
         cached, the cache keeps only the newest."""
-        chat = await self.chat(chat_id)
-        if not chat:
+        if not await self.chat(chat_id):
             return []
-        msgs = await chat.history(from_time=before - 1, backward=PAGE, forward=0)
+        msgs = await self.link.history(chat_id, PAGE, before=before)
         await self.lookup({m.sender for m in msgs})
         msgs = sorted((m for m in msgs if m.time < before), key=lambda m: m.time)
         return [self.message(m) for m in msgs]
@@ -698,20 +879,13 @@ class Backend:
     async def media_url(self, chat_id, msg_id, item):
         """Where a video or a file of a message can be fetched (MAX hands
         out short-lived links on request)."""
-        api = self.client._app.api.messages
-        if item["kind"] == "video":
-            got = await api.get_video_by_id(chat_id, msg_id, item["id"])
-        else:
-            got = await api.get_file_by_id(chat_id, msg_id, item["id"])
-        # Only MAX's own link: an "external" one (a video elsewhere) is not
-        # followed, since the player would fetch whatever it names.
-        return getattr(got, "url", None) if got else None
+        return await self.link.media_url(chat_id, msg_id, item)
 
     async def send(self, chat_id, text):
         chat = self.chats.get(chat_id)
         # A dialog not started yet is numbered own id XOR theirs.
         self.remember(self.peer(chat) if chat else chat_id ^ self.me if self.me else None)
-        msg = await self.client._app.api.messages.send_message(chat_id, text)
+        msg = await self.link.send(chat_id, text)
         out = self.message(msg) if msg else None
         if out:
             cache_add(chat_id, [out])
@@ -719,28 +893,19 @@ class Backend:
 
     async def find_phone(self, phone):
         """The person with this phone number, if they are in MAX."""
-        user = await self.client._app.api.users.search_by_phone(phone)
+        user = await self.link.find_phone(phone)
         self.names[user.id] = user_name(user)
         return {"id": user.id, "name": self.name(user.id),
                 "chat": self.me ^ user.id if self.me else None}  # their dialog, as MAX numbers it
 
     async def add_contact(self, user_id):
-        user = await self.client._app.api.users.add_contact(user_id)
+        user = await self.link.add_contact(user_id)
         self.names[user.id] = user_name(user)
         self.remember(user.id)
 
     async def link_info(self, link):
         """The channel or group behind a link, before joining it."""
-        from pymax.api.chats.enums import ChatPayloadKey
-        from pymax.api.chats.payloads import LinkInfoPayload
-        from pymax.api.response import parse_payload_item_model
-        from pymax.protocol import Opcode
-        from pymax.types.domain import Chat
-
-        at = link.find("join/")  # invite links go as join/…, public ones whole
-        frame = LinkInfoPayload(link=link[at:] if at != -1 else link)
-        response = await self.client._app.invoke(Opcode.LINK_INFO, frame.to_payload())
-        chat = parse_payload_item_model(response, ChatPayloadKey.CHAT, Chat)
+        chat = await self.link.link_info(link)
         if chat is None:
             return None
         return {"id": chat.id, "title": chat.title or "Без названия", "type": kind(chat.type),
@@ -748,24 +913,23 @@ class Backend:
                 "joined": chat.id in self.chats}
 
     async def join(self, link):
-        chat = await self.client._app.api.chats.join_channel(link)  # groups too
+        chat = await self.link.join(link)
         self.chats[chat.id] = chat
         return self.summary(chat)
 
     async def remove(self, chat_id):
-        """Leave a channel or group, delete a dialog: for this account only,
-        never for the others in it."""
-        api = self.client._app.api.chats
+        """Leave a channel or group, delete a dialog: for this account only
+        (the link can do no other)."""
         chat = self.chats.get(chat_id)
         stamp = chat.last_event_time if chat else None
         if chat is not None and kind(chat.type) in ("CHAT", "CHANNEL"):
-            await api.leave_group(chat_id)
+            await self.link.leave(chat_id)
             try:  # and its messages off the list, as the app does
-                await api.delete_chat(chat_id, last_event_time=stamp, for_all=False)
+                await self.link.delete(chat_id, stamp)
             except Exception:
                 pass
         else:
-            await api.delete_chat(chat_id, last_event_time=stamp, for_all=False)
+            await self.link.delete(chat_id, stamp)
         self.chats.pop(chat_id, None)
         cache_drop(chat_id)
 
@@ -774,41 +938,25 @@ class Backend:
         the contacts or anyone. Sent when switched here; at login only if
         MAX has not taken the switch's value from here yet (the first time,
         or after a failure), so a change made on the phone stays."""
-        from pymax.api.self.enums import PrivacyAccess
-        from pymax.api.self.payloads import PrivacySettingsUpdate
-
         if not self.me:
             return  # not logged in: the login sends it
         want = "CONTACTS" if contacts else "ALL"
         sent = load_json(SENT, {})
         if not changed and sent.get(str(self.me)) == want:
             return
-        await self.client._app.api.account.change_profile_settings(
-            PrivacySettingsUpdate(chat_invites=PrivacyAccess(want)))
+        await self.link.chat_invites(contacts)
         sent[str(self.me)] = want
         save_json(SENT, sent)
 
     async def react(self, chat_id, msg_id, emoji):
         """Put the account's reaction on a message (None takes it off);
         (reactions, own emoji) as MAX has them afterwards, or None."""
-        api = self.client._app.api.messages
-        if emoji:
-            info = await api.add_reaction(chat_id, msg_id, emoji)
-        else:
-            info = await api.remove_reaction(chat_id, msg_id)
+        info = await self.link.react(chat_id, msg_id, emoji)
         if info is None:
             return None  # taken, but MAX sent no counts: the window counts itself
         reactions, _ = reactions_of(info)
         cache_react(chat_id, msg_id, reactions, emoji)
         return reactions, emoji
-
-    async def _reaction(self, event, _client):
-        """Someone's reaction changed; the event does not say whose, so the
-        account's own stays as it was known."""
-        reactions = [[c.reaction, c.count] for c in event.counters or [] if c.count]
-        msg_id = int(event.message_id)
-        cache_react(event.chat_id, msg_id, reactions)
-        GLib.idle_add(self.ui.reacted, event.chat_id, msg_id, reactions, ...)
 
     async def rename(self, user_id, name):
         """Call someone by another name here (empty: by theirs in MAX again);
@@ -822,31 +970,12 @@ class Backend:
         return [self.summary(c) for c in self.chats.values() if self.peer(c) == user_id]
 
     async def read(self, chat_id, msg_id):
-        await self.client._app.api.messages.read_message(msg_id, chat_id)
+        await self.link.read(chat_id, msg_id)
 
     async def log(self, events):
         """Telemetry events (dicts shaped as PyMax's TelemetryEvent) to MAX."""
-        from pymax.protocol import Opcode
-        from pymax.telemetry.payloads import TelemetryEvent, TelemetryPayload
-
-        app = self.client._app
-        if not (app.started and app.me and app.connection.is_open):
-            return
-        payload = TelemetryPayload(events=[TelemetryEvent(**e) for e in events]).to_payload()
-        await app.invoke(Opcode.LOG, payload, timeout=app.config.request_timeout)
-
-    async def _message(self, msg, _client):
-        await self.lookup({msg.sender})
-        known = msg.chat_id in self.chats  # a new chat comes with its count
-        chat = await self.chat(msg.chat_id) if msg.chat_id is not None else None
-        if chat is not None:
-            chat.last_message = msg
-            if msg.sender != self.me and known:
-                chat.new_messages = (chat.new_messages or 0) + 1
-        out = self.message(msg)
-        if msg.chat_id is not None:
-            cache_add(msg.chat_id, [out])
-        GLib.idle_add(self.ui.incoming, out, self.summary(chat) if chat is not None else None)
+        if self.link is not None:
+            await self.link.log(events)
 
 
 _cache_lock = threading.Lock()
@@ -1318,6 +1447,9 @@ class ChatView:
                 self.reacted(m["id"], m["reactions"], m["yours"])
         if self.shown:
             self.pending_new.extend(new)  # a few newer ones: at the bottom
+            # and older ones than any built (the cache had only the last few)
+            self._queue_older([m for m in msgs if m["id"] not in self.shown and
+                               m["time"] < latest and m not in new])
         else:
             for m in new[-FIRST:]:
                 self._append(m)
@@ -1682,11 +1814,11 @@ class ChatView:
 
 # --- the window -------------------------------------------------------------
 class Max(Gtk.Application):
-    def __init__(self):
+    def __init__(self, link=None):
         super().__init__(application_id="b8k.Max")
         self.win = None
         self.buzz = buzzer()
-        self.backend = Backend(self)
+        self.backend = Backend(self, link)  # link: PyMaxLink unless given (tests, demo)
         self.telemetry = Telemetry(self.backend)
         self.came_from = "chats"  # the page the settings go back to
         self.buzz_new = load_setting("buzz")  # buzz on a new message

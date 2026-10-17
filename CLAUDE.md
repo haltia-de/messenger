@@ -9,8 +9,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 B8000-H, Alpine). The whole program is one Python 3 script, `b8k-max` (no `.py` extension). It
 was split out of the lenovo-b8000h-linux repo; that repo's image build installs it from here by tag.
 
-There is no build step, test suite or linter config. GPL-2.0; every source file starts with an
-`SPDX-License-Identifier: GPL-2.0` line.
+There is no build step or linter config; the tests are in `tests/` (see Tests). GPL-2.0; every
+source file starts with an `SPDX-License-Identifier: GPL-2.0` line.
 
 ## Commands
 
@@ -20,6 +20,9 @@ sh install.sh /mnt/root  # install into another root, e.g. while building an ima
 b8k-max                  # run with a window
 b8k-max --background     # start hidden (what b8k-launcher does at session start)
 python3 -m py_compile b8k-max   # quick syntax check
+sh tests/run.sh                 # all tests (needs broadwayd and network once, for the venv)
+sh tests/run.sh test_backend.py # one of them
+.cache/venv/bin/python tests/demo.py   # the window on made-up chats, no account
 ```
 
 Runtime deps (Alpine): `apk add python3 py3-gobject3 gtk+3.0` (optional: `py3-mpv mpv-libs` for voice
@@ -32,20 +35,28 @@ it from the checkout still needs PyMax installed there.
 
 ## Architecture
 
-- **Two threads.** `Backend` runs PyMax's `WebClient` (MAX's web protocol over a WebSocket, no
-  web engine) in its own thread with its own asyncio loop. The GTK side calls into it only through
-  `Backend.run(coro, done)`; results and events come back to GTK only via `GLib.idle_add`. Keep
-  this rule: never touch GTK widgets from the MAX thread, never await PyMax from the GTK thread.
-  Some calls reach into PyMax internals (`client._app.api.chats.fetch_chats`, `...users.get_users`),
-  so a PyMax upgrade can break them.
-- **Login.** `Backend` is PyMax's QR provider (`show_qr`): the first start renders a QR code to
-  scan with MAX on a phone. The session lives in `~/.local/share/b8k-max/web.db` (chmod 600).
+- **Two threads.** `Backend` runs in its own thread with its own asyncio loop. The GTK side calls
+  into it only through `Backend.run(coro, done)`; results and events come back to GTK only via
+  `GLib.idle_add`. Keep this rule: never touch GTK widgets from the MAX thread, never await the
+  link from the GTK thread.
+- **The link to MAX** (`PyMaxLink`, CONTEXT.md «Связь с MAX»). Every request to MAX and every
+  event from it goes through one link object: `run(events)`, `chats_page`, `chats`, `users`,
+  `history`, `read`, `send`, `find_phone`, `add_contact`, `link_info`, `join`, `leave`, `delete`
+  (only for this account: it cannot delete for all), `react`, `media_url`, `chat_invites`, `log`.
+  It hands out PyMax's own objects (`Chat`, `Message`, `User`, `ReactionInfo`) and keeps PyMax's
+  internals (`client._app`, raw opcodes `LINK_INFO`/`LOG`/`CONFIG`) to itself: Backend never
+  touches `client._app` or calls methods on PyMax objects. Events go to `Backend.on_qr`,
+  `on_login`, `on_message`, `on_reaction`. `tests/fake_link.py` is the second link (a small MAX
+  in memory); `Max(link=...)`/`Backend(ui, link)` take one. A PyMax upgrade is checked in
+  `PyMaxLink` only. Don't name a fake's attributes after link operations (`chats`, `users`).
+- **Login.** `PyMaxLink` is PyMax's QR provider; `Backend.on_qr` renders the QR code to scan with
+  MAX on a phone. The session lives in `~/.local/share/b8k-max/web.db` (chmod 600).
 - **Telemetry.** PyMax's own (a random simulation of browsing) stays off in `ExtraConfig`. The
   `Telemetry` class sends MAX-app-style events built from real UI actions instead: `NAV GO` on
   every screen change (`moved()`, driven by the stack page and window map/unmap), `PERF login`
   after each login, `PERF open_chat_to_render` with measured times. Event shapes and fixed values
   copy PyMax 2.4.1's `pymax/telemetry/payloads.py`; sent in batches via `Opcode.LOG` through
-  `Backend.log`. On by default, switched in the settings page (gear), stored in
+  `Backend.log` and the link. On by default, switched in the settings page (gear), stored in
   `~/.config/b8k/max.conf` (`[max] telemetry`; `buzz` there switches the buzz on new messages,
   not on button taps; `contacts_only` and `invites`, see below). Re-check the shapes when bumping PyMax.
 - **Search, join, delete.** The `find` page (magnifier on the list) reads its entry with
@@ -94,7 +105,8 @@ it from the checkout still needs PyMax installed there.
   creation (cached messages and `fetch_older`/`on_hold`/`on_media`/`on_react`). `Max` only keeps
   up to `VIEWS` of them, puts the open one's widget on the chat page and answers the callbacks.
   Keep chat-screen behaviour inside it, and test it through that interface (its widget tree).
-  `Backend.history` returns the newest `PAGE` and whether they leave a gap after the cache;
+  `Backend.history` returns the newest `PAGE` and whether they leave a gap after the cache
+  (no request at all when the cache holds a full page ending at the chat's last message);
   `older(chat, before)` returns the page before.
 - **Media.** `media_of` turns AUDIO/VIDEO/FILE attachments into `media` items. Voice plays in the
   bubble through `Sound` (libmpv, `video=False`; an `end-file` with reason ABORTED is a stop or a
@@ -140,3 +152,14 @@ it from the checkout still needs PyMax installed there.
 - This is an unofficial client (see the README's disclaimer): call it "a client for MAX", keep the
   icon free of MAX's logo or wordmark, and don't add bulk-sending, scraping or other automation
   features — MAX's terms (legal.max.ru/ps, 4.3.7, 4.3.10) forbid them and it blocks such clients.
+
+## Tests
+
+`sh tests/run.sh` makes `.cache/venv` once (system PyGObject plus the PyMax wheel `install.sh`
+pins), starts a `broadwayd` of its own and runs `tests/test_backend.py` (Backend on the fake
+link, no window) and `tests/test_window.py` (the real window and Backend on the fake link). They
+are plain scripts with `assert`s, printing «… ok» per part. Tests build MAX's state in
+`FakeLink` (people, dialogs, groups, channels, messages with attachments and reactions), drive
+the window as a person would, and check what it shows (widget trees: rows, `ChatView.widget`)
+and what was asked of MAX (`fake.asked(...)`), not private attributes. `B8K_SHOTS=dir` saves
+screenshots. `tests/demo.py` opens the window on made-up chats.
