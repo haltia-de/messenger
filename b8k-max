@@ -118,10 +118,11 @@ BUBBLES = 150  # a chat left keeps no more messages built than this
 # Photo URLs come inside messages, so any sender can choose them: fetch only
 # https from MAX's own CDN (i.oneme.ru), never the LAN, a file or a redirect
 # elsewhere.
-PHOTO_HOSTS = ("oneme.ru", "max.ru")
-# Voice messages, videos and files: MAX's hosts and the CDNs it serves them
-# from. A link anywhere else is not played or opened.
-MEDIA_HOSTS = PHOTO_HOSTS + ("okcdn.ru", "mycdn.me")
+# Photos, video previews, voice messages, videos and files: MAX's hosts and
+# the CDNs it serves them from (VK's). A link anywhere else is not fetched,
+# played or opened.
+MEDIA_HOSTS = ("oneme.ru", "max.ru", "okcdn.ru", "mycdn.me")
+AGENT = "Mozilla/5.0"  # replaced at login by the browser PyMax presents as
 PHOTO_DAYS = 30  # cached photos older than this are removed
 CHATS = os.path.join(PHOTOS, "chats")  # message cache, one file per chat
 KEEP = 80  # messages kept per chat on disk
@@ -137,6 +138,8 @@ MAIN_TAB = {"source_type": 5, "source_id": 1, "tab_config": 2}  # going to the c
 FLUSH_SEC = 3  # events go out in small batches, as the app sends them
 REACTIONS = ("👍", "❤️", "😂", "😮", "😢", "🔥")  # offered on a long press of a message
 PLAYER = "/usr/local/bin/b8k-vplay"  # the shell's video player; mpv if missing
+PLAYER_LOG = os.path.join(PHOTOS, "player.log")  # what the players said, for when one fails
+WEB = "https://web.max.ru"  # MAX's CDN gives media to its web client: we come as that
 MONTHS = "янв фев мар апр мая июн июл авг сен окт ноя дек".split()
 COLOURS = ((0.21, 0.52, 0.89), (0.15, 0.64, 0.41), (0.90, 0.38, 0.0), (0.57, 0.25, 0.67),
            (0.75, 0.11, 0.16), (0.10, 0.58, 0.62), (0.53, 0.36, 0.24))
@@ -442,6 +445,7 @@ class Backend:
         self.chats = {}
         self.seeded = os.path.exists(KNOWN)
         self.known = set(load_json(KNOWN, []))
+        self.agent = None  # PyMax's browser user agent, once logged in
         self.aliases = {int(k): v for k, v in load_json(ALIASES, {}).items()}
 
     def start(self):
@@ -498,6 +502,13 @@ class Backend:
         except OSError:
             pass
         self.me = client.me.contact.id if client.me else None
+        global AGENT
+        try:  # the browser PyMax presents itself as; media links want the same
+            self.agent = client._app.config.device.user_agent.header_user_agent
+        except AttributeError:
+            self.agent = None
+        if self.agent:
+            AGENT = self.agent
         if self.me and client.me:
             self.names[self.me] = user_name(client.me.contact)
         # On a reconnect the sync only brings chats that changed since the
@@ -1057,6 +1068,34 @@ def media_ok(url):
                                            for h in MEDIA_HOSTS)
 
 
+def log_open():
+    """The player log, mode 600, started anew past 256 KB; None if it can't be."""
+    try:
+        os.makedirs(PHOTOS, mode=0o700, exist_ok=True)
+        if os.path.getsize(PLAYER_LOG) > 256 * 1024:
+            os.remove(PLAYER_LOG)
+    except OSError:
+        pass
+    try:
+        fd = os.open(PLAYER_LOG, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        return os.fdopen(fd, "a", buffering=1)
+    except OSError:
+        return None
+
+
+def log_line(text):
+    fh = log_open()
+    if fh:
+        with fh:
+            fh.write("%s %s\n" % (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), text))
+
+
+def where(url):
+    """A link for the log: host and path, not the signature in its query."""
+    parts = urllib.parse.urlsplit(url or "")
+    return "%s%s" % (parts.hostname or "?", parts.path[:60])
+
+
 def secs(duration):
     """MAX gives durations in ms, some in seconds."""
     return duration / 1000 if duration > 1000 else duration
@@ -1078,14 +1117,23 @@ class Sound:
     """Voice messages and audio through libmpv, sound only, one at a time;
     progress comes back on the GTK side. None of it if libmpv is missing."""
 
-    def __init__(self):
+    def __init__(self, agent=None):
         self.mpv = None
         self.on_time = self.on_end = lambda *_a: None
         try:
             import mpv
             self.mpv = mpv.MPV(video=False, ytdl=False, load_unsafe_playlists=False,
-                               input_default_bindings=False, input_vo_keyboard=False)
-        except Exception:
+                               input_default_bindings=False, input_vo_keyboard=False,
+                               log_handler=lambda level, prefix, text: log_line(
+                                   "voice %s %s: %s" % (level, prefix, text.strip())),
+                               loglevel="warn")
+            if agent:
+                self.mpv["user-agent"] = agent
+            self.mpv["referrer"] = WEB + "/"
+            self.mpv["http-header-fields"] = "Origin: " + WEB
+        except Exception as exc:
+            log_line("voice: no libmpv (%r)" % exc)
+            self.mpv = None
             return
         self.mpv.observe_property(
             "time-pos", lambda _n, v: v is not None and GLib.idle_add(self.on_time, v))
@@ -1097,6 +1145,7 @@ class Sound:
                 GLib.idle_add(self.on_end)
 
     def play(self, url):
+        log_line("voice %s" % where(url))
         self.mpv.play(url)
         self.mpv.pause = False
 
@@ -1110,10 +1159,7 @@ class Sound:
 
 
 def photo_ok(url):
-    parts = urllib.parse.urlsplit(url or "")
-    host = (parts.hostname or "").lower()
-    return parts.scheme == "https" and any(host == h or host.endswith("." + h)
-                                           for h in PHOTO_HOSTS)
+    return media_ok(url)
 
 
 class PhotoRedirect(urllib.request.HTTPRedirectHandler):
@@ -1147,6 +1193,7 @@ def prune_photos():
 def load_photo(url, done):
     """Download one photo in a thread (cached by URL) and hand back a pixbuf."""
     if not photo_ok(url):
+        log_line("photo refused: %s" % where(url))
         return
     os.makedirs(PHOTOS, mode=0o700, exist_ok=True)
     path = os.path.join(PHOTOS, hashlib.sha1(url.encode()).hexdigest()[:20] + ".img")
@@ -1156,14 +1203,16 @@ def load_photo(url, done):
             if os.path.exists(path):
                 os.utime(path)  # in use: kept by prune_photos
             else:
-                req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+                req = urllib.request.Request(url, headers={
+                    "User-Agent": AGENT, "Referer": WEB + "/", "Origin": WEB})
                 with PHOTO_OPENER.open(req, timeout=20) as fh:
                     data = fh.read(8 * 1024 * 1024)
                 with open(path + ".new", "wb") as out:
                     out.write(data)
                 os.replace(path + ".new", path)
             pix = GdkPixbuf.Pixbuf.new_from_file_at_scale(path, 460, 460, True)
-        except Exception:
+        except Exception as exc:
+            log_line("photo %s: %r" % (where(url), exc))
             pix = None
         GLib.idle_add(lambda: done(pix) and False)
 
@@ -2170,11 +2219,11 @@ class Max(Gtk.Application):
             return box
         if item["kind"] == "video":
             box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
-            if photo_ok(item["thumb"]):
+            if item["thumb"]:
                 img = Gtk.Image.new_from_icon_name("video-x-generic", Gtk.IconSize.DIALOG)
                 img.set_size_request(460, 200)
                 box.pack_start(img, False, False, 0)
-                view.photos.append((img, item["thumb"]))
+                view.photos.append((img, item["thumb"]))  # load_photo checks the host
             sec = secs(item["duration"])
             b = Gtk.Button(label="▶  Видео %s" % mmss(sec) if sec else "▶  Видео")
             b.get_style_context().add_class("file")
@@ -2192,7 +2241,7 @@ class Max(Gtk.Application):
 
     def play_sound(self, item, play, bar, length):
         if self.sound is None:
-            self.sound = Sound()
+            self.sound = Sound(self.backend.agent)
             self.sound.on_time = self.sound_time
             self.sound.on_end = self.sound_end
         if self.sound.mpv is None or not media_ok(item["url"]):
@@ -2232,21 +2281,36 @@ class Max(Gtk.Application):
         def done(url, err):
             button.set_sensitive(True)
             if err or not media_ok(url):
+                log_line("%s %s: %s" % (item["kind"], "refused" if url else "no link",
+                                        repr(err) if err else where(url)))
                 self.sub.set_text("не удалось открыть")
                 return
             if item["kind"] == "video":
                 if self.playing:
                     self.sound.stop()
                     self.sound_end()
-                # No youtube-dl and no playlists: the link is played as it is.
-                cmd = ([PLAYER, "--title", self.title.get_text(), url, "ytdl=no",
-                        "load-unsafe-playlists=no"] if os.access(PLAYER, os.X_OK) else
-                       ["mpv", "--fs", "--ytdl=no", "--load-unsafe-playlists=no", "--", url])
+                # No youtube-dl and no playlists: the link is played as it is,
+                # asked for the way web.max.ru asks (MAX's CDN may want that).
+                opts = {"ytdl": "no", "load-unsafe-playlists": "no",
+                        "referrer": WEB + "/", "http-header-fields": "Origin: " + WEB}
+                if self.backend.agent:
+                    opts["user-agent"] = self.backend.agent
+                if os.access(PLAYER, os.X_OK):
+                    opts.update({"terminal": "yes", "msg-level": "all=warn"})  # libmpv: to the log
+                    cmd = [PLAYER, "--title", self.title.get_text(), url] + [
+                        "%s=%s" % kv for kv in opts.items()]
+                else:
+                    cmd = ["mpv", "--fs"] + ["--%s=%s" % kv for kv in opts.items()] + ["--", url]
+                log_line("video %s via %s" % (where(url), os.path.basename(cmd[0])))
+                out = log_open() or subprocess.DEVNULL
                 try:
-                    subprocess.Popen(cmd, start_new_session=True, stdout=subprocess.DEVNULL,
-                                     stderr=subprocess.DEVNULL)
+                    subprocess.Popen(cmd, start_new_session=True, stdin=subprocess.DEVNULL,
+                                     stdout=out, stderr=out)
                 except OSError:
                     self.sub.set_text("нет проигрывателя (b8k-vplay или mpv)")
+                finally:
+                    if out is not subprocess.DEVNULL:
+                        out.close()
             elif not (b8k_ui and b8k_ui.open_url(url)):
                 try:
                     Gtk.show_uri_on_window(self.win, url, Gdk.CURRENT_TIME)

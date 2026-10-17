@@ -93,9 +93,12 @@ it from the checkout still needs PyMax installed there.
   bubble through `Sound` (libmpv, `video=False`; an `end-file` with reason ABORTED is a stop or a
   switch, not an end). Video and files get a link from `Backend.media_url`
   (`get_video_by_id`/`get_file_by_id`), checked by `media_ok` (https on `MEDIA_HOSTS` only: MAX's hosts
-  and its CDNs `okcdn.ru`/`mycdn.me`), then `b8k-vplay`/`mpv --fs` with `ytdl=no` and
-  `load-unsafe-playlists=no`, or the browser. An `external` video link is never followed. This is
-  a security boundary like the photo one: links come inside messages; keep the host list tight. Thumbnails go through `photo_ok` like photos.
+  and its CDNs `okcdn.ru`/`mycdn.me`; `photo_ok` is the same check), then `b8k-vplay`/`mpv --fs`
+  with `ytdl=no` and `load-unsafe-playlists=no`, or the browser. An `external` video link is never
+  followed. This is a security boundary like the photo one: links come inside messages; keep the
+  host list tight. Photos, voice and video are asked for as web.max.ru asks (`AGENT`, PyMax's
+  browser user agent, set at login; `Referer`/`Origin` `WEB`). What fails goes to
+  `~/.cache/b8k-max/player.log` (600, host and path only; the players' own output too). Thumbnails go through `photo_ok` like photos.
 - **Reactions.** Message dicts carry `reactions` ([[emoji, count]]) and `yours`; a long press on a
   bubble (`Gtk.GestureLongPress`, kept on the event box) opens a popover of `REACTIONS`.
   `Backend.react` uses `messages.add_reaction`/`remove_reaction`; when MAX answers without counts
