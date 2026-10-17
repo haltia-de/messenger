@@ -47,7 +47,18 @@ unread count of dialogs and groups (channels left out) goes to
 $XDG_RUNTIME_DIR/b8k-badge/max, which b8k-launch shows on the button, and
 the panel is told at once (b8k_ui.badge, with the button's own signal). Chats open from a cache: the last
 messages of each chat on disk (~/.cache/b8k-max/chats, mode 600) and the
-last six chats kept built in memory; only newer messages are fetched.
+last six chats kept built in memory; a chat with nothing new since its
+cache opens without asking MAX at all. The list keeps its rows and redraws
+only a chat that changed. Photos are cached on disk and pruned when not
+shown for a month (daily, as the program runs for weeks).
+
+Reactions: a long press on a message offers six emoji; those on it show
+under it with their counts, the own one highlighted, a tap puts one on or
+takes the own off. Others' reactions arrive live.
+
+The person of a dialog can be renamed (the pencil): here only, kept in
+~/.local/share/b8k-max/names.json, since MAX's web protocol as PyMax has it
+offers no renaming of contacts.
 """
 import asyncio
 import configparser
@@ -99,11 +110,13 @@ KEEP = 80  # messages kept per chat on disk
 VIEWS = 6  # chats kept built in memory
 CONFIG = os.path.expanduser("~/.config/b8k/max.conf")
 KNOWN = os.path.join(DATA, "known.json")  # people whose messages are shown (contacts_only)
+ALIASES = os.path.join(DATA, "names.json")  # user id -> the name given here
 SENT = os.path.join(DATA, "invites.json")  # account id -> chat-invites privacy set from here
 # MAX's screen numbers in its telemetry (pymax.telemetry.navigation).
 SCREEN_BACKGROUND, SCREEN_CHATS, SCREEN_SEARCH, SCREEN_CHAT, SCREEN_SETTINGS = 1, 150, 151, 350, 450
 MAIN_TAB = {"source_type": 5, "source_id": 1, "tab_config": 2}  # going to the chat list
 FLUSH_SEC = 3  # events go out in small batches, as the app sends them
+REACTIONS = ("👍", "❤️", "😂", "😮", "😢", "🔥")  # offered on a long press of a message
 MONTHS = "янв фев мар апр мая июн июл авг сен окт ноя дек".split()
 COLOURS = ((0.21, 0.52, 0.89), (0.15, 0.64, 0.41), (0.90, 0.38, 0.0), (0.57, 0.25, 0.67),
            (0.75, 0.11, 0.16), (0.10, 0.58, 0.62), (0.53, 0.36, 0.24))
@@ -200,6 +213,28 @@ button.danger {
 }
 button.danger label { color: #ffffff; }
 .confirm { background-color: #f6d5d1; padding: 16px 20px; }
+button.react {
+  background-image: none;
+  background-color: #e6e6e4;
+  border: 1px solid #dcdcda;
+  box-shadow: none;
+  border-radius: 18px;
+  min-height: 40px;
+  padding: 0 12px;
+  font-size: 21px;
+}
+button.react.yours { background-color: #99c1f1; border-color: #3584e4; }
+button.emoji {
+  background-image: none;
+  background-color: transparent;
+  border: none;
+  box-shadow: none;
+  border-radius: 16px;
+  min-width: 76px;
+  min-height: 76px;
+  font-size: 44px;
+}
+button.emoji.yours { background-color: #c4dcf7; }
 """
 
 # --- small helpers ----------------------------------------------------------
@@ -286,6 +321,14 @@ def link_of(text):
     return "https://max.ru/" + m.group(1).strip("/") if m else None
 
 
+def reactions_of(info):
+    """[[emoji, count], ...] and the account's own emoji, from a ReactionInfo."""
+    if not info:
+        return [], None
+    return ([[c.reaction, c.count] for c in info.counters or [] if c.count],
+            info.your_reaction)
+
+
 def user_name(user):
     for n in getattr(user, "names", None) or []:
         full = getattr(n, "name", None) or " ".join(
@@ -317,7 +360,9 @@ class Backend:
         self.me = None
         self.names = {}
         self.chats = {}
-        self.known, self.seeded = load_known()
+        self.seeded = os.path.exists(KNOWN)
+        self.known = set(load_json(KNOWN, []))
+        self.aliases = {int(k): v for k, v in load_json(ALIASES, {}).items()}
 
     def start(self):
         threading.Thread(target=self._thread, daemon=True).start()
@@ -355,6 +400,7 @@ class Backend:
                                 qr_provider=self)
         self.client.on_start()(self._started)
         self.client.on_message()(self._message)
+        self.client.on_reaction_update()(self._reaction)
         await self.client.start()
 
     # QrHandler for PyMax
@@ -401,7 +447,7 @@ class Backend:
         if not self.seeded:
             self.known.update(p for p in map(self.peer, chats) if p)
             self.seeded = True
-        save_known(self.known)
+        save_json(KNOWN, sorted(self.known))
         try:
             await self.set_invites(load_setting("invites"), changed=False)
         except Exception:
@@ -437,7 +483,11 @@ class Backend:
         """Someone whose messages are welcome: a contact, or written to here."""
         if user_id and user_id != self.me and user_id not in self.known:
             self.known.add(user_id)
-            save_known(self.known)
+            save_json(KNOWN, sorted(self.known))
+
+    def name(self, user_id, default=""):
+        """The name given here, else the one in MAX."""
+        return self.aliases.get(user_id) or self.names.get(user_id, default)
 
     def title(self, chat):
         if chat.title:
@@ -446,7 +496,7 @@ class Backend:
             others = [u for u in chat.participants if u != self.me]
             if not others:
                 return "Избранное"
-            return self.names.get(others[0], "Собеседник")
+            return self.name(others[0], "Собеседник")
         return "Чат"
 
     def preview(self, msg):
@@ -479,9 +529,11 @@ class Backend:
         body = msg.text or ""
         if texts:
             body = (body + "\n" if body else "") + " ".join(texts)
+        reactions, yours = reactions_of(msg.reaction_info)
         return {"id": msg.id, "chat": msg.chat_id, "sender": msg.sender,
-                "who": self.names.get(msg.sender, ""), "text": body, "photos": photos,
-                "time": msg.time, "mine": bool(self.me) and msg.sender == self.me}
+                "who": self.name(msg.sender), "text": body, "photos": photos,
+                "time": msg.time, "mine": bool(self.me) and msg.sender == self.me,
+                "reactions": reactions, "yours": yours}
 
     async def chat(self, chat_id):
         """The chat, from the list or asked for (one just joined, a new
@@ -500,6 +552,13 @@ class Backend:
         chat = await self.chat(chat_id)
         if not chat:
             return []  # a dialog nobody has written to yet
+        # Nothing new since the cache: no request at all (new messages and
+        # reactions while running come as events).
+        cached = cache_read(chat_id)
+        last = chat.last_message
+        if cached and last and not chat.new_messages and \
+                any(m["id"] == last.id for m in cached[-5:]):
+            return []
         msgs = await chat.history(backward=HISTORY)
         if any(m.sender == self.me for m in msgs):
             self.remember(self.peer(chat))
@@ -529,7 +588,7 @@ class Backend:
         """The person with this phone number, if they are in MAX."""
         user = await self.client._app.api.users.search_by_phone(phone)
         self.names[user.id] = user_name(user)
-        return {"id": user.id, "name": self.names[user.id],
+        return {"id": user.id, "name": self.name(user.id),
                 "chat": self.me ^ user.id if self.me else None}  # their dialog, as MAX numbers it
 
     async def add_contact(self, user_id):
@@ -588,13 +647,46 @@ class Backend:
         if not self.me:
             return  # not logged in: the login sends it
         want = "CONTACTS" if contacts else "ALL"
-        sent = load_sent()
+        sent = load_json(SENT, {})
         if not changed and sent.get(str(self.me)) == want:
             return
         await self.client._app.api.account.change_profile_settings(
             PrivacySettingsUpdate(chat_invites=PrivacyAccess(want)))
         sent[str(self.me)] = want
-        save_sent(sent)
+        save_json(SENT, sent)
+
+    async def react(self, chat_id, msg_id, emoji):
+        """Put the account's reaction on a message (None takes it off);
+        (reactions, own emoji) as MAX has them afterwards, or None."""
+        api = self.client._app.api.messages
+        if emoji:
+            info = await api.add_reaction(chat_id, msg_id, emoji)
+        else:
+            info = await api.remove_reaction(chat_id, msg_id)
+        if info is None:
+            return None  # taken, but MAX sent no counts: the window counts itself
+        reactions, _ = reactions_of(info)
+        cache_react(chat_id, msg_id, reactions, emoji)
+        return reactions, emoji
+
+    async def _reaction(self, event, _client):
+        """Someone's reaction changed; the event does not say whose, so the
+        account's own stays as it was known."""
+        reactions = [[c.reaction, c.count] for c in event.counters or [] if c.count]
+        msg_id = int(event.message_id)
+        cache_react(event.chat_id, msg_id, reactions)
+        GLib.idle_add(self.ui.reacted, event.chat_id, msg_id, reactions, ...)
+
+    async def rename(self, user_id, name):
+        """Call someone by another name here (empty: by theirs in MAX again);
+        MAX itself keeps no such names for its web client. The summaries of
+        their dialogs come back renamed."""
+        if name:
+            self.aliases[user_id] = name
+        else:
+            self.aliases.pop(user_id, None)
+        save_json(ALIASES, {str(k): v for k, v in self.aliases.items()})
+        return [self.summary(c) for c in self.chats.values() if self.peer(c) == user_id]
 
     async def read(self, chat_id, msg_id):
         await self.client._app.api.messages.read_message(msg_id, chat_id)
@@ -655,6 +747,28 @@ def cache_add(chat_id, msgs):
             pass
 
 
+def cache_react(chat_id, msg_id, reactions, yours=...):
+    """New reactions of one cached message (yours left alone if not given)."""
+    with _cache_lock:
+        msgs = cache_read(chat_id)
+        for m in msgs:
+            if m["id"] == msg_id:
+                m["reactions"] = reactions
+                if yours is not ...:
+                    m["yours"] = yours
+                break
+        else:
+            return
+        try:
+            path = os.path.join(CHATS, "%d.json" % chat_id)
+            fd = os.open(path + ".new", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w") as fh:
+                json.dump(msgs, fh, ensure_ascii=False)
+            os.replace(path + ".new", path)
+        except OSError:
+            pass
+
+
 def cache_drop(chat_id):
     with _cache_lock:
         try:
@@ -663,42 +777,24 @@ def cache_drop(chat_id):
             pass
 
 
-def load_known():
-    """(ids of the people whose messages are shown, whether the file was there)."""
+def load_json(path, default):
+    """A small state file of DATA, or default if missing or broken."""
     try:
-        with open(KNOWN) as fh:
-            return set(json.load(fh)), True
-    except (OSError, ValueError, TypeError):
-        return set(), False
-
-
-def save_known(known):
-    try:
-        os.makedirs(DATA, mode=0o700, exist_ok=True)
-        fd = os.open(KNOWN + ".new", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, "w") as fh:
-            json.dump(sorted(known), fh)
-        os.replace(KNOWN + ".new", KNOWN)
-    except OSError:
-        pass
-
-
-def load_sent():
-    try:
-        with open(SENT) as fh:
-            sent = json.load(fh)
-        return sent if isinstance(sent, dict) else {}
+        with open(path) as fh:
+            data = json.load(fh)
+        return data if isinstance(data, type(default)) else default
     except (OSError, ValueError):
-        return {}
+        return default
 
 
-def save_sent(sent):
+def save_json(path, data):
+    """Written whole and atomically, mode 600 (it names people)."""
     try:
-        os.makedirs(DATA, mode=0o700, exist_ok=True)
-        fd = os.open(SENT + ".new", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
+        fd = os.open(path + ".new", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "w") as fh:
-            json.dump(sent, fh)
-        os.replace(SENT + ".new", SENT)
+            json.dump(data, fh, ensure_ascii=False)
+        os.replace(path + ".new", path)
     except OSError:
         pass
 
@@ -855,14 +951,21 @@ PHOTO_OPENER = urllib.request.build_opener(PhotoRedirect)
 
 
 def prune_photos():
+    """Photos not shown for PHOTO_DAYS go (each one shown is touched)."""
     limit = time.time() - PHOTO_DAYS * 86400
     try:
-        for name in os.listdir(PHOTOS):
-            path = os.path.join(PHOTOS, name)
+        names = os.listdir(PHOTOS)
+    except OSError:
+        return
+    for name in names:
+        if not name.endswith(".img"):
+            continue  # the chats directory, a half-written .new
+        path = os.path.join(PHOTOS, name)
+        try:
             if os.path.getmtime(path) < limit:
                 os.remove(path)
-    except OSError:
-        pass
+        except OSError:
+            continue
 
 
 def load_photo(url, done):
@@ -874,7 +977,9 @@ def load_photo(url, done):
 
     def work():
         try:
-            if not os.path.exists(path):
+            if os.path.exists(path):
+                os.utime(path)  # in use: kept by prune_photos
+            else:
                 req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
                 with PHOTO_OPENER.open(req, timeout=20) as fh:
                     data = fh.read(8 * 1024 * 1024)
@@ -950,6 +1055,11 @@ class Max(Gtk.Application):
         self.trash.connect("clicked", lambda _b: self.ask_remove())
         self.trash.set_no_show_all(True)
         bar.pack_end(self.trash)
+        self.pencil = Gtk.Button.new_from_icon_name("document-edit-symbolic", Gtk.IconSize.DIALOG)
+        self.pencil.get_style_context().add_class("gear")
+        self.pencil.connect("clicked", lambda _b: self.ask_rename())
+        self.pencil.set_no_show_all(True)
+        bar.pack_end(self.pencil)
         self.win.set_titlebar(bar)
         self.win.connect("map", lambda _w: self.moved())
         self.win.connect("unmap", lambda _w: self.telemetry.go(SCREEN_BACKGROUND))
@@ -974,6 +1084,9 @@ class Max(Gtk.Application):
         self.list = Gtk.ListBox()
         self.list.set_selection_mode(Gtk.SelectionMode.NONE)
         self.list.connect("row-activated", self.on_row)
+        self.list.set_sort_func(lambda a, b: (b.summary["time"] or 0) - (a.summary["time"] or 0))
+        self.list.set_filter_func(lambda row: not self.hidden(row.summary))
+        self.rows = {}  # chat id -> its row, kept between updates
         scroll = Gtk.ScrolledWindow()
         scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
         scroll.set_kinetic_scrolling(True)
@@ -1001,6 +1114,30 @@ class Max(Gtk.Application):
         self.confirm_yes.show()
         no.show()
         chat.pack_start(self.confirm, False, False, 0)
+        # Renaming the person of a dialog, here only.
+        self.naming = Gtk.Box(spacing=12)
+        self.naming.get_style_context().add_class("inputbar")
+        self.name_entry = Gtk.Entry()
+        self.name_entry.get_style_context().add_class("input")
+        self.name_entry.connect("activate", lambda _e: self.rename())
+        save = Gtk.Button(label="Сохранить")
+        save.get_style_context().add_class("act")
+        save.set_can_focus(False)
+        save.set_focus_on_click(False)
+        save.set_valign(Gtk.Align.CENTER)
+        save.connect("clicked", lambda _b: self.rename())
+        cancel = Gtk.Button(label="Отмена")
+        cancel.get_style_context().add_class("plain")
+        cancel.set_can_focus(False)
+        cancel.set_valign(Gtk.Align.CENTER)
+        cancel.connect("clicked", lambda _b: self.naming.hide())
+        self.naming.pack_start(self.name_entry, True, True, 0)
+        self.naming.pack_start(save, False, False, 0)
+        self.naming.pack_start(cancel, False, False, 0)
+        self.naming.set_no_show_all(True)
+        for w in (self.name_entry, save, cancel):
+            w.show()
+        chat.pack_start(self.naming, False, False, 0)
         self.msg_scroll = Gtk.ScrolledWindow()
         self.msg_scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
         self.msg_scroll.set_kinetic_scrolling(True)
@@ -1108,6 +1245,9 @@ class Max(Gtk.Application):
         self.stack.set_visible_child_name("chats" if cached else "wait")
         self.page_changed()
         threading.Thread(target=prune_photos, daemon=True).start()
+        # The program lives for weeks in the background: prune daily too.
+        GLib.timeout_add_seconds(86400, lambda: threading.Thread(
+            target=prune_photos, daemon=True).start() or True)
         self.backend.start()
 
     # called from the MAX thread through idle_add
@@ -1168,14 +1308,27 @@ class Max(Gtk.Application):
 
     # the list
     def fill_list(self):
-        for child in self.list.get_children():
-            self.list.remove(child)
-        total = 0
+        """Bring the list in line with the summaries. Rows are kept and only
+        a chat that changed is redrawn: a new message used to rebuild every
+        row, slow on the tablet with a hundred chats."""
+        for chat_id in [i for i in self.rows if i not in self.summaries]:
+            self.rows.pop(chat_id).destroy()
+        for s in self.summaries.values():
+            row = self.rows.get(s["id"])
+            look = (s["title"], s["last"], s["time"], s["unread"])
+            if row is None:
+                row = self.rows[s["id"]] = self.chat_row(s)
+                self.list.add(row)
+                row.show_all()
+            elif row.look != look:
+                row.remove(row.get_child())
+                row.add(self.chat_row(s).steal())
+                row.show_all()
+            row.summary, row.look = s, look
+        self.list.invalidate_sort()
+        self.list.invalidate_filter()
         shown = [s for s in self.summaries.values() if not self.hidden(s)]
-        for s in sorted(shown, key=lambda s: -(s["time"] or 0)):
-            total += s["unread"]
-            self.list.add(self.chat_row(s))
-        self.list.show_all()
+        total = sum(s["unread"] for s in shown)
         if self.open_chat is None and self.stack.get_visible_child_name() == "chats":
             self.sub.set_text("непрочитанных: %d" % total if total else "")
         # The button counts people, not news: channels are left out.
@@ -1185,6 +1338,8 @@ class Max(Gtk.Application):
         """One chat of a list: initials, name, last message, time, unread."""
         row = Gtk.ListBoxRow()
         row.chat_id = s["id"]
+        row.summary, row.look = s, (s["title"], s["last"], s["time"], s["unread"])
+        row.steal = lambda: (row.remove(box), box)[1]  # the contents, for a kept row
         box = Gtk.Box(spacing=18)
         box.set_margin_start(16)
         box.set_margin_end(16)
@@ -1360,6 +1515,44 @@ class Max(Gtk.Application):
             self.action(buttons, "Подписаться" if channel else "Вступить", "act", join)
         self.found.show_all()
 
+    # renaming the person of a dialog
+    def can_rename(self, chat_id):
+        s = self.summaries.get(chat_id)
+        return bool(s and s.get("type") == "DIALOG" and s.get("peer"))
+
+    def ask_rename(self):
+        s = self.summaries.get(self.open_chat)
+        if not self.can_rename(self.open_chat):
+            return
+        self.confirm.hide()
+        self.name_entry.set_text(s["title"])
+        self.name_entry.set_placeholder_text("Пусто — имя из MAX")
+        self.naming.show()
+        self.name_entry.grab_focus()
+
+    def rename(self):
+        chat_id = self.open_chat
+        s = self.summaries.get(chat_id)
+        if not s or not s.get("peer"):
+            return
+        name = " ".join(self.name_entry.get_text().split())[:64]
+
+        def done(renamed, err):
+            if err:
+                self.sub.set_text("не удалось переименовать")
+                return
+            self.naming.hide()
+            for r in renamed or []:
+                if r["id"] in self.summaries:
+                    r["unread"] = self.summaries[r["id"]]["unread"]
+                self.summaries[r["id"]] = r
+            save_list(list(self.summaries.values()))
+            if self.open_chat == chat_id:
+                self.title.set_text(self.summaries[chat_id]["title"])
+            self.fill_list()
+
+        self.backend.run(self.backend.rename(s["peer"], name), done)
+
     # deleting a dialog, leaving a group or a channel
     def ask_remove(self):
         s = self.summaries.get(self.open_chat)
@@ -1370,6 +1563,7 @@ class Max(Gtk.Application):
             "CHAT": ("Выйти из группы «%s»? Её сообщения уйдут из списка.", "Выйти"),
         }.get(s["type"], ("Удалить переписку с «%s» у себя? У собеседника она останется.",
                           "Удалить"))
+        self.naming.hide()
         self.confirm_text.set_text(question % s["title"])
         self.confirm_yes.set_label(yes)
         self.confirm.show()
@@ -1465,8 +1659,10 @@ class Max(Gtk.Application):
         self.gear.set_visible(page in ("chats", "wait", "qr"))
         self.findb.set_visible(page == "chats")
         self.trash.set_visible(page == "chat" and self.open_chat in self.summaries)
+        self.pencil.set_visible(page == "chat" and self.can_rename(self.open_chat))
         if page != "chat":
             self.confirm.hide()
+            self.naming.hide()
         self.moved()
 
     def moved(self):
@@ -1501,6 +1697,7 @@ class Max(Gtk.Application):
             view.set_margin_bottom(12)
             view.chat_id = chat_id
             view.shown = set()
+            view.msgs = {}  # message id -> (its dict, the box of its reactions)
             view.last_day = None
             for m in cache_read(chat_id):
                 self.add_bubble(view, m)
@@ -1519,7 +1716,9 @@ class Max(Gtk.Application):
         s = self.about(chat_id)
         self.open_chat = chat_id
         self.confirm.hide()
+        self.naming.hide()
         self.trash.set_visible(chat_id in self.summaries)
+        self.pencil.set_visible(self.can_rename(chat_id))
         view = self.view_for(chat_id)
         if self.view is not view:
             if self.view is not None:
@@ -1544,6 +1743,8 @@ class Max(Gtk.Application):
             for m in msgs or []:
                 if m["id"] not in view.shown and m["time"] >= latest:
                     self.add_bubble(view, m)
+                elif m["id"] in view.msgs:  # reactions may have changed meanwhile
+                    self.reacted(chat_id, m["id"], m["reactions"], m["yours"])
             if self.open_chat == chat_id:
                 self.sub.set_text("")
 
@@ -1570,7 +1771,12 @@ class Max(Gtk.Application):
         bubble = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
         bubble.get_style_context().add_class("bubble")
         bubble.get_style_context().add_class("mine" if m["mine"] else "theirs")
-        bubble.set_halign(Gtk.Align.END if m["mine"] else Gtk.Align.START)
+        # A long press offers the reactions.
+        hold = Gtk.EventBox()
+        hold.set_halign(Gtk.Align.END if m["mine"] else Gtk.Align.START)
+        hold.add(bubble)
+        hold.press = Gtk.GestureLongPress.new(hold)
+        hold.press.connect("pressed", lambda _g, _x, _y: self.pick_reaction(view, m["id"], bubble))
         group = self.summaries.get(view.chat_id, {}).get("type") in ("CHAT", "CHANNEL")
         if group and not m["mine"] and m["who"]:
             bubble.pack_start(label(m["who"], "who"), False, False, 0)
@@ -1585,9 +1791,93 @@ class Max(Gtk.Application):
             text.set_max_width_chars(38)
             text.set_selectable(False)
             bubble.pack_start(text, False, False, 0)
+        reacts = Gtk.Box(spacing=6)
+        bubble.pack_start(reacts, False, False, 0)
+        view.msgs[m["id"]] = (m, reacts)
+        self.fill_reactions(view, m["id"])
         bubble.pack_start(label(when(m["time"], full=True), "when", xalign=1.0), False, False, 0)
-        view.pack_start(bubble, False, False, 0)
-        bubble.show_all()
+        view.pack_start(hold, False, False, 0)
+        hold.show_all()
+
+    # reactions
+    def fill_reactions(self, view, msg_id):
+        """The reactions under a message: emoji and count, the account's own
+        highlighted; a tap puts that one on, or takes the own one off."""
+        m, box = view.msgs[msg_id]
+        for child in box.get_children():
+            child.destroy()
+        for emoji, count in m.get("reactions") or []:
+            b = Gtk.Button(label="%s %d" % (emoji, count))
+            b.get_style_context().add_class("react")
+            yours = emoji == m.get("yours")
+            if yours:
+                b.get_style_context().add_class("yours")
+            b.set_can_focus(False)
+            b.connect("clicked", lambda _b, e=None if yours else emoji:
+                      self.react(view.chat_id, msg_id, e))
+            box.pack_start(b, False, False, 0)
+        box.show_all()
+
+    def pick_reaction(self, view, msg_id, bubble):
+        if msg_id not in view.msgs:
+            return
+        self.buzz()
+        yours = view.msgs[msg_id][0].get("yours")
+        pop = Gtk.Popover.new(bubble)
+        row = Gtk.Box(spacing=4)
+        row.set_margin_start(6)
+        row.set_margin_end(6)
+        row.set_margin_top(6)
+        row.set_margin_bottom(6)
+        for emoji in REACTIONS:
+            b = Gtk.Button(label=emoji)
+            b.get_style_context().add_class("emoji")
+            if emoji == yours:
+                b.get_style_context().add_class("yours")  # a tap takes it off
+            b.set_can_focus(False)
+            b.connect("clicked", lambda _b, e=emoji: (
+                pop.popdown(), self.react(view.chat_id, msg_id, None if e == yours else e)))
+            row.pack_start(b, False, False, 0)
+        pop.add(row)
+        pop.connect("closed", lambda p: GLib.idle_add(p.destroy))
+        row.show_all()
+        pop.popup()
+
+    def react(self, chat_id, msg_id, emoji):
+        """Put the account's reaction (None: take it off), then show what
+        MAX says, or count it here if MAX sent no counts."""
+        def done(res, err):
+            if err:
+                if self.open_chat == chat_id:
+                    self.sub.set_text("реакция не отправлена, попробуйте ещё раз")
+                return
+            if res is None:
+                view = self.views.get(chat_id)
+                if not view or msg_id not in view.msgs:
+                    return
+                m = view.msgs[msg_id][0]
+                counts = dict(m.get("reactions") or [])
+                if m.get("yours") in counts:
+                    counts[m["yours"]] -= 1
+                if emoji:
+                    counts[emoji] = counts.get(emoji, 0) + 1
+                res = [[e, n] for e, n in counts.items() if n > 0], emoji
+                cache_react(chat_id, msg_id, *res)
+            self.reacted(chat_id, msg_id, *res)
+
+        self.backend.run(self.backend.react(chat_id, msg_id, emoji), done)
+
+    def reacted(self, chat_id, msg_id, reactions, yours):
+        """New reactions of a message (yours: ... when not known to change)."""
+        view = self.views.get(chat_id)
+        if view and msg_id in view.msgs:
+            m = view.msgs[msg_id][0]
+            if m.get("reactions") != reactions or yours is not ... and m.get("yours") != yours:
+                m["reactions"] = reactions
+                if yours is not ...:
+                    m["yours"] = yours
+                self.fill_reactions(view, msg_id)
+        return False
 
     def keep_bottom(self, adj):
         if self.at_bottom:

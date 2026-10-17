@@ -69,9 +69,20 @@ it from the checkout still needs PyMax installed there.
   launch just activates the first process over D-Bus. Closing the window hides it. With
   `--background` the window is not shown at start.
 - **Caches.** `~/.cache/b8k-max/chats/<id>.json` keeps the last `KEEP` messages per chat and
-  `list.json` the chat list (all mode 600, written atomically via `.new` + `os.replace`); only newer
-  messages are fetched when a chat opens. The last `VIEWS` chat views stay built in memory. Photos
-  are cached in `~/.cache/b8k-max/` by URL hash and pruned after `PHOTO_DAYS`.
+  `list.json` the chat list (all mode 600, written atomically via `.new` + `os.replace`). A chat whose
+  `last_message` is already cached and has no unread opens with no history request at all; else
+  the last `HISTORY` are fetched. The last `VIEWS` chat views stay built in memory. The chat list
+  keeps one row per chat (`Max.rows`, sorted and filtered by GTK) and `fill_list` redraws only rows
+  whose look changed — don't go back to rebuilding it (≈30× slower per message). Photos are cached
+  in `~/.cache/b8k-max/` by URL hash, touched when shown, pruned after `PHOTO_DAYS` unshown (at
+  start and daily). Small state files in `DATA` go through `load_json`/`save_json` (600, atomic).
+- **Reactions.** Message dicts carry `reactions` ([[emoji, count]]) and `yours`; a long press on a
+  bubble (`Gtk.GestureLongPress`, kept on the event box) opens a popover of `REACTIONS`.
+  `Backend.react` uses `messages.add_reaction`/`remove_reaction`; when MAX answers without counts
+  the window counts itself. `on_reaction_update` events carry no own reaction, so `reacted(..., ...)`
+  (Ellipsis) leaves `yours` alone. Emoji need `font-noto-emoji` (in the tablet image).
+- **Renaming** a dialog's person is local (`ALIASES`, `names.json`): PyMax's contact actions are only
+  ADD/REMOVE. `Backend.name()` prefers the alias; don't invent a server request for it.
 - **Photo fetch is a security boundary.** Photo URLs arrive inside messages (sender-controlled), so
   `photo_ok` allows only `https` on `oneme.ru`/`max.ru` hosts, and `PhotoRedirect` refuses
   redirects off those hosts. Preserve both checks when touching photo loading.
