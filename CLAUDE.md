@@ -68,7 +68,7 @@ it from the checkout still needs PyMax installed there.
   is deleted, a group or channel left, always `for_all=False` — never for the others in it.
   A message from a chat not in the list fetches it (`Backend.chat`).
 - **Contacts only.** MAX has no "who may write to me" setting, so `contacts_only` (on by default)
-  is a filter here: summaries carry `peer` and `stranger`, and `Max.hidden()` keeps strangers'
+  is a filter here: summaries carry `peer` and `stranger`, and `ChatList.hidden()` keeps strangers'
   dialogs off the list, the local search, the badge and the buzz. `Backend.known` (persisted to
   `~/.local/share/b8k-max/known.json`, 600) holds login contacts, contacts added here, people
   written to here (`remember`), and on the very first run every existing dialog's peer — the
@@ -88,12 +88,17 @@ it from the checkout still needs PyMax installed there.
   whose look changed — don't go back to rebuilding it (≈30× slower per message). Photos are cached
   in `~/.cache/b8k-max/` by URL hash, touched when shown, pruned after `PHOTO_DAYS` unshown (at
   start and daily). Small state files in `DATA` go through `load_json`/`save_json` (600, atomic).
-- **Tabs, pins, notifications.** The list's filter func shows one tab (`Max.tab`: chats or
-  channels); its sort func puts `pinned` first, in pin order. Notifications (buzz, badge) are per
-  chat: `is_muted` is true for channels unless in `unmuted`, for others if in `muted`. All kept in
-  `PREFS` (`chats.json`), locally — PyMax has no pin/mute request (`CHAT_PERSONAL_CONFIG` is bare).
-  A long press on the list (`row_menu`, one gesture on the ListBox, `get_row_at_y`) opens the menu;
-  `held` stops the release from opening the chat. `look()` must include whatever a row shows.
+- **Chat list** (`ChatList`, CONTEXT.md «Список чатов»; no GTK). Owns the summaries, dialogs from
+  the search not written to yet (`start_dialog`/`wrote`), pins and per-chat notifications (`PREFS`,
+  `chats.json`; local — PyMax has no pin/mute request, `CHAT_PERSONAL_CONFIG` is bare), the
+  `contacts_only` value, and the last list (`LIST`, `list.json`, shown at once on the next start).
+  It answers `entries(tab)` (ordered `(summary, pinned, quiet)`: pinned first in pin order, then the
+  newest; strangers hidden), `counts()` (per tab, and `loud` for the subtitle and the panel's
+  button), `loud(chat)` (buzz?), `hidden`, `find`, `get`, `listed`. Channels are quiet unless
+  switched on, others loud unless switched off. Keep these rules there; `Max` only draws them: one
+  kept row per chat, redrawn when its `look(entry)` changes, ordered and filtered by `positions` from
+  `entries(Max.tab)`. A long press on the list (`row_menu`, one gesture on the ListBox,
+  `get_row_at_y`) opens the pin/notification menu; `held` stops the release from opening the chat.
 - **Chat view** (`ChatView`, see `CONTEXT.md`). One chat on screen is one deep module: its own
   ScrolledWindow (`.widget`), the bubbles, day labels, reactions and media controls, the build
   queue (`FIRST` at once, then `STEP` per idle, nothing above while the reader scrolled within
@@ -156,10 +161,11 @@ it from the checkout still needs PyMax installed there.
 ## Tests
 
 `sh tests/run.sh` makes `.cache/venv` once (system PyGObject plus the PyMax wheel `install.sh`
-pins), starts a `broadwayd` of its own and runs `tests/test_backend.py` (Backend on the fake
-link, no window) and `tests/test_window.py` (the real window and Backend on the fake link). They
-are plain scripts with `assert`s, printing «… ok» per part. Tests build MAX's state in
-`FakeLink` (people, dialogs, groups, channels, messages with attachments and reactions), drive
-the window as a person would, and check what it shows (widget trees: rows, `ChatView.widget`)
-and what was asked of MAX (`fake.asked(...)`), not private attributes. `B8K_SHOTS=dir` saves
-screenshots. `tests/demo.py` opens the window on made-up chats.
+pins), starts a `broadwayd` of its own and runs three plain scripts with `assert`s, each printing
+«… ok» per part: `tests/test_chatlist.py` (the chat list's rules: no MAX, no window),
+`tests/test_backend.py` (Backend on the fake link, no window) and `tests/test_window.py` (the real
+window and Backend on the fake link). Tests build MAX's state in `FakeLink` (people, dialogs,
+groups, channels, messages with attachments and reactions), drive the window as a person would,
+and check what it shows (widget trees: rows, `ChatView.widget`) and what was asked of MAX
+(`fake.asked(...)`), not private attributes. `B8K_SHOTS=dir` saves screenshots. `tests/demo.py`
+opens the window on made-up chats.

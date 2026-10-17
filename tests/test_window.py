@@ -106,7 +106,7 @@ buzzes = []
 app.buzz = lambda *a: buzzes.append(1) or True
 app.register(None)
 app.do_activate()
-wait(lambda: app.summaries and app.backend.me, what="login")
+wait(lambda: app.chatlist.chats and app.backend.me, what="login")
 spin(0.3)
 
 # --- the list: tabs, strangers hidden, channels quiet --------------------------------------
@@ -141,15 +141,16 @@ spin(0.1)
 ok("incoming")
 
 # --- pinning and notifications ---------------------------------------------------------------
-app.toggle_pin(app.summaries[dacha])
+app.toggle_pin(app.chatlist.get(dacha))  # the rules are test_chatlist's: here, that rows follow
 spin(0.1)
-assert rows()[0] == dacha and bm.load_json(bm.PREFS, {})["pinned"] == [dacha]
-app.toggle_pin(app.summaries[dacha])
-app.toggle_mute(app.summaries[news])  # a channel: notifications on
+assert rows()[0] == dacha and "📌" in "".join(
+    w.get_text() for w in walk(app.rows[dacha]) if isinstance(w, Gtk.Label))
+app.toggle_pin(app.chatlist.get(dacha))
+app.toggle_mute(app.chatlist.get(news))  # a channel: notifications on
 buzzes.clear()
 fake.incoming(news, "Новость", 50)
 wait(lambda: buzzes, what="channel buzz")
-app.toggle_mute(app.summaries[news])
+app.toggle_mute(app.chatlist.get(news))
 spin(0.1)
 row = app.rows[mama]
 app.row_menu(None, 5, row.get_allocation().y + 5)
@@ -184,7 +185,7 @@ app.ask_rename()
 app.name_entry.set_text("  Мамочка ")
 app.rename()
 wait(lambda: app.title.get_text() == "Мамочка", what="rename")
-assert app.summaries[mama]["title"] == "Мамочка"
+assert app.chatlist.get(mama)["title"] == "Мамочка"
 ok("reactions, rename")
 
 # --- search: a person by phone, then a channel by link -----------------------------------------
@@ -203,7 +204,7 @@ olga = fake.me.id ^ 40
 assert app.open_chat == olga and app.title.get_text() == "Ольга"
 app.entry.set_text("Здравствуйте")
 app.send()
-wait(lambda: olga in app.summaries, what="new dialog")
+wait(lambda: app.chatlist.listed(olga), what="new dialog")
 assert fake.asked("send")[-1] == {"chat_id": olga, "text": "Здравствуйте"}
 assert [w.msg_id for w in holds_of(app.view)] == [fake.msgs[olga][-1].id]
 app.show_list()
@@ -220,7 +221,7 @@ app.trash.clicked()
 assert app.confirm_yes.get_label() == "Отписаться"
 app.confirm_yes.clicked()
 wait(lambda: app.stack.get_visible_child_name() == "chats", what="left")
-assert fake.asked("leave")[-1] == {"chat_id": -70} and -70 not in app.summaries
+assert fake.asked("leave")[-1] == {"chat_id": -70} and not app.chatlist.listed(-70)
 ok("search, join, leave")
 
 # --- a long chat: pages as the reader scrolls up, a spinner, cut on leaving -------------------
@@ -229,7 +230,7 @@ tb = now_ms() - 10 * 86400000
 for i in range(200):
     fake.say(big, "сообщение %d" % i, PETYA, t=tb + i * 600000)  # ten-minute steps: two days
 fake.incoming(big, "последнее", PETYA)
-wait(lambda: big in app.summaries, what="big chat")
+wait(lambda: app.chatlist.listed(big), what="big chat")
 bm.PREFETCH = 0  # only the reader's scrolling fetches here
 app.open(big)
 wait(lambda: len(holds_of(app.view)) >= bm.PAGE, what="first page")

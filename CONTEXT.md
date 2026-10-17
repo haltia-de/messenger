@@ -9,8 +9,9 @@ line: the term, its name in the code, what it is.
 - **Окно чата** (Chat view, `ChatView`): one chat on screen, with its
   bubbles, day labels, reactions, media controls, older pages and place.
   Built per chat, kept for the last `VIEWS` chats.
-- **Список чатов** (Chat list, `Max.summaries` + the ListBox): the chats on
-  the first page, in two tabs (chats, channels), pinned first.
+- **Список чатов** (Chat list, `ChatList`; drawn by `Max` in a ListBox): the
+  chats on the first page, in two tabs (chats, channels), pinned first, with
+  the rules of who is shown, who buzzes and what is counted.
 - **Сводка чата** (Chat summary, a dict from `Backend.summary`): what the
   list shows of a chat: title, type, last message, time, unread, peer,
   stranger.

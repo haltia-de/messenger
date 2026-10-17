@@ -139,6 +139,7 @@ CONFIG = os.path.expanduser("~/.config/b8k/max.conf")
 KNOWN = os.path.join(DATA, "known.json")  # people whose messages are shown (contacts_only)
 ALIASES = os.path.join(DATA, "names.json")  # user id -> the name given here
 PREFS = os.path.join(DATA, "chats.json")  # pinned chats, notifications switched per chat
+LIST = os.path.join(CHATS, "list.json")  # the last chat list, shown at once on the next start
 SENT = os.path.join(DATA, "invites.json")  # account id -> chat-invites privacy set from here
 # MAX's screen numbers in its telemetry (pymax.telemetry.navigation).
 SCREEN_BACKGROUND, SCREEN_CHATS, SCREEN_SEARCH, SCREEN_CHAT, SCREEN_SETTINGS = 1, 150, 151, 350, 450
@@ -1061,26 +1062,6 @@ def save_json(path, data):
         pass
 
 
-def save_list(summaries):
-    try:
-        os.makedirs(CHATS, mode=0o700, exist_ok=True)
-        path = os.path.join(CHATS, "list.json")
-        fd = os.open(path + ".new", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, "w") as fh:
-            json.dump(summaries, fh, ensure_ascii=False)
-        os.replace(path + ".new", path)
-    except OSError:
-        pass
-
-
-def load_list():
-    try:
-        with open(os.path.join(CHATS, "list.json")) as fh:
-            return json.load(fh)
-    except (OSError, ValueError):
-        return []
-
-
 def set_badge(count):
     """The number on the panel's MAX button (b8k_ui redraws it)."""
     if b8k_ui:
@@ -1354,6 +1335,163 @@ def load_photo(url, done):
         GLib.idle_add(lambda: done(pix) and False)
 
     threading.Thread(target=work, daemon=True).start()
+
+
+# --- the chat list ---------------------------------------------------------------
+class ChatList:
+    """The chat list (CONTEXT.md: Список чатов) without its widgets: the
+    chats' summaries, dialogs opened from the search and not written to
+    yet, pins, notifications per chat, strangers hidden; and every answer
+    the window needs of it: what a tab shows in which order, the counts,
+    whether a message buzzes, what the search finds. It keeps the last list
+    (list_path, shown at once on the next start) and the pins and
+    notifications (prefs_path) on disk itself.
+
+    Rules: pinned chats come first, in the order pinned, then the newest;
+    channels are quiet unless switched on, other chats loud unless switched
+    off; a quiet chat neither buzzes nor counts on the panel's button; while
+    contacts_only is on, dialogs of strangers are not shown, counted or
+    found, and do not buzz."""
+
+    def __init__(self, list_path, prefs_path, contacts_only=True):
+        self.list_path, self.prefs_path = list_path, prefs_path
+        self.contacts_only = contacts_only
+        self.chats = {s["id"]: s for s in load_json(list_path, []) if isinstance(s, dict)}
+        self.pending = {}  # dialogs opened from the search, not written to yet
+        prefs = load_json(prefs_path, {})
+        self.pinned = [i for i in prefs.get("pinned", []) if isinstance(i, int)]
+        self.muted = set(prefs.get("muted", []))  # chats without buzz and count
+        self.unmuted = set(prefs.get("unmuted", []))  # channels with them
+
+    # --- what comes in ----------------------------------------------------------
+    def replace(self, summaries):
+        """The whole list, after a login."""
+        self.chats = {s["id"]: s for s in summaries}
+        self.pending = {i: s for i, s in self.pending.items() if i not in self.chats}
+        self._save_list()
+
+    def update(self, summary):
+        """One chat as it is now (a message, a join): a new one is added."""
+        new = summary["id"] not in self.chats
+        self.chats[summary["id"]] = summary
+        self.pending.pop(summary["id"], None)
+        if new:
+            self._save_list()
+
+    def retitle(self, chat_id, title):
+        if chat_id in self.chats:
+            self.chats[chat_id]["title"] = title
+            self._save_list()
+
+    def remove(self, chat_id):
+        self.chats.pop(chat_id, None)
+        self.pending.pop(chat_id, None)
+        self._save_list()
+
+    def read(self, chat_id):
+        if chat_id in self.chats:
+            self.chats[chat_id]["unread"] = 0
+
+    def start_dialog(self, summary):
+        """A dialog opened from the search: it joins the list once written to."""
+        if summary["id"] not in self.chats:
+            self.pending[summary["id"]] = summary
+
+    def wrote(self, chat_id, text):
+        """The own message sent: the dialog is in the list now, and whoever
+        is in it is no stranger."""
+        if chat_id in self.pending:
+            self.chats.setdefault(chat_id, self.pending.pop(chat_id))
+            self._save_list()
+        s = self.chats.get(chat_id)
+        if s:
+            s["last"], s["time"] = "Вы: " + text, int(time.time() * 1000)
+            s["stranger"] = False
+
+    def known(self, user_id):
+        """Someone added to the contacts: their dialog is shown."""
+        for s in self.chats.values():
+            if s.get("peer") == user_id:
+                s["stranger"] = False
+
+    def pin(self, chat_id):
+        """Pinned to the top, or no longer."""
+        if chat_id in self.pinned:
+            self.pinned.remove(chat_id)
+        else:
+            self.pinned.append(chat_id)
+        self._save_prefs()
+
+    def mute(self, chat_id):
+        """Notifications off, or on again."""
+        quiet = not self.quiet(chat_id)
+        if (self.chats.get(chat_id) or {}).get("type") == "CHANNEL":
+            (self.unmuted.discard if quiet else self.unmuted.add)(chat_id)
+        else:
+            (self.muted.add if quiet else self.muted.discard)(chat_id)
+        self._save_prefs()
+
+    # --- what is asked ------------------------------------------------------------
+    def get(self, chat_id):
+        """The summary, also of a dialog not written to yet; None if unknown."""
+        return self.chats.get(chat_id) or self.pending.get(chat_id)
+
+    def listed(self, chat_id):
+        """In the list (not only opened from the search)."""
+        return chat_id in self.chats
+
+    def is_pinned(self, chat_id):
+        return chat_id in self.pinned
+
+    def quiet(self, chat_id):
+        """No buzz and no count on the panel's button."""
+        s = self.chats.get(chat_id) or {}
+        if s.get("type") == "CHANNEL":
+            return chat_id not in self.unmuted
+        return chat_id in self.muted
+
+    def hidden(self, chat_id):
+        """A stranger's dialog, while those are not shown."""
+        return self.contacts_only and bool((self.chats.get(chat_id) or {}).get("stranger"))
+
+    def loud(self, chat_id):
+        """Whether a message from this chat buzzes."""
+        return not self.hidden(chat_id) and not self.quiet(chat_id)
+
+    def entries(self, tab):
+        """What a tab ("chats" or "channels") shows, top to bottom:
+        (summary, pinned, quiet) each."""
+        shown = [s for s in self.chats.values() if not self.hidden(s["id"])
+                 and (s.get("type") == "CHANNEL") == (tab == "channels")]
+
+        def order(s):
+            if s["id"] in self.pinned:
+                return (0, self.pinned.index(s["id"]))
+            return (1, -(s["time"] or 0))
+        return [(s, s["id"] in self.pinned, self.quiet(s["id"])) for s in sorted(shown, key=order)]
+
+    def counts(self):
+        """Unread messages: per tab, and in loud chats (the subtitle and the
+        panel's button)."""
+        shown = [s for s in self.chats.values() if not self.hidden(s["id"])]
+        return {"chats": sum(s["unread"] for s in shown if s.get("type") != "CHANNEL"),
+                "channels": sum(s["unread"] for s in shown if s.get("type") == "CHANNEL"),
+                "loud": sum(s["unread"] for s in shown if not self.quiet(s["id"]))}
+
+    def find(self, text):
+        """Own chats shown whose title has the text, the newest first."""
+        want = text.casefold()
+        return sorted((s for s in self.chats.values()
+                       if want in s["title"].casefold() and not self.hidden(s["id"])),
+                      key=lambda s: -(s["time"] or 0))
+
+    # --- on disk ----------------------------------------------------------------------
+    def _save_list(self):
+        save_json(self.list_path, list(self.chats.values()))
+
+    def _save_prefs(self):
+        save_json(self.prefs_path, {"pinned": self.pinned, "muted": sorted(self.muted),
+                                    "unmuted": sorted(self.unmuted)})
 
 
 # --- a chat on screen ----------------------------------------------------------
@@ -1822,15 +1960,11 @@ class Max(Gtk.Application):
         self.telemetry = Telemetry(self.backend)
         self.came_from = "chats"  # the page the settings go back to
         self.buzz_new = load_setting("buzz")  # buzz on a new message
-        self.contacts_only = load_setting("contacts_only")  # strangers' dialogs hidden
         self.invites = load_setting("invites")  # only contacts may add to chats (on MAX)
-        self.summaries = {}
-        self.pending = {}  # dialogs opened from the search, not written to yet
-        prefs = load_json(PREFS, {})
-        # Kept here only: MAX's own pinning and muting are not in PyMax.
-        self.pinned = [i for i in prefs.get("pinned", []) if isinstance(i, int)]
-        self.muted = set(prefs.get("muted", []))  # chats without buzz and badge
-        self.unmuted = set(prefs.get("unmuted", []))  # channels with them (muted by default)
+        # The list's rules and state; pins and notifications are kept here
+        # only: MAX's own pinning and muting are not in PyMax.
+        self.chatlist = ChatList(LIST, PREFS, contacts_only=load_setting("contacts_only"))
+        self.positions = {}  # chat id -> place in the tab shown (the ListBox's order)
         self.tab = "chats"  # or "channels"
         self.sound = None  # Sound, made at the first voice message played
         self.playing = None  # (progress bar, button, duration) of what plays
@@ -1919,9 +2053,10 @@ class Max(Gtk.Application):
         self.list.connect("row-activated", self.on_row)
         # Newest first. GTK wants a 32-bit answer: the difference of two
         # times in ms overflows past 24 days, so only the sign is given.
-        self.list.set_sort_func(lambda a, b: (self.order(b.summary) > self.order(a.summary))
-                                - (self.order(b.summary) < self.order(a.summary)))
-        self.list.set_filter_func(lambda row: self.in_tab(row.summary))
+        # The order and the tab are ChatList's (entries); GTK only shows them.
+        self.list.set_sort_func(lambda a, b: self.positions.get(a.chat_id, 0)
+                                - self.positions.get(b.chat_id, 0))
+        self.list.set_filter_func(lambda row: row.chat_id in self.positions)
         self.rows = {}  # chat id -> its row, kept between updates
         # A long press on a chat: pin it, switch its notifications.
         self.list_press = Gtk.GestureLongPress.new(self.list)
@@ -2046,7 +2181,7 @@ class Max(Gtk.Application):
         settings.set_margin_end(24)
         settings.set_margin_top(24)
         settings.pack_start(self.setting(
-            "Сообщения только от контактов", self.contacts_only, self.on_contacts_only,
+            "Сообщения только от контактов", self.chatlist.contacts_only, self.on_contacts_only,
             "Переписки с теми, кого нет в ваших контактах, не видны и не вибрируют. "
             "Своими считаются и те, кому вы написали сами. Сообщения остаются в MAX: "
             "выключите, чтобы их увидеть."), False, False, 0)
@@ -2075,9 +2210,8 @@ class Max(Gtk.Application):
         self.stack.connect("notify::visible-child-name", self.page_changed)
 
         # The last known list at once; the connection refreshes it.
-        cached = load_list()
+        cached = bool(self.chatlist.chats)
         if cached:
-            self.summaries = {c["id"]: c for c in cached}
             self.fill_list()
             self.sub.set_text("подключение…")
         if self.background:
@@ -2116,8 +2250,7 @@ class Max(Gtk.Application):
         return False
 
     def show_chats(self, summaries):
-        self.summaries = {s["id"]: s for s in summaries}
-        save_list(summaries)
+        self.chatlist.replace(summaries)
         page = self.stack.get_visible_child_name()
         if page in ("wait", "qr"):
             self.stack.set_visible_child_name("chats")
@@ -2128,10 +2261,11 @@ class Max(Gtk.Application):
 
     def incoming(self, msg, summary):
         if summary:
-            self.summaries[summary["id"]] = summary
-            if self.pending.pop(summary["id"], None) and self.open_chat == summary["id"]:
+            was_pending = not self.chatlist.listed(summary["id"]) and self.chatlist.get(summary["id"])
+            self.chatlist.update(summary)
+            if was_pending and self.open_chat == summary["id"]:
                 self.trash.set_visible(self.stack.get_visible_child_name() == "chat")
-        if self.hidden(self.summaries.get(msg["chat"])) and self.open_chat != msg["chat"]:
+        if self.chatlist.hidden(msg["chat"]) and self.open_chat != msg["chat"]:
             self.fill_list()
             return False  # from a stranger: no bubble, no buzz, left unread
         here = self.open_chat == msg["chat"] and self.win.is_visible()
@@ -2140,10 +2274,8 @@ class Max(Gtk.Application):
             view.add(msg)
         if here and not msg["mine"] and self.win.is_active():
             self.backend.run(self.backend.read(msg["chat"], msg["id"]))
-            if msg["chat"] in self.summaries:
-                self.summaries[msg["chat"]]["unread"] = 0
-        loud = not self.is_muted(self.summaries.get(msg["chat"]) or {"id": msg["chat"]})
-        if not msg["mine"] and self.buzz_new and loud:
+            self.chatlist.read(msg["chat"])
+        if not msg["mine"] and self.buzz_new and self.chatlist.loud(msg["chat"]):
             self.buzz()
             if not here:
                 GLib.timeout_add(180, lambda: self.buzz() and False)
@@ -2155,38 +2287,39 @@ class Max(Gtk.Application):
         """Bring the list in line with the summaries. Rows are kept and only
         a chat that changed is redrawn: a new message used to rebuild every
         row, slow on the tablet with a hundred chats."""
-        for chat_id in [i for i in self.rows if i not in self.summaries]:
+        entries = {tab: self.chatlist.entries(tab) for tab in ("chats", "channels")}
+        wanted = {e[0]["id"]: e for tab in entries.values() for e in tab}
+        for chat_id in [i for i in self.rows if i not in wanted]:
             self.rows.pop(chat_id).destroy()
-        for s in self.summaries.values():
-            row = self.rows.get(s["id"])
-            look = self.look(s)
+        for chat_id, entry in wanted.items():
+            row = self.rows.get(chat_id)
             if row is None:
-                row = self.rows[s["id"]] = self.chat_row(s)
+                row = self.rows[chat_id] = self.chat_row(entry)
                 self.list.add(row)
                 row.show_all()
-            elif row.look != look:
+            elif row.look != self.look(entry):
                 row.remove(row.get_child())
-                row.add(self.chat_row(s).steal())
+                row.add(self.chat_row(entry).steal())
                 row.show_all()
-            row.summary, row.look = s, look
+            row.summary, row.look = entry[0], self.look(entry)
+        self.positions = {e[0]["id"]: i for i, e in enumerate(entries[self.tab])}
         self.list.invalidate_sort()
         self.list.invalidate_filter()
-        shown = [s for s in self.summaries.values() if not self.hidden(s)]
-        loud = [s for s in shown if not self.is_muted(s)]
-        total = sum(s["unread"] for s in loud)
-        for b, name, channels in ((self.tab_chats, "Чаты", False), (self.tab_channels, "Каналы", True)):
-            n = sum(s["unread"] for s in shown if (s.get("type") == "CHANNEL") == channels)
-            b.set_label("%s · %d" % (name, n) if n else name)
+        counts = self.chatlist.counts()
+        for b, name, tab in ((self.tab_chats, "Чаты", "chats"), (self.tab_channels, "Каналы", "channels")):
+            b.set_label("%s · %d" % (name, counts[tab]) if counts[tab] else name)
         if self.open_chat is None and self.stack.get_visible_child_name() == "chats":
-            self.sub.set_text("непрочитанных: %d" % total if total else "")
-        # The button counts what may buzz: muted chats (channels by default) are left out.
-        set_badge(total)
+            self.sub.set_text("непрочитанных: %d" % counts["loud"] if counts["loud"] else "")
+        # The button counts what may buzz: quiet chats (channels by default) are left out.
+        set_badge(counts["loud"])
 
-    def chat_row(self, s):
-        """One chat of a list: initials, name, last message, time, unread."""
+    def chat_row(self, entry):
+        """One chat of a list (an entry of ChatList's): initials, name, last
+        message, time, unread."""
+        s, pinned, quiet = entry
         row = Gtk.ListBoxRow()
         row.chat_id = s["id"]
-        row.summary, row.look = s, self.look(s)
+        row.summary, row.look = s, self.look(entry)
         row.steal = lambda: (row.remove(box), box)[1]  # the contents, for a kept row
         box = Gtk.Box(spacing=18)
         box.set_margin_start(16)
@@ -2201,11 +2334,11 @@ class Max(Gtk.Application):
         box.pack_start(mid, True, True, 0)
         right = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
         right.set_valign(Gtk.Align.CENTER)
-        top = "%s%s" % ("📌 " if s["id"] in self.pinned else "", when(s["time"]))
+        top = "%s%s" % ("📌 " if pinned else "", when(s["time"]))
         right.pack_start(label(top, "chat-time", xalign=1.0), False, False, 0)
         if s["unread"]:
             badge = label(str(s["unread"]), "badge", xalign=0.5)
-            if self.is_muted(s):
+            if quiet:
                 badge.get_style_context().add_class("quiet")
             badge.set_halign(Gtk.Align.END)
             right.pack_start(badge, False, False, 0)
@@ -2220,36 +2353,19 @@ class Max(Gtk.Application):
         self.open(row.chat_id)
 
     # tabs, pinning, notifications
-    def look(self, s):
+    @staticmethod
+    def look(entry):
         """What a row shows: when it changes the row is redrawn."""
-        return (s["title"], s["last"], s["time"], s["unread"], s["id"] in self.pinned,
-                self.is_muted(s))
-
-    def order(self, s):
-        """Pinned first, in the order pinned; then the newest."""
-        if s["id"] in self.pinned:
-            return (1, -self.pinned.index(s["id"]))
-        return (0, s["time"] or 0)
-
-    def in_tab(self, s):
-        return not self.hidden(s) and (s.get("type") == "CHANNEL") == (self.tab == "channels")
-
-    def is_muted(self, s):
-        if s.get("type") == "CHANNEL":
-            return s["id"] not in self.unmuted
-        return s["id"] in self.muted
+        s, pinned, quiet = entry
+        return (s["title"], s["last"], s["time"], s["unread"], pinned, quiet)
 
     def show_tab(self, name):
         self.tab = name
-        self.list.invalidate_filter()
+        self.fill_list()
         adj = self.list.get_parent().get_vadjustment() if isinstance(
             self.list.get_parent(), Gtk.Scrollable) else None
         if adj:
             adj.set_value(0)
-
-    def save_prefs(self):
-        save_json(PREFS, {"pinned": self.pinned, "muted": sorted(self.muted),
-                          "unmuted": sorted(self.unmuted)})
 
     def row_menu(self, _gesture, _x, y):
         row = self.list.get_row_at_y(int(y))
@@ -2260,7 +2376,7 @@ class Max(Gtk.Application):
         s = row.summary
         pop = Gtk.Popover.new(row)
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-        pinned, muted = s["id"] in self.pinned, self.is_muted(s)
+        pinned, muted = self.chatlist.is_pinned(s["id"]), self.chatlist.quiet(s["id"])
         for text, act in (("📌 Открепить" if pinned else "📌 Закрепить сверху", self.toggle_pin),
                           ("🔔 Включить оповещения" if muted else "🔕 Без оповещений",
                            self.toggle_mute)):
@@ -2275,20 +2391,11 @@ class Max(Gtk.Application):
         pop.popup()
 
     def toggle_pin(self, s):
-        if s["id"] in self.pinned:
-            self.pinned.remove(s["id"])
-        else:
-            self.pinned.append(s["id"])
-        self.save_prefs()
+        self.chatlist.pin(s["id"])
         self.fill_list()
 
     def toggle_mute(self, s):
-        quiet = not self.is_muted(s)
-        if s.get("type") == "CHANNEL":
-            (self.unmuted.discard if quiet else self.unmuted.add)(s["id"])
-        else:
-            (self.muted.add if quiet else self.muted.discard)(s["id"])
-        self.save_prefs()
+        self.chatlist.mute(s["id"])
         self.fill_list()
 
     def show_list(self):
@@ -2347,17 +2454,15 @@ class Max(Gtk.Application):
 
             self.backend.run(self.backend.link_info(link), chat)
         else:
-            want = text.casefold()
-            hits = sorted((c for c in self.summaries.values()
-                           if want in c["title"].casefold() and not self.hidden(c)),
-                          key=lambda c: -(c["time"] or 0))
+            hits = self.chatlist.find(text)
             self.find_hint.set_text("" if hits else "Среди ваших чатов такого нет.")
             if hits:
                 box = Gtk.ListBox()
                 box.set_selection_mode(Gtk.SelectionMode.NONE)
                 box.connect("row-activated", self.on_row)
                 for c in hits:
-                    box.add(self.chat_row(c))
+                    box.add(self.chat_row((c, self.chatlist.is_pinned(c["id"]),
+                                           self.chatlist.quiet(c["id"]))))
                 self.found.pack_start(box, False, False, 0)
         self.found.show_all()
 
@@ -2397,9 +2502,7 @@ class Max(Gtk.Application):
                 btn.set_label("Не удалось, ещё раз" if err else "В контактах")
                 btn.set_sensitive(bool(err))
                 if not err:
-                    for c in self.summaries.values():
-                        if c.get("peer") == p["id"]:
-                            c["stranger"] = False
+                    self.chatlist.known(p["id"])
                     self.fill_list()
 
             self.backend.run(self.backend.add_contact(p["id"]), done)
@@ -2408,9 +2511,8 @@ class Max(Gtk.Application):
         self.found.show_all()
 
     def write_to(self, p):
-        if p["chat"] not in self.summaries:
-            self.pending[p["chat"]] = {"id": p["chat"], "title": p["name"], "type": "DIALOG",
-                                       "last": "", "time": 0, "unread": 0}
+        self.chatlist.start_dialog({"id": p["chat"], "title": p["name"], "type": "DIALOG",
+                                    "last": "", "time": 0, "unread": 0})
         self.open(p["chat"])
 
     def show_found_chat(self, info, link):
@@ -2419,7 +2521,7 @@ class Max(Gtk.Application):
         about = ("канал" if channel else "группа" if info["type"] else "ссылка в MAX") + (
             " · %s: %d" % ("подписчиков" if channel else "участников", n) if n else "")
         buttons = self.found_card(info["title"], about, info["id"])
-        if info["joined"] and info["id"] in self.summaries:
+        if info["joined"] and self.chatlist.listed(info["id"]):
             self.action(buttons, "Открыть", "act", lambda _b: self.open(info["id"]))
         else:
             def join(btn):
@@ -2430,8 +2532,7 @@ class Max(Gtk.Application):
                         btn.set_label("Не удалось, ещё раз")
                         btn.set_sensitive(True)
                         return
-                    self.summaries[summary["id"]] = summary
-                    save_list(list(self.summaries.values()))
+                    self.chatlist.update(summary)
                     self.fill_list()
                     self.open(summary["id"])
 
@@ -2442,11 +2543,11 @@ class Max(Gtk.Application):
 
     # renaming the person of a dialog
     def can_rename(self, chat_id):
-        s = self.summaries.get(chat_id)
+        s = self.chatlist.get(chat_id) if self.chatlist.listed(chat_id) else None
         return bool(s and s.get("type") == "DIALOG" and s.get("peer"))
 
     def ask_rename(self):
-        s = self.summaries.get(self.open_chat)
+        s = self.chatlist.get(self.open_chat)
         if not self.can_rename(self.open_chat):
             return
         self.confirm.hide()
@@ -2457,7 +2558,7 @@ class Max(Gtk.Application):
 
     def rename(self):
         chat_id = self.open_chat
-        s = self.summaries.get(chat_id)
+        s = self.chatlist.get(chat_id)
         if not s or not s.get("peer"):
             return
         name = " ".join(self.name_entry.get_text().split())[:64]
@@ -2468,19 +2569,16 @@ class Max(Gtk.Application):
                 return
             self.naming.hide()
             for r in renamed or []:
-                if r["id"] in self.summaries:
-                    r["unread"] = self.summaries[r["id"]]["unread"]
-                self.summaries[r["id"]] = r
-            save_list(list(self.summaries.values()))
+                self.chatlist.retitle(r["id"], r["title"])
             if self.open_chat == chat_id:
-                self.title.set_text(self.summaries[chat_id]["title"])
+                self.title.set_text(self.chatlist.get(chat_id)["title"])
             self.fill_list()
 
         self.backend.run(self.backend.rename(s["peer"], name), done)
 
     # deleting a dialog, leaving a group or a channel
     def ask_remove(self):
-        s = self.summaries.get(self.open_chat)
+        s = self.chatlist.get(self.open_chat) if self.chatlist.listed(self.open_chat) else None
         if not s:
             return
         question, yes = {
@@ -2504,8 +2602,7 @@ class Max(Gtk.Application):
                     self.sub.set_text("не удалось, попробуйте ещё раз")
                 return
             self.confirm.hide()
-            self.summaries.pop(chat_id, None)
-            save_list(list(self.summaries.values()))
+            self.chatlist.remove(chat_id)
             view = self.views.pop(chat_id, None)
             if view is not None:
                 if view is self.view:
@@ -2548,7 +2645,7 @@ class Max(Gtk.Application):
         return card
 
     def on_contacts_only(self, on):
-        self.contacts_only = on
+        self.chatlist.contacts_only = on
         save_setting("contacts_only", on)
         self.fill_list()
 
@@ -2565,10 +2662,6 @@ class Max(Gtk.Application):
 
         self.backend.run(self.backend.set_invites(on), done)
 
-    def hidden(self, s):
-        """A dialog with someone not in the contacts, while those are hidden."""
-        return self.contacts_only and bool(s and s.get("stranger"))
-
     def on_buzz(self, on):
         self.buzz_new = on
         save_setting("buzz", on)
@@ -2582,7 +2675,7 @@ class Max(Gtk.Application):
         # switched off before anything is sent.
         self.gear.set_visible(page in ("chats", "wait", "qr"))
         self.findb.set_visible(page == "chats")
-        self.trash.set_visible(page == "chat" and self.open_chat in self.summaries)
+        self.trash.set_visible(page == "chat" and self.chatlist.listed(self.open_chat))
         self.pencil.set_visible(page == "chat" and self.can_rename(self.open_chat))
         if page != "chat":
             self.confirm.hide()
@@ -2610,7 +2703,7 @@ class Max(Gtk.Application):
     # a chat
     def about(self, chat_id):
         """The chat's summary, also of a dialog not yet written to."""
-        return self.summaries.get(chat_id) or self.pending.get(chat_id, {})
+        return self.chatlist.get(chat_id) or {}
 
     def view_for(self, chat_id):
         """The chat's ChatView: kept from before, else built from the cache."""
@@ -2639,7 +2732,7 @@ class Max(Gtk.Application):
         self.open_chat = chat_id
         self.confirm.hide()
         self.naming.hide()
-        self.trash.set_visible(chat_id in self.summaries)
+        self.trash.set_visible(self.chatlist.listed(chat_id))
         self.pencil.set_visible(self.can_rename(chat_id))
         view = self.view_for(chat_id)
         if self.view is not view:
@@ -2670,8 +2763,8 @@ class Max(Gtk.Application):
             view.newest(msgs or [], gap, done=drawn)
             if self.open_chat == chat_id:
                 self.sub.set_text("")
-            if chat_id in self.summaries:
-                self.summaries[chat_id]["unread"] = 0
+            if self.chatlist.listed(chat_id):
+                self.chatlist.read(chat_id)
                 self.fill_list()
 
         self.backend.run(self.backend.history(chat_id), done)
@@ -2844,13 +2937,8 @@ class Max(Gtk.Application):
             view = self.views.get(chat_id)
             if msg and view:
                 view.add(msg)
-            if chat_id in self.pending:  # the dialog exists now
-                self.summaries.setdefault(chat_id, self.pending.pop(chat_id))
-                self.trash.set_visible(self.open_chat == chat_id)
-            s = self.summaries.get(chat_id)
-            if s:
-                s["last"], s["time"] = "Вы: " + text, int(time.time() * 1000)
-                s["stranger"] = False  # written to here: welcome now
+            self.chatlist.wrote(chat_id, text)  # a dialog from the search is in the list now
+            self.trash.set_visible(self.open_chat == chat_id and self.chatlist.listed(chat_id))
 
         self.backend.run(self.backend.send(chat_id, text), done)
 
