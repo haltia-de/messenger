@@ -21,6 +21,22 @@ the buzz on new messages.
 Pages: the chat list (initials, name, last message, time, unread count)
 and a chat (bubbles, photos, a large entry and a send button). New
 messages arrive live and buzz (unless switched off in the settings).
+The search (the magnifier over the list) finds a person by phone number,
+to write to or add to the contacts, a channel or group by its max.ru link,
+to join, or one of the own chats by name; a chat is deleted (a dialog, for
+this account only) or left (a group, a channel) with the bin in its header,
+after a question on the page. One thing at a time, by hand: nothing here
+searches or adds in bulk.
+
+MAX has no setting for who may write to an account, so by default the
+dialogs of people outside the contacts are kept off the list, the badge
+and the buzz here (the settings switch them back). Known are the contacts
+MAX sends at login, those added here, those written to here, and, the
+first time, everyone already in a dialog; the ids are kept in
+~/.local/share/b8k-max/known.json (mode 600), since after the first login
+MAX sends only the contacts that changed. Who may add the account to chats
+is a setting of MAX itself; contacts only by default, sent once per account
+(and when switched), not at every login, so a change on the phone stays.
 PyMax runs in its own thread with an asyncio loop; every call from the
 window goes through run(), every answer comes back with GLib.idle_add.
 
@@ -38,6 +54,7 @@ import configparser
 import hashlib
 import json
 import os
+import re
 import sys
 import threading
 import time
@@ -81,8 +98,10 @@ CHATS = os.path.join(PHOTOS, "chats")  # message cache, one file per chat
 KEEP = 80  # messages kept per chat on disk
 VIEWS = 6  # chats kept built in memory
 CONFIG = os.path.expanduser("~/.config/b8k/max.conf")
+KNOWN = os.path.join(DATA, "known.json")  # people whose messages are shown (contacts_only)
+SENT = os.path.join(DATA, "invites.json")  # account id -> chat-invites privacy set from here
 # MAX's screen numbers in its telemetry (pymax.telemetry.navigation).
-SCREEN_BACKGROUND, SCREEN_CHATS, SCREEN_CHAT, SCREEN_SETTINGS = 1, 150, 350, 450
+SCREEN_BACKGROUND, SCREEN_CHATS, SCREEN_SEARCH, SCREEN_CHAT, SCREEN_SETTINGS = 1, 150, 151, 350, 450
 MAIN_TAB = {"source_type": 5, "source_id": 1, "tab_config": 2}  # going to the chat list
 FLUSH_SEC = 3  # events go out in small batches, as the app sends them
 MONTHS = "янв фев мар апр мая июн июл авг сен окт ноя дек".split()
@@ -147,6 +166,40 @@ button.gear {
 label.setting { font-size: 26px; }
 switch { min-width: 120px; min-height: 56px; border-radius: 28px; }
 switch slider { min-width: 56px; min-height: 56px; border-radius: 28px; }
+button.act {
+  background-image: none;
+  background-color: #3584e4;
+  border: none;
+  box-shadow: none;
+  border-radius: 16px;
+  min-height: 64px;
+  padding: 0 24px;
+  font-size: 24px;
+}
+button.act label { color: #ffffff; }
+button.act:disabled { background-color: #99c1f1; }
+button.plain {
+  background-image: none;
+  background-color: #f2f2f0;
+  border: 1px solid #c0bfbc;
+  box-shadow: none;
+  border-radius: 16px;
+  min-height: 64px;
+  padding: 0 24px;
+  font-size: 24px;
+}
+button.danger {
+  background-image: none;
+  background-color: #c01c28;
+  border: none;
+  box-shadow: none;
+  border-radius: 16px;
+  min-height: 64px;
+  padding: 0 24px;
+  font-size: 24px;
+}
+button.danger label { color: #ffffff; }
+.confirm { background-color: #f6d5d1; padding: 16px 20px; }
 """
 
 # --- small helpers ----------------------------------------------------------
@@ -211,6 +264,28 @@ def initials_icon(name, key, size=64):
     return area
 
 
+def phone_of(text):
+    """A phone number as MAX looks it up (+7…), or None if this is not one."""
+    if not re.fullmatch(r"\+?[\d\s()-]+", text):
+        return None
+    digits = re.sub(r"\D", "", text)
+    if len(digits) == 10:
+        digits = "7" + digits
+    elif len(digits) == 11 and digits[0] == "8":
+        digits = "7" + digits[1:]
+    return "+" + digits if 11 <= len(digits) <= 15 else None
+
+
+def link_of(text):
+    """A MAX link to a channel or group (max.ru/name, max.ru/join/…, @name)
+    as https://max.ru/…, or None."""
+    text = text.strip()
+    if re.fullmatch(r"@[\w.]+", text):
+        return "https://max.ru/" + text[1:]
+    m = re.fullmatch(r"(?:https?://)?(?:web\.)?max\.ru/([\w./-]+)", text, re.I)
+    return "https://max.ru/" + m.group(1).strip("/") if m else None
+
+
 def user_name(user):
     for n in getattr(user, "names", None) or []:
         full = getattr(n, "name", None) or " ".join(
@@ -242,6 +317,7 @@ class Backend:
         self.me = None
         self.names = {}
         self.chats = {}
+        self.known, self.seeded = load_known()
 
     def start(self):
         threading.Thread(target=self._thread, daemon=True).start()
@@ -315,6 +391,21 @@ class Backend:
             marker = min(c.last_event_time for c in page if c.last_event_time) - 1
         chats = list(found.values())
         self.chats = found
+        # The contacts come whole on the first login, then only what changed:
+        # keep them on disk. The first time, everyone already in a dialog
+        # counts too, so that nobody known goes quiet after an update.
+        for u in client.contacts or []:
+            if u:
+                self.known.add(u.id)
+                self.names.setdefault(u.id, user_name(u))
+        if not self.seeded:
+            self.known.update(p for p in map(self.peer, chats) if p)
+            self.seeded = True
+        save_known(self.known)
+        try:
+            await self.set_invites(load_setting("invites"), changed=False)
+        except Exception:
+            pass  # tried again at the next login
         want = set()
         for c in chats:
             if kind(c.type) == "DIALOG":
@@ -334,6 +425,19 @@ class Backend:
             for u in users or []:
                 if u:
                     self.names[u.id] = user_name(u)
+
+    def peer(self, chat):
+        """The other person of a dialog (None in Избранное, a group, a channel)."""
+        if kind(chat.type) != "DIALOG":
+            return None
+        others = [u for u in chat.participants if u != self.me]
+        return others[0] if others else None
+
+    def remember(self, user_id):
+        """Someone whose messages are welcome: a contact, or written to here."""
+        if user_id and user_id != self.me and user_id not in self.known:
+            self.known.add(user_id)
+            save_known(self.known)
 
     def title(self, chat):
         if chat.title:
@@ -358,9 +462,11 @@ class Backend:
 
     def summary(self, chat):
         last = chat.last_message
+        peer = self.peer(chat)
         return {"id": chat.id, "title": self.title(chat), "type": kind(chat.type),
                 "last": self.preview(last), "time": (last.time if last else 0) or chat.last_event_time,
-                "unread": chat.new_messages or 0}
+                "unread": chat.new_messages or 0, "peer": peer,
+                "stranger": peer is not None and peer not in self.known}
 
     def message(self, msg):
         texts, photos = [], []
@@ -377,11 +483,26 @@ class Backend:
                 "who": self.names.get(msg.sender, ""), "text": body, "photos": photos,
                 "time": msg.time, "mine": bool(self.me) and msg.sender == self.me}
 
-    async def history(self, chat_id):
+    async def chat(self, chat_id):
+        """The chat, from the list or asked for (one just joined, a new
+        dialog that has its first message); None if MAX has none."""
         chat = self.chats.get(chat_id)
+        if chat is None:
+            try:
+                found = await self.client._app.api.chats.get_chats([chat_id])
+            except Exception:
+                found = []
+            if found:
+                chat = self.chats[chat_id] = found[0]
+        return chat
+
+    async def history(self, chat_id):
+        chat = await self.chat(chat_id)
         if not chat:
-            return []
+            return []  # a dialog nobody has written to yet
         msgs = await chat.history(backward=HISTORY)
+        if any(m.sender == self.me for m in msgs):
+            self.remember(self.peer(chat))
         await self.lookup({m.sender for m in msgs})
         msgs.sort(key=lambda m: m.time)
         if msgs:
@@ -395,11 +516,85 @@ class Backend:
         return out
 
     async def send(self, chat_id, text):
+        chat = self.chats.get(chat_id)
+        # A dialog not started yet is numbered own id XOR theirs.
+        self.remember(self.peer(chat) if chat else chat_id ^ self.me if self.me else None)
         msg = await self.client._app.api.messages.send_message(chat_id, text)
         out = self.message(msg) if msg else None
         if out:
             cache_add(chat_id, [out])
         return out
+
+    async def find_phone(self, phone):
+        """The person with this phone number, if they are in MAX."""
+        user = await self.client._app.api.users.search_by_phone(phone)
+        self.names[user.id] = user_name(user)
+        return {"id": user.id, "name": self.names[user.id],
+                "chat": self.me ^ user.id if self.me else None}  # their dialog, as MAX numbers it
+
+    async def add_contact(self, user_id):
+        user = await self.client._app.api.users.add_contact(user_id)
+        self.names[user.id] = user_name(user)
+        self.remember(user.id)
+
+    async def link_info(self, link):
+        """The channel or group behind a link, before joining it."""
+        from pymax.api.chats.enums import ChatPayloadKey
+        from pymax.api.chats.payloads import LinkInfoPayload
+        from pymax.api.response import parse_payload_item_model
+        from pymax.protocol import Opcode
+        from pymax.types.domain import Chat
+
+        at = link.find("join/")  # invite links go as join/…, public ones whole
+        frame = LinkInfoPayload(link=link[at:] if at != -1 else link)
+        response = await self.client._app.invoke(Opcode.LINK_INFO, frame.to_payload())
+        chat = parse_payload_item_model(response, ChatPayloadKey.CHAT, Chat)
+        if chat is None:
+            return None
+        return {"id": chat.id, "title": chat.title or "Без названия", "type": kind(chat.type),
+                "members": chat.participants_count or len(chat.participants),
+                "joined": chat.id in self.chats}
+
+    async def join(self, link):
+        chat = await self.client._app.api.chats.join_channel(link)  # groups too
+        self.chats[chat.id] = chat
+        return self.summary(chat)
+
+    async def remove(self, chat_id):
+        """Leave a channel or group, delete a dialog: for this account only,
+        never for the others in it."""
+        api = self.client._app.api.chats
+        chat = self.chats.get(chat_id)
+        stamp = chat.last_event_time if chat else None
+        if chat is not None and kind(chat.type) in ("CHAT", "CHANNEL"):
+            await api.leave_group(chat_id)
+            try:  # and its messages off the list, as the app does
+                await api.delete_chat(chat_id, last_event_time=stamp, for_all=False)
+            except Exception:
+                pass
+        else:
+            await api.delete_chat(chat_id, last_event_time=stamp, for_all=False)
+        self.chats.pop(chat_id, None)
+        cache_drop(chat_id)
+
+    async def set_invites(self, contacts, changed=True):
+        """Who may add this account to chats, in MAX's own privacy settings:
+        the contacts or anyone. Sent when switched here; at login only if
+        MAX has not taken the switch's value from here yet (the first time,
+        or after a failure), so a change made on the phone stays."""
+        from pymax.api.self.enums import PrivacyAccess
+        from pymax.api.self.payloads import PrivacySettingsUpdate
+
+        if not self.me:
+            return  # not logged in: the login sends it
+        want = "CONTACTS" if contacts else "ALL"
+        sent = load_sent()
+        if not changed and sent.get(str(self.me)) == want:
+            return
+        await self.client._app.api.account.change_profile_settings(
+            PrivacySettingsUpdate(chat_invites=PrivacyAccess(want)))
+        sent[str(self.me)] = want
+        save_sent(sent)
 
     async def read(self, chat_id, msg_id):
         await self.client._app.api.messages.read_message(msg_id, chat_id)
@@ -417,10 +612,11 @@ class Backend:
 
     async def _message(self, msg, _client):
         await self.lookup({msg.sender})
-        chat = self.chats.get(msg.chat_id)
+        known = msg.chat_id in self.chats  # a new chat comes with its count
+        chat = await self.chat(msg.chat_id) if msg.chat_id is not None else None
         if chat is not None:
             chat.last_message = msg
-            if msg.sender != self.me:
+            if msg.sender != self.me and known:
                 chat.new_messages = (chat.new_messages or 0) + 1
         out = self.message(msg)
         if msg.chat_id is not None:
@@ -457,6 +653,54 @@ def cache_add(chat_id, msgs):
             os.replace(path + ".new", path)
         except OSError:
             pass
+
+
+def cache_drop(chat_id):
+    with _cache_lock:
+        try:
+            os.remove(os.path.join(CHATS, "%d.json" % chat_id))
+        except OSError:
+            pass
+
+
+def load_known():
+    """(ids of the people whose messages are shown, whether the file was there)."""
+    try:
+        with open(KNOWN) as fh:
+            return set(json.load(fh)), True
+    except (OSError, ValueError, TypeError):
+        return set(), False
+
+
+def save_known(known):
+    try:
+        os.makedirs(DATA, mode=0o700, exist_ok=True)
+        fd = os.open(KNOWN + ".new", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as fh:
+            json.dump(sorted(known), fh)
+        os.replace(KNOWN + ".new", KNOWN)
+    except OSError:
+        pass
+
+
+def load_sent():
+    try:
+        with open(SENT) as fh:
+            sent = json.load(fh)
+        return sent if isinstance(sent, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def save_sent(sent):
+    try:
+        os.makedirs(DATA, mode=0o700, exist_ok=True)
+        fd = os.open(SENT + ".new", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as fh:
+            json.dump(sent, fh)
+        os.replace(SENT + ".new", SENT)
+    except OSError:
+        pass
 
 
 def save_list(summaries):
@@ -655,7 +899,10 @@ class Max(Gtk.Application):
         self.telemetry = Telemetry(self.backend)
         self.came_from = "chats"  # the page the settings go back to
         self.buzz_new = load_setting("buzz")  # buzz on a new message
+        self.contacts_only = load_setting("contacts_only")  # strangers' dialogs hidden
+        self.invites = load_setting("invites")  # only contacts may add to chats (on MAX)
         self.summaries = {}
+        self.pending = {}  # dialogs opened from the search, not written to yet
         self.open_chat = None
         self.views = {}  # chat id -> built view, most recently used last
         self.view = None
@@ -693,6 +940,16 @@ class Max(Gtk.Application):
         self.gear.connect("clicked", lambda _b: self.show_settings())
         self.gear.set_no_show_all(True)
         bar.pack_end(self.gear)
+        self.findb = Gtk.Button.new_from_icon_name("system-search-symbolic", Gtk.IconSize.DIALOG)
+        self.findb.get_style_context().add_class("gear")
+        self.findb.connect("clicked", lambda _b: self.show_find())
+        self.findb.set_no_show_all(True)
+        bar.pack_end(self.findb)
+        self.trash = Gtk.Button.new_from_icon_name("user-trash-symbolic", Gtk.IconSize.DIALOG)
+        self.trash.get_style_context().add_class("gear")
+        self.trash.connect("clicked", lambda _b: self.ask_remove())
+        self.trash.set_no_show_all(True)
+        bar.pack_end(self.trash)
         self.win.set_titlebar(bar)
         self.win.connect("map", lambda _w: self.moved())
         self.win.connect("unmap", lambda _w: self.telemetry.go(SCREEN_BACKGROUND))
@@ -724,6 +981,26 @@ class Max(Gtk.Application):
         self.stack.add_named(scroll, "chats")
 
         chat = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        # Asked before a chat is deleted or left: on the page, not a dialog.
+        self.confirm = Gtk.Box(spacing=16)
+        self.confirm.get_style_context().add_class("confirm")
+        self.confirm_text = label("", "setting", wrap=True)
+        self.confirm.pack_start(self.confirm_text, True, True, 0)
+        self.confirm_yes = Gtk.Button()
+        self.confirm_yes.get_style_context().add_class("danger")
+        self.confirm_yes.set_valign(Gtk.Align.CENTER)
+        self.confirm_yes.connect("clicked", lambda _b: self.remove())
+        no = Gtk.Button(label="Отмена")
+        no.get_style_context().add_class("plain")
+        no.set_valign(Gtk.Align.CENTER)
+        no.connect("clicked", lambda _b: self.confirm.hide())
+        self.confirm.pack_end(no, False, False, 0)
+        self.confirm.pack_end(self.confirm_yes, False, False, 0)
+        self.confirm.set_no_show_all(True)
+        self.confirm_text.show()
+        self.confirm_yes.show()
+        no.show()
+        chat.pack_start(self.confirm, False, False, 0)
         self.msg_scroll = Gtk.ScrolledWindow()
         self.msg_scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
         self.msg_scroll.set_kinetic_scrolling(True)
@@ -755,10 +1032,47 @@ class Max(Gtk.Application):
         chat.pack_start(self.inputbar, False, False, 0)
         self.stack.add_named(chat, "chat")
 
+        find = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
+        find.set_margin_start(24)
+        find.set_margin_end(24)
+        find.set_margin_top(24)
+        ask = Gtk.Box(spacing=10)
+        self.find_entry = Gtk.Entry()
+        self.find_entry.get_style_context().add_class("input")
+        self.find_entry.set_placeholder_text("Телефон, ссылка или название")
+        self.find_entry.connect("activate", lambda _e: self.find())
+        go = Gtk.Button(label="Найти")
+        go.get_style_context().add_class("send")
+        go.set_can_focus(False)  # as with Отправить: keep the keyboard up
+        go.set_focus_on_click(False)
+        go.connect("clicked", lambda _b: self.find())
+        ask.pack_start(self.find_entry, True, True, 0)
+        ask.pack_start(go, False, False, 0)
+        find.pack_start(ask, False, False, 0)
+        self.find_hint = label("", "hint", wrap=True)
+        find.pack_start(self.find_hint, False, False, 0)
+        self.found = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
+        found_scroll = Gtk.ScrolledWindow()
+        found_scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        found_scroll.set_kinetic_scrolling(True)
+        found_scroll.add(self.found)
+        find.pack_start(found_scroll, True, True, 0)
+        self.stack.add_named(find, "find")
+
         settings = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=20)
         settings.set_margin_start(24)
         settings.set_margin_end(24)
         settings.set_margin_top(24)
+        settings.pack_start(self.setting(
+            "Сообщения только от контактов", self.contacts_only, self.on_contacts_only,
+            "Переписки с теми, кого нет в ваших контактах, не видны и не вибрируют. "
+            "Своими считаются и те, кому вы написали сами. Сообщения остаются в MAX: "
+            "выключите, чтобы их увидеть."), False, False, 0)
+        self.invites_card = self.setting(
+            "Приглашать в чаты могут только контакты", self.invites, self.on_invites,
+            "Это настройка самого MAX: незнакомые не смогут добавить вас в чат. "
+            "Она действует и на телефоне; там же её можно поменять.")
+        settings.pack_start(self.invites_card, False, False, 0)
         settings.pack_start(self.setting(
             "Вибрация при новом сообщении", self.buzz_new, self.on_buzz,
             "Планшет вздрагивает, когда приходит сообщение. Касания кнопок "
@@ -770,7 +1084,12 @@ class Max(Gtk.Application):
             "и имён: так она меньше отличается от приложения, и это может снизить риск "
             "блокировки аккаунта. Если выключить, сервер не получит ничего из этого."),
             False, False, 0)
-        self.stack.add_named(settings, "settings")
+        settings.set_margin_bottom(24)
+        settings_scroll = Gtk.ScrolledWindow()
+        settings_scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        settings_scroll.set_kinetic_scrolling(True)
+        settings_scroll.add(settings)
+        self.stack.add_named(settings_scroll, "settings")
         self.stack.connect("notify::visible-child-name", self.page_changed)
 
         # The last known list at once; the connection refreshes it.
@@ -814,17 +1133,22 @@ class Max(Gtk.Application):
     def show_chats(self, summaries):
         self.summaries = {s["id"]: s for s in summaries}
         save_list(summaries)
-        self.fill_list()
         page = self.stack.get_visible_child_name()
         if page in ("wait", "qr"):
             self.stack.set_visible_child_name("chats")
         elif page == "settings":
             self.came_from = "chats"
+        self.fill_list()
         return False
 
     def incoming(self, msg, summary):
         if summary:
             self.summaries[summary["id"]] = summary
+            if self.pending.pop(summary["id"], None) and self.open_chat == summary["id"]:
+                self.trash.set_visible(self.stack.get_visible_child_name() == "chat")
+        if self.hidden(self.summaries.get(msg["chat"])) and self.open_chat != msg["chat"]:
+            self.fill_list()
+            return False  # from a stranger: no bubble, no buzz, left unread
         here = self.open_chat == msg["chat"] and self.win.is_visible()
         view = self.views.get(msg["chat"])
         if view and msg["id"] not in view.shown:
@@ -833,7 +1157,8 @@ class Max(Gtk.Application):
                 self.scroll_down()
         if here and not msg["mine"] and self.win.is_active():
             self.backend.run(self.backend.read(msg["chat"], msg["id"]))
-            self.summaries[msg["chat"]]["unread"] = 0
+            if msg["chat"] in self.summaries:
+                self.summaries[msg["chat"]]["unread"] = 0
         if not msg["mine"] and self.buzz_new:
             self.buzz()
             if not here:
@@ -846,36 +1171,41 @@ class Max(Gtk.Application):
         for child in self.list.get_children():
             self.list.remove(child)
         total = 0
-        for s in sorted(self.summaries.values(), key=lambda s: -(s["time"] or 0)):
+        shown = [s for s in self.summaries.values() if not self.hidden(s)]
+        for s in sorted(shown, key=lambda s: -(s["time"] or 0)):
             total += s["unread"]
-            row = Gtk.ListBoxRow()
-            row.chat_id = s["id"]
-            box = Gtk.Box(spacing=18)
-            box.set_margin_start(16)
-            box.set_margin_end(16)
-            box.set_margin_top(10)
-            box.set_margin_bottom(10)
-            box.pack_start(initials_icon(s["title"], s["id"]), False, False, 0)
-            mid = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
-            mid.set_valign(Gtk.Align.CENTER)
-            mid.pack_start(label(s["title"], "chat-name", ellipsize=True), False, False, 0)
-            mid.pack_start(label(s["last"], "chat-last", ellipsize=True), False, False, 0)
-            box.pack_start(mid, True, True, 0)
-            right = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
-            right.set_valign(Gtk.Align.CENTER)
-            right.pack_start(label(when(s["time"]), "chat-time", xalign=1.0), False, False, 0)
-            if s["unread"]:
-                badge = label(str(s["unread"]), "badge", xalign=0.5)
-                badge.set_halign(Gtk.Align.END)
-                right.pack_start(badge, False, False, 0)
-            box.pack_end(right, False, False, 0)
-            row.add(box)
-            self.list.add(row)
+            self.list.add(self.chat_row(s))
         self.list.show_all()
-        if self.open_chat is None:
+        if self.open_chat is None and self.stack.get_visible_child_name() == "chats":
             self.sub.set_text("непрочитанных: %d" % total if total else "")
         # The button counts people, not news: channels are left out.
-        set_badge(sum(s["unread"] for s in self.summaries.values() if s.get("type") != "CHANNEL"))
+        set_badge(sum(s["unread"] for s in shown if s.get("type") != "CHANNEL"))
+
+    def chat_row(self, s):
+        """One chat of a list: initials, name, last message, time, unread."""
+        row = Gtk.ListBoxRow()
+        row.chat_id = s["id"]
+        box = Gtk.Box(spacing=18)
+        box.set_margin_start(16)
+        box.set_margin_end(16)
+        box.set_margin_top(10)
+        box.set_margin_bottom(10)
+        box.pack_start(initials_icon(s["title"], s["id"]), False, False, 0)
+        mid = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        mid.set_valign(Gtk.Align.CENTER)
+        mid.pack_start(label(s["title"], "chat-name", ellipsize=True), False, False, 0)
+        mid.pack_start(label(s["last"], "chat-last", ellipsize=True), False, False, 0)
+        box.pack_start(mid, True, True, 0)
+        right = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        right.set_valign(Gtk.Align.CENTER)
+        right.pack_start(label(when(s["time"]), "chat-time", xalign=1.0), False, False, 0)
+        if s["unread"]:
+            badge = label(str(s["unread"]), "badge", xalign=0.5)
+            badge.set_halign(Gtk.Align.END)
+            right.pack_start(badge, False, False, 0)
+        box.pack_end(right, False, False, 0)
+        row.add(box)
+        return row
 
     def on_row(self, _list, row):
         self.buzz()
@@ -885,8 +1215,190 @@ class Max(Gtk.Application):
         self.open_chat = None
         self.back.hide()
         self.title.set_text("MAX")
-        self.fill_list()
         self.stack.set_visible_child_name("chats")
+        self.fill_list()
+
+    # the search: a person by phone, a channel or group by link, own chats by name
+    def show_find(self):
+        self.open_chat = None
+        self.title.set_text("Поиск")
+        self.sub.set_text("")
+        self.back.show()
+        self.find_hint.set_text(
+            "Номер телефона — найти человека в MAX. Ссылка max.ru/… или @имя — "
+            "канал или группа. Другое — среди ваших чатов.")
+        self.stack.set_visible_child_name("find")
+        self.find_entry.grab_focus()
+
+    def find(self):
+        text = self.find_entry.get_text().strip()
+        for child in self.found.get_children():
+            child.destroy()
+        if not text:
+            return
+        phone, link = phone_of(text), link_of(text)
+        if phone:
+            self.find_hint.set_text("Ищу %s…" % phone)
+
+            def person(p, err):
+                if self.find_entry.get_text().strip() != text:
+                    return  # asked something else meanwhile
+                if err or not p:
+                    self.find_hint.set_text("С номером %s в MAX никого не нашлось." % phone)
+                    return
+                self.find_hint.set_text("")
+                self.show_person(p)
+
+            self.backend.run(self.backend.find_phone(phone), person)
+        elif link:
+            self.find_hint.set_text("Открываю ссылку…")
+
+            def chat(info, err):
+                if self.find_entry.get_text().strip() != text:
+                    return
+                if err or not info:
+                    # MAX told nothing about the link; joining may still work.
+                    self.find_hint.set_text("Сведений по ссылке нет, но вступить можно попробовать.")
+                    info = {"id": 0, "title": link.split("max.ru/", 1)[1], "type": "",
+                            "members": 0, "joined": False}
+                else:
+                    self.find_hint.set_text("")
+                self.show_found_chat(info, link)
+
+            self.backend.run(self.backend.link_info(link), chat)
+        else:
+            want = text.casefold()
+            hits = sorted((c for c in self.summaries.values()
+                           if want in c["title"].casefold() and not self.hidden(c)),
+                          key=lambda c: -(c["time"] or 0))
+            self.find_hint.set_text("" if hits else "Среди ваших чатов такого нет.")
+            if hits:
+                box = Gtk.ListBox()
+                box.set_selection_mode(Gtk.SelectionMode.NONE)
+                box.connect("row-activated", self.on_row)
+                for c in hits:
+                    box.add(self.chat_row(c))
+                self.found.pack_start(box, False, False, 0)
+        self.found.show_all()
+
+    def found_card(self, title, about, key):
+        """A card of a search result; its buttons go in the returned box."""
+        card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
+        card.get_style_context().add_class("settings")
+        top = Gtk.Box(spacing=18)
+        top.pack_start(initials_icon(title, key), False, False, 0)
+        mid = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        mid.set_valign(Gtk.Align.CENTER)
+        mid.pack_start(label(title, "chat-name", ellipsize=True), False, False, 0)
+        mid.pack_start(label(about, "chat-last", ellipsize=True), False, False, 0)
+        top.pack_start(mid, True, True, 0)
+        card.pack_start(top, False, False, 0)
+        buttons = Gtk.Box(spacing=12)
+        card.pack_start(buttons, False, False, 0)
+        self.found.pack_start(card, False, False, 0)
+        return buttons
+
+    def action(self, box, text, cls, clicked):
+        b = Gtk.Button(label=text)
+        b.get_style_context().add_class(cls)
+        b.connect("clicked", clicked)
+        box.pack_start(b, False, False, 0)
+        return b
+
+    def show_person(self, p):
+        buttons = self.found_card(p["name"], self.find_entry.get_text().strip(), p["id"])
+        if p["chat"] is not None:
+            self.action(buttons, "Написать", "act", lambda _b: self.write_to(p))
+
+        def add(btn):
+            btn.set_sensitive(False)
+
+            def done(_res, err):
+                btn.set_label("Не удалось, ещё раз" if err else "В контактах")
+                btn.set_sensitive(bool(err))
+                if not err:
+                    for c in self.summaries.values():
+                        if c.get("peer") == p["id"]:
+                            c["stranger"] = False
+                    self.fill_list()
+
+            self.backend.run(self.backend.add_contact(p["id"]), done)
+
+        self.action(buttons, "В контакты", "plain", add)
+        self.found.show_all()
+
+    def write_to(self, p):
+        if p["chat"] not in self.summaries:
+            self.pending[p["chat"]] = {"id": p["chat"], "title": p["name"], "type": "DIALOG",
+                                       "last": "", "time": 0, "unread": 0}
+        self.open(p["chat"])
+
+    def show_found_chat(self, info, link):
+        channel = info["type"] == "CHANNEL"
+        n = info["members"]
+        about = ("канал" if channel else "группа" if info["type"] else "ссылка в MAX") + (
+            " · %s: %d" % ("подписчиков" if channel else "участников", n) if n else "")
+        buttons = self.found_card(info["title"], about, info["id"])
+        if info["joined"] and info["id"] in self.summaries:
+            self.action(buttons, "Открыть", "act", lambda _b: self.open(info["id"]))
+        else:
+            def join(btn):
+                btn.set_sensitive(False)
+
+                def done(summary, err):
+                    if err or not summary:
+                        btn.set_label("Не удалось, ещё раз")
+                        btn.set_sensitive(True)
+                        return
+                    self.summaries[summary["id"]] = summary
+                    save_list(list(self.summaries.values()))
+                    self.fill_list()
+                    self.open(summary["id"])
+
+                self.backend.run(self.backend.join(link), done)
+
+            self.action(buttons, "Подписаться" if channel else "Вступить", "act", join)
+        self.found.show_all()
+
+    # deleting a dialog, leaving a group or a channel
+    def ask_remove(self):
+        s = self.summaries.get(self.open_chat)
+        if not s:
+            return
+        question, yes = {
+            "CHANNEL": ("Отписаться от канала «%s»?", "Отписаться"),
+            "CHAT": ("Выйти из группы «%s»? Её сообщения уйдут из списка.", "Выйти"),
+        }.get(s["type"], ("Удалить переписку с «%s» у себя? У собеседника она останется.",
+                          "Удалить"))
+        self.confirm_text.set_text(question % s["title"])
+        self.confirm_yes.set_label(yes)
+        self.confirm.show()
+
+    def remove(self):
+        chat_id = self.open_chat
+        self.confirm_yes.set_sensitive(False)
+
+        def done(_res, err):
+            self.confirm_yes.set_sensitive(True)
+            if err:
+                if self.open_chat == chat_id:
+                    self.sub.set_text("не удалось, попробуйте ещё раз")
+                return
+            self.confirm.hide()
+            self.summaries.pop(chat_id, None)
+            save_list(list(self.summaries.values()))
+            view = self.views.pop(chat_id, None)
+            if view is not None:
+                if view is self.view:
+                    self.viewport.remove(view)
+                    self.view = None
+                view.destroy()
+            if self.open_chat == chat_id:
+                self.show_list()
+            else:
+                self.fill_list()
+
+        self.backend.run(self.backend.remove(chat_id), done)
 
     # the settings
     def show_settings(self):
@@ -917,6 +1429,28 @@ class Max(Gtk.Application):
         card.pack_start(label(hint, "hint", wrap=True), False, False, 0)
         return card
 
+    def on_contacts_only(self, on):
+        self.contacts_only = on
+        save_setting("contacts_only", on)
+        self.fill_list()
+
+    def on_invites(self, on):
+        self.invites = on
+        save_setting("invites", on)
+        hint = self.invites_card.get_children()[1]
+        text = hint.get_text().split("\n")[0]
+        hint.set_text(text + "\nСохраняю в MAX…")
+
+        def done(_res, err):
+            hint.set_text(text + ("\nНе удалось сохранить в MAX: попробую при следующем входе."
+                                  if err else ""))
+
+        self.backend.run(self.backend.set_invites(on), done)
+
+    def hidden(self, s):
+        """A dialog with someone not in the contacts, while those are hidden."""
+        return self.contacts_only and bool(s and s.get("stranger"))
+
     def on_buzz(self, on):
         self.buzz_new = on
         save_setting("buzz", on)
@@ -929,6 +1463,10 @@ class Max(Gtk.Application):
         # Settings from the list or before the login, so telemetry can be
         # switched off before anything is sent.
         self.gear.set_visible(page in ("chats", "wait", "qr"))
+        self.findb.set_visible(page == "chats")
+        self.trash.set_visible(page == "chat" and self.open_chat in self.summaries)
+        if page != "chat":
+            self.confirm.hide()
         self.moved()
 
     def moved(self):
@@ -938,14 +1476,20 @@ class Max(Gtk.Application):
         page = self.stack.get_visible_child_name()
         if page == "chats":
             self.telemetry.go(SCREEN_CHATS, MAIN_TAB)
+        elif page == "find":
+            self.telemetry.go(SCREEN_SEARCH)
         elif page == "chat":
-            s = self.summaries.get(self.open_chat, {})
+            s = self.about(self.open_chat)
             self.telemetry.go(SCREEN_CHAT, {"source_type": 1 if s.get("type") == "DIALOG" else 2,
                                             "source_id": self.open_chat})
         elif page == "settings":
             self.telemetry.go(SCREEN_SETTINGS)
 
     # a chat
+    def about(self, chat_id):
+        """The chat's summary, also of a dialog not yet written to."""
+        return self.summaries.get(chat_id) or self.pending.get(chat_id, {})
+
     def view_for(self, chat_id):
         """The built chat, from memory, else from the disk cache."""
         view = self.views.pop(chat_id, None)
@@ -972,8 +1516,10 @@ class Max(Gtk.Application):
 
     def open(self, chat_id):
         start = time.monotonic()
-        s = self.summaries.get(chat_id, {})
+        s = self.about(chat_id)
         self.open_chat = chat_id
+        self.confirm.hide()
+        self.trash.set_visible(chat_id in self.summaries)
         view = self.view_for(chat_id)
         if self.view is not view:
             if self.view is not None:
@@ -1073,9 +1619,13 @@ class Max(Gtk.Application):
             if msg and view and msg["id"] not in view.shown:
                 self.add_bubble(view, msg)
                 self.scroll_down()
+            if chat_id in self.pending:  # the dialog exists now
+                self.summaries.setdefault(chat_id, self.pending.pop(chat_id))
+                self.trash.set_visible(self.open_chat == chat_id)
             s = self.summaries.get(chat_id)
             if s:
                 s["last"], s["time"] = "Вы: " + text, int(time.time() * 1000)
+                s["stranger"] = False  # written to here: welcome now
 
         self.backend.run(self.backend.send(chat_id, text), done)
 

@@ -46,7 +46,25 @@ it from the checkout still needs PyMax installed there.
   copy PyMax 2.4.1's `pymax/telemetry/payloads.py`; sent in batches via `Opcode.LOG` through
   `Backend.log`. On by default, switched in the settings page (gear), stored in
   `~/.config/b8k/max.conf` (`[max] telemetry`; `buzz` there switches the buzz on new messages,
-  not on button taps). Re-check the shapes when bumping PyMax.
+  not on button taps; `contacts_only` and `invites`, see below). Re-check the shapes when bumping PyMax.
+- **Search, join, delete.** The `find` page (magnifier on the list) reads its entry with
+  `phone_of` (a person: `users.search_by_phone`, then write or `users.add_contact`), `link_of`
+  (a channel or group: `LINK_INFO` invoked directly so public `max.ru/name` links work too, then
+  `chats.join_channel`), else filters the own chats by title. A dialog opened from the search
+  waits in `Max.pending` (chat id = own id XOR theirs, as PyMax numbers dialogs) until its first
+  message. The bin on a chat asks on the page (`confirm` bar), then `Backend.remove`: a dialog
+  is deleted, a group or channel left, always `for_all=False` — never for the others in it.
+  A message from a chat not in the list fetches it (`Backend.chat`).
+- **Contacts only.** MAX has no "who may write to me" setting, so `contacts_only` (on by default)
+  is a filter here: summaries carry `peer` and `stranger`, and `Max.hidden()` keeps strangers'
+  dialogs off the list, the local search, the badge and the buzz. `Backend.known` (persisted to
+  `~/.local/share/b8k-max/known.json`, 600) holds login contacts, contacts added here, people
+  written to here (`remember`), and on the very first run every existing dialog's peer — the
+  login sends only changed contacts after the first one, and nobody known must go quiet on update.
+- **Chat invites.** `invites` (on by default) is MAX's own privacy setting `CHATS_INVITE`, set
+  through `account.change_profile_settings`. `Backend.set_invites` sends it when switched, and at
+  login only if `~/.local/share/b8k-max/invites.json` (account id -> value last taken) differs —
+  so it is not re-sent on every login and a change made on the phone is not overridden.
 - **Single instance, background life.** `Max` is a `Gtk.Application` with id `b8k.Max`; a second
   launch just activates the first process over D-Bus. Closing the window hides it. With
   `--background` the window is not shown at start.
