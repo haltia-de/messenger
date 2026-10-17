@@ -22,7 +22,8 @@ b8k-max --background     # start hidden (what b8k-launcher does at session start
 python3 -m py_compile b8k-max   # quick syntax check
 ```
 
-Runtime deps (Alpine): `apk add python3 py3-gobject3 gtk+3.0`, plus `wget`/`unzip`/`sha256sum`
+Runtime deps (Alpine): `apk add python3 py3-gobject3 gtk+3.0` (optional: `py3-mpv mpv-libs` for voice
+messages, `font-noto-emoji` for reactions; the tablet image has them), plus `wget`/`unzip`/`sha256sum`
 for `install.sh`. `install.sh` downloads the pinned PyMax wheel (`maxapi_python-2.4.1`), checks
 its sha256 and unpacks it into `/usr/local/lib/b8k-max`; the download is cached in `$B8K_CACHE`
 (default `.cache/` here, git-ignored). Bumping PyMax means changing both the wheel name and the
@@ -71,11 +72,28 @@ it from the checkout still needs PyMax installed there.
 - **Caches.** `~/.cache/b8k-max/chats/<id>.json` keeps the last `KEEP` messages per chat and
   `list.json` the chat list (all mode 600, written atomically via `.new` + `os.replace`). A chat whose
   `last_message` is already cached and has no unread opens with no history request at all; else
-  the last `HISTORY` are fetched. The last `VIEWS` chat views stay built in memory. The chat list
+  the last `PAGE` are fetched (see Paging). The last `VIEWS` chat views stay built in memory. The chat list
   keeps one row per chat (`Max.rows`, sorted and filtered by GTK) and `fill_list` redraws only rows
   whose look changed — don't go back to rebuilding it (≈30× slower per message). Photos are cached
   in `~/.cache/b8k-max/` by URL hash, touched when shown, pruned after `PHOTO_DAYS` unshown (at
   start and daily). Small state files in `DATA` go through `load_json`/`save_json` (600, atomic).
+- **Tabs, pins, notifications.** The list's filter func shows one tab (`Max.tab`: chats or
+  channels); its sort func puts `pinned` first, in pin order. Notifications (buzz, badge) are per
+  chat: `is_muted` is true for channels unless in `unmuted`, for others if in `muted`. All kept in
+  `PREFS` (`chats.json`), locally — PyMax has no pin/mute request (`CHAT_PERSONAL_CONFIG` is bare).
+  A long press on the list (`row_menu`, one gesture on the ListBox, `get_row_at_y`) opens the menu;
+  `held` stops the release from opening the chat. `look()` must include whatever a row shows.
+- **Paging.** `Backend.history` returns the newest `PAGE` and whether they leave a gap after the
+  cache (then the cache and the view start anew); `older(chat, before)` returns the page before.
+  The view prepends pages (`prepend`, fixing the day labels at the seam) when scrolled near the
+  top, plus `PREFETCH` pages in the background for the open chat; `anchor` (distance from the
+  bottom) keeps the place while the content grows above. `trim` cuts a left chat to `BUBBLES`.
+  Photos go to `view.photos` and load in `load_visible` only within a screen of the viewport.
+- **Media.** `media_of` turns AUDIO/VIDEO/FILE attachments into `media` items. Voice plays in the
+  bubble through `Sound` (libmpv, `video=False`; an `end-file` with reason ABORTED is a stop or a
+  switch, not an end). Video and files get a link from `Backend.media_url`
+  (`get_video_by_id`/`get_file_by_id`), checked by `media_ok` (https, no LAN/loopback), then
+  `b8k-vplay`/`mpv --fs` or the browser. Thumbnails go through `photo_ok` like photos.
 - **Reactions.** Message dicts carry `reactions` ([[emoji, count]]) and `yours`; a long press on a
   bubble (`Gtk.GestureLongPress`, kept on the event box) opens a popover of `REACTIONS`.
   `Backend.react` uses `messages.add_reaction`/`remove_reaction`; when MAX answers without counts
