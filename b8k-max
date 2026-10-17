@@ -10,11 +10,19 @@ to scan in MAX on a phone; the session is then kept in
 ~/.local/share/b8k-max/web.db (mode 600). PyMax's simulated telemetry is
 off: a person is typing here.
 
+Telemetry of our own instead, as MAX's app reports it, so that the server
+sees an ordinary client and is less likely to block the account: the
+screens a person really goes through (to the list, into a chat, the
+window hidden) and how long a chat took to show, in the event shapes of
+PyMax 2.4.1. No texts, no names. It is on until switched off in the
+settings (the gear in the header), kept in ~/.config/b8k/max.conf with
+the buzz on new messages.
+
 Pages: the chat list (initials, name, last message, time, unread count)
 and a chat (bubbles, photos, a large entry and a send button). New
-messages arrive live and buzz. PyMax runs in its own thread with an
-asyncio loop; every call from the window goes through run(), every answer
-comes back with GLib.idle_add.
+messages arrive live and buzz (unless switched off in the settings).
+PyMax runs in its own thread with an asyncio loop; every call from the
+window goes through run(), every answer comes back with GLib.idle_add.
 
 It lives in the background: b8k-launcher starts it with --background at
 session start, closing the window only hides it, and the panel's MAX
@@ -26,6 +34,7 @@ messages of each chat on disk (~/.cache/b8k-max/chats, mode 600) and the
 last six chats kept built in memory; only newer messages are fetched.
 """
 import asyncio
+import configparser
 import hashlib
 import json
 import os
@@ -71,6 +80,11 @@ PHOTO_DAYS = 30  # cached photos older than this are removed
 CHATS = os.path.join(PHOTOS, "chats")  # message cache, one file per chat
 KEEP = 80  # messages kept per chat on disk
 VIEWS = 6  # chats kept built in memory
+CONFIG = os.path.expanduser("~/.config/b8k/max.conf")
+# MAX's screen numbers in its telemetry (pymax.telemetry.navigation).
+SCREEN_BACKGROUND, SCREEN_CHATS, SCREEN_CHAT, SCREEN_SETTINGS = 1, 150, 350, 450
+MAIN_TAB = {"source_type": 5, "source_id": 1, "tab_config": 2}  # going to the chat list
+FLUSH_SEC = 3  # events go out in small batches, as the app sends them
 MONTHS = "янв фев мар апр мая июн июл авг сен окт ноя дек".split()
 COLOURS = ((0.21, 0.52, 0.89), (0.15, 0.64, 0.41), (0.90, 0.38, 0.0), (0.57, 0.25, 0.67),
            (0.75, 0.11, 0.16), (0.10, 0.58, 0.62), (0.53, 0.36, 0.24))
@@ -119,6 +133,20 @@ button.send {
 }
 button.send label { color: #ffffff; }
 button.send:disabled { background-color: #99c1f1; }
+button.gear {
+  background-image: none;
+  background-color: #f2f2f0;
+  border: 1px solid #c0bfbc;
+  box-shadow: none;
+  border-radius: 16px;
+  min-height: 72px;
+  min-width: 72px;
+  padding: 8px;
+}
+.settings { background-color: #f2f2f0; border-radius: 18px; padding: 24px 28px; }
+label.setting { font-size: 26px; }
+switch { min-width: 120px; min-height: 56px; border-radius: 28px; }
+switch slider { min-width: 56px; min-height: 56px; border-radius: 28px; }
 """
 
 # --- small helpers ----------------------------------------------------------
@@ -292,6 +320,8 @@ class Backend:
             if kind(c.type) == "DIALOG":
                 want.update(u for u in c.participants if u != self.me)
         await self.lookup(want)
+        if self.me:
+            GLib.idle_add(self.ui.logged_in, self.me, client._app.config.device.client_session_id)
         GLib.idle_add(self.ui.show_chats, [self.summary(c) for c in chats])
 
     async def lookup(self, ids):
@@ -374,6 +404,17 @@ class Backend:
     async def read(self, chat_id, msg_id):
         await self.client._app.api.messages.read_message(msg_id, chat_id)
 
+    async def log(self, events):
+        """Telemetry events (dicts shaped as PyMax's TelemetryEvent) to MAX."""
+        from pymax.protocol import Opcode
+        from pymax.telemetry.payloads import TelemetryEvent, TelemetryPayload
+
+        app = self.client._app
+        if not (app.started and app.me and app.connection.is_open):
+            return
+        payload = TelemetryPayload(events=[TelemetryEvent(**e) for e in events]).to_payload()
+        await app.invoke(Opcode.LOG, payload, timeout=app.config.request_timeout)
+
     async def _message(self, msg, _client):
         await self.lookup({msg.sender})
         chat = self.chats.get(msg.chat_id)
@@ -444,6 +485,114 @@ def set_badge(count):
         b8k_ui.badge("max", count)
 
 
+def load_setting(key):
+    """A yes/no setting of [max] in CONFIG (telemetry, buzz); yes until set."""
+    conf = configparser.ConfigParser(interpolation=None)
+    conf.read(CONFIG, encoding="utf-8")
+    try:
+        return conf.getboolean("max", key, fallback=True)
+    except ValueError:
+        return True
+
+
+def save_setting(key, on):
+    conf = configparser.ConfigParser(interpolation=None)
+    conf.read(CONFIG, encoding="utf-8")
+    if not conf.has_section("max"):
+        conf.add_section("max")
+    conf["max"][key] = "yes" if on else "no"
+    try:
+        os.makedirs(os.path.dirname(CONFIG), exist_ok=True)
+        with open(CONFIG + ".new", "w", encoding="utf-8") as fh:
+            conf.write(fh)
+        os.replace(CONFIG + ".new", CONFIG)
+    except OSError:
+        pass
+
+
+def now_ms():
+    return int(time.time() * 1000)
+
+
+class Telemetry:
+    """What MAX's app tells the server about its use, from what really
+    happens here (see the top of the file). Called in the window's thread;
+    the events leave through the MAX thread in small batches. The shapes
+    and fixed values are PyMax 2.4.1's (pymax/telemetry/payloads.py)."""
+
+    def __init__(self, backend):
+        self.backend = backend
+        self.on = load_setting("telemetry")
+        self.user = None  # the account's id, once logged in
+        self.session = 0
+        self.screen = SCREEN_BACKGROUND
+        self.last_go = now_ms()
+        self.action = 0
+        self.queue = []
+        self.timer = 0
+
+    def started(self, user, session):
+        """Logged in, at start and after every reconnect, as PyMax does."""
+        self.user, self.session = user, session
+        self.add("PERF", "login", {
+            "properties": {"connection_type": 2, "vpn": 0, "class": 2,
+                           "background": 1, "warm_start": 1},
+            "errorType": 100})
+
+    def go(self, screen, params=None):
+        """The person went to another screen (BACKGROUND: the window hid).
+        Before the login nothing moves: the window tells again after it."""
+        if screen == self.screen or self.user is None:
+            return
+        before, self.screen = self.screen, screen
+        if before == SCREEN_BACKGROUND:
+            self.session += 1  # a new visit, as the app counts them
+        self.action = (self.action + 1) % 0xFFFFFFFF
+        nav = {"prev_time": self.last_go, "screen_to": screen, "action_id": self.action,
+               "screen_from": before}
+        nav.update(params or {})
+        self.last_go = now_ms()
+        self.add("NAV", "GO", nav)
+        if screen == SCREEN_BACKGROUND:
+            self.flush()
+
+    def chat_shown(self, messages, render):
+        """A chat opened: ms until its messages came, then until drawn."""
+        self.add("PERF", "open_chat_to_render", {
+            "spans": [{"duration": messages + render, "name": "open_chat_to_render"},
+                      {"duration": messages, "name": "messages_list_created"},
+                      {"duration": render, "name": "messages_render"}],
+            "properties": {"class": 2, "warm": 1, "flow": 1}})
+
+    def add(self, type_, event, params):
+        if not self.on or self.user is None:
+            return
+        self.queue.append({"time": now_ms(), "user_id": self.user, "type": type_,
+                           "event": event, "params": params, "session_id": self.session})
+        if not self.timer:
+            self.timer = GLib.timeout_add_seconds(FLUSH_SEC, self._tick)
+
+    def _tick(self):
+        self.timer = 0
+        self.flush()
+        return False
+
+    def flush(self):
+        if self.timer:
+            GLib.source_remove(self.timer)
+            self.timer = 0
+        events, self.queue = self.queue, []
+        if events:
+            self.backend.run(self.backend.log(events))
+
+    def switch(self, on):
+        self.on = on
+        save_setting("telemetry", on)
+        if not on:
+            self.queue = []
+            self.flush()
+
+
 def photo_ok(url):
     parts = urllib.parse.urlsplit(url or "")
     host = (parts.hostname or "").lower()
@@ -503,6 +652,9 @@ class Max(Gtk.Application):
         self.win = None
         self.buzz = buzzer()
         self.backend = Backend(self)
+        self.telemetry = Telemetry(self.backend)
+        self.came_from = "chats"  # the page the settings go back to
+        self.buzz_new = load_setting("buzz")  # buzz on a new message
         self.summaries = {}
         self.open_chat = None
         self.views = {}  # chat id -> built view, most recently used last
@@ -533,10 +685,17 @@ class Max(Gtk.Application):
         bar.set_custom_title(heading)
         self.back = Gtk.Button(label="←")
         self.back.get_style_context().add_class("back")
-        self.back.connect("clicked", lambda _b: self.show_list())
+        self.back.connect("clicked", lambda _b: self.go_back())
         self.back.set_no_show_all(True)
         bar.pack_start(self.back)
+        self.gear = Gtk.Button.new_from_icon_name("emblem-system-symbolic", Gtk.IconSize.DIALOG)
+        self.gear.get_style_context().add_class("gear")
+        self.gear.connect("clicked", lambda _b: self.show_settings())
+        self.gear.set_no_show_all(True)
+        bar.pack_end(self.gear)
         self.win.set_titlebar(bar)
+        self.win.connect("map", lambda _w: self.moved())
+        self.win.connect("unmap", lambda _w: self.telemetry.go(SCREEN_BACKGROUND))
 
         self.stack = Gtk.Stack()
         self.win.add(self.stack)
@@ -596,6 +755,24 @@ class Max(Gtk.Application):
         chat.pack_start(self.inputbar, False, False, 0)
         self.stack.add_named(chat, "chat")
 
+        settings = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=20)
+        settings.set_margin_start(24)
+        settings.set_margin_end(24)
+        settings.set_margin_top(24)
+        settings.pack_start(self.setting(
+            "Вибрация при новом сообщении", self.buzz_new, self.on_buzz,
+            "Планшет вздрагивает, когда приходит сообщение. Касания кнопок "
+            "вибрируют как прежде."), False, False, 0)
+        settings.pack_start(self.setting(
+            "Отправлять телеметрию в MAX", self.telemetry.on, self.on_telemetry,
+            "Приложение MAX само сообщает серверу, какие экраны открыты и как быстро "
+            "показался чат. Эта программа сообщает то же, по-настоящему, без текстов "
+            "и имён: так она меньше отличается от приложения, и это может снизить риск "
+            "блокировки аккаунта. Если выключить, сервер не получит ничего из этого."),
+            False, False, 0)
+        self.stack.add_named(settings, "settings")
+        self.stack.connect("notify::visible-child-name", self.page_changed)
+
         # The last known list at once; the connection refreshes it.
         cached = load_list()
         if cached:
@@ -610,14 +787,23 @@ class Max(Gtk.Application):
         else:
             self.win.show_all()
         self.stack.set_visible_child_name("chats" if cached else "wait")
+        self.page_changed()
         threading.Thread(target=prune_photos, daemon=True).start()
         self.backend.start()
 
     # called from the MAX thread through idle_add
     def show_qr(self, path):
         self.qr_image.set_from_pixbuf(GdkPixbuf.Pixbuf.new_from_file(path))
+        if self.stack.get_visible_child_name() == "settings":
+            self.back.hide()
+            self.title.set_text("MAX")
         self.stack.set_visible_child_name("qr")
         self.win.present()  # a login needs the person, background or not
+        return False
+
+    def logged_in(self, user, session):
+        self.telemetry.started(user, session)
+        self.moved()
         return False
 
     def failed(self, why):
@@ -629,8 +815,11 @@ class Max(Gtk.Application):
         self.summaries = {s["id"]: s for s in summaries}
         save_list(summaries)
         self.fill_list()
-        if self.open_chat is None:
+        page = self.stack.get_visible_child_name()
+        if page in ("wait", "qr"):
             self.stack.set_visible_child_name("chats")
+        elif page == "settings":
+            self.came_from = "chats"
         return False
 
     def incoming(self, msg, summary):
@@ -645,7 +834,7 @@ class Max(Gtk.Application):
         if here and not msg["mine"] and self.win.is_active():
             self.backend.run(self.backend.read(msg["chat"], msg["id"]))
             self.summaries[msg["chat"]]["unread"] = 0
-        if not msg["mine"]:
+        if not msg["mine"] and self.buzz_new:
             self.buzz()
             if not here:
                 GLib.timeout_add(180, lambda: self.buzz() and False)
@@ -699,6 +888,63 @@ class Max(Gtk.Application):
         self.fill_list()
         self.stack.set_visible_child_name("chats")
 
+    # the settings
+    def show_settings(self):
+        self.came_from = self.stack.get_visible_child_name()
+        self.title.set_text("Настройки")
+        self.sub.set_text("")
+        self.back.show()
+        self.stack.set_visible_child_name("settings")
+
+    def go_back(self):
+        if self.stack.get_visible_child_name() == "settings" and self.came_from != "chats":
+            self.back.hide()  # to the login page, which has no list behind it
+            self.title.set_text("MAX")
+            self.stack.set_visible_child_name(self.came_from)
+        else:
+            self.show_list()
+
+    def setting(self, title, active, changed, hint):
+        """One card of the settings page: a title, a switch and what it does."""
+        card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
+        card.get_style_context().add_class("settings")
+        row = Gtk.Box(spacing=24)
+        row.pack_start(label(title, "setting", wrap=True), True, True, 0)
+        switch = Gtk.Switch(active=active, valign=Gtk.Align.CENTER)
+        switch.connect("notify::active", lambda sw, _p: (self.buzz(), changed(sw.get_active())))
+        row.pack_end(switch, False, False, 0)
+        card.pack_start(row, False, False, 0)
+        card.pack_start(label(hint, "hint", wrap=True), False, False, 0)
+        return card
+
+    def on_buzz(self, on):
+        self.buzz_new = on
+        save_setting("buzz", on)
+
+    def on_telemetry(self, on):
+        self.telemetry.switch(on)
+
+    def page_changed(self, *_args):
+        page = self.stack.get_visible_child_name()
+        # Settings from the list or before the login, so telemetry can be
+        # switched off before anything is sent.
+        self.gear.set_visible(page in ("chats", "wait", "qr"))
+        self.moved()
+
+    def moved(self):
+        """Tell telemetry which screen is in front."""
+        if not self.win.is_visible():
+            return
+        page = self.stack.get_visible_child_name()
+        if page == "chats":
+            self.telemetry.go(SCREEN_CHATS, MAIN_TAB)
+        elif page == "chat":
+            s = self.summaries.get(self.open_chat, {})
+            self.telemetry.go(SCREEN_CHAT, {"source_type": 1 if s.get("type") == "DIALOG" else 2,
+                                            "source_id": self.open_chat})
+        elif page == "settings":
+            self.telemetry.go(SCREEN_SETTINGS)
+
     # a chat
     def view_for(self, chat_id):
         """The built chat, from memory, else from the disk cache."""
@@ -725,6 +971,7 @@ class Max(Gtk.Application):
         return view
 
     def open(self, chat_id):
+        start = time.monotonic()
         s = self.summaries.get(chat_id, {})
         self.open_chat = chat_id
         view = self.view_for(chat_id)
@@ -742,6 +989,7 @@ class Max(Gtk.Application):
         self.scroll_down()
 
         def done(msgs, err):
+            came = time.monotonic()
             if err:
                 if self.open_chat == chat_id:
                     self.sub.set_text("" if view.shown else "не удалось загрузить")
@@ -752,6 +1000,12 @@ class Max(Gtk.Application):
                     self.add_bubble(view, m)
             if self.open_chat == chat_id:
                 self.sub.set_text("")
+
+                def drawn():  # an idle runs after the redraw
+                    self.telemetry.chat_shown(int((came - start) * 1000),
+                                              int((time.monotonic() - came) * 1000))
+                    return False
+                GLib.idle_add(drawn)
             if chat_id in self.summaries:
                 self.summaries[chat_id]["unread"] = 0
                 self.fill_list()

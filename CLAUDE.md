@@ -39,7 +39,14 @@ it from the checkout still needs PyMax installed there.
   so a PyMax upgrade can break them.
 - **Login.** `Backend` is PyMax's QR provider (`show_qr`): the first start renders a QR code to
   scan with MAX on a phone. The session lives in `~/.local/share/b8k-max/web.db` (chmod 600).
-  Telemetry is turned off in `ExtraConfig`.
+- **Telemetry.** PyMax's own (a random simulation of browsing) stays off in `ExtraConfig`. The
+  `Telemetry` class sends MAX-app-style events built from real UI actions instead: `NAV GO` on
+  every screen change (`moved()`, driven by the stack page and window map/unmap), `PERF login`
+  after each login, `PERF open_chat_to_render` with measured times. Event shapes and fixed values
+  copy PyMax 2.4.1's `pymax/telemetry/payloads.py`; sent in batches via `Opcode.LOG` through
+  `Backend.log`. On by default, switched in the settings page (gear), stored in
+  `~/.config/b8k/max.conf` (`[max] telemetry`; `buzz` there switches the buzz on new messages,
+  not on button taps). Re-check the shapes when bumping PyMax.
 - **Single instance, background life.** `Max` is a `Gtk.Application` with id `b8k.Max`; a second
   launch just activates the first process over D-Bus. Closing the window hides it. With
   `--background` the window is not shown at start.
