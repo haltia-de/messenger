@@ -2289,10 +2289,11 @@ class Max(Gtk.Application):
                 if self.playing:
                     self.sound.stop()
                     self.sound_end()
-                # No youtube-dl and no playlists: the link is played as it is,
-                # asked for the way web.max.ru asks (MAX's CDN may want that).
-                opts = {"ytdl": "no", "load-unsafe-playlists": "no",
-                        "referrer": WEB + "/", "http-header-fields": "Origin: " + WEB}
+                # No youtube-dl and no playlists: the link is played as it is.
+                # The video CDN (okcdn.ru) wants the browser's user agent the
+                # link was made for and answers 400 to a Referer or an Origin
+                # of web.max.ru, so the video gets the agent only.
+                opts = {"ytdl": "no", "load-unsafe-playlists": "no"}
                 if self.backend.agent:
                     opts["user-agent"] = self.backend.agent
                 if os.access(PLAYER, os.X_OK):
