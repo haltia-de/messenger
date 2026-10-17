@@ -1084,7 +1084,10 @@ class Max(Gtk.Application):
         self.list = Gtk.ListBox()
         self.list.set_selection_mode(Gtk.SelectionMode.NONE)
         self.list.connect("row-activated", self.on_row)
-        self.list.set_sort_func(lambda a, b: (b.summary["time"] or 0) - (a.summary["time"] or 0))
+        # Newest first. GTK wants a 32-bit answer: the difference of two
+        # times in ms overflows past 24 days, so only the sign is given.
+        self.list.set_sort_func(lambda a, b: ((b.summary["time"] or 0) > (a.summary["time"] or 0))
+                                - ((b.summary["time"] or 0) < (a.summary["time"] or 0)))
         self.list.set_filter_func(lambda row: not self.hidden(row.summary))
         self.rows = {}  # chat id -> its row, kept between updates
         scroll = Gtk.ScrolledWindow()
