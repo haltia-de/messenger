@@ -61,8 +61,11 @@ A chat opens with its cache and the newest PAGE messages; two older pages
 follow in the background, the rest as the reader scrolls up, keeping the
 place. Only the newest FIRST messages are built at once (a screen of them);
 every other bubble is built a few at a time when the window is idle, so
-scrolling and going back never wait for a page to be laid out. A chat left keeps only its newest BUBBLES built, and photos are
-fetched only near the screen. Voice messages play in the bubble (libmpv,
+scrolling and going back never wait for a page to be laid out; a spinner
+shows while an older page comes. A chat left keeps only its newest BUBBLES
+built and, back in it, the place it was left at; photos are fetched only
+near the screen. All of that is ChatView's, one per chat (CONTEXT.md).
+Voice messages play in the bubble (libmpv,
 sound only); a video opens full screen in b8k-vplay (mpv elsewhere) and a
 file in the browser, by the short-lived link MAX gives on request.
 
@@ -1224,6 +1227,459 @@ def load_photo(url, done):
     threading.Thread(target=work, daemon=True).start()
 
 
+# --- a chat on screen ----------------------------------------------------------
+class ChatView:
+    """One chat's messages on screen (CONTEXT.md: Chat view): its own scroll
+    area, the bubbles with their day labels, reactions and media controls,
+    built a few at a time; older pages fetched as the reader scrolls up (and
+    PREFETCH of them in the background), with a spinner while they come; the
+    place kept while bubbles go in above; photos fetched only near the
+    screen. It works only between enter() and leave(); leave() cuts it to
+    its newest BUBBLES.
+
+    What it needs from outside comes in at creation: the cached messages,
+    fetch_older(before_ms, done(msgs, err)) for the page before a time, and
+    what a long press (on_hold(msg_id, widget)), a media control
+    (on_media(msg, item, controls)) and a reaction chip (on_react(msg_id,
+    emoji or None)) do. Everything is called on the GTK side."""
+
+    def __init__(self, chat_id, kind, cached, fetch_older, on_hold, on_media, on_react):
+        self.chat_id = chat_id
+        self.group = kind in ("CHAT", "CHANNEL")  # senders' names over their bubbles
+        self.fetch_older, self.on_hold = fetch_older, on_hold
+        self.on_media, self.on_react = on_media, on_react
+        self.shown = set()  # ids of the messages built
+        self.msgs = {}  # message id -> (its dict, the box of its reactions)
+        self.photos = []  # (image, url) not loaded yet: only when near the screen
+        self.last_day = None  # of the newest message built
+        self.first_day = self.top_sep = None  # of the oldest, and its day label
+        self.oldest = None  # time of the oldest message known (built or queued)
+        self.loading = self.done = False  # older pages: one at a time, none left
+        self.prefetch = 0  # older pages still to fetch in the background
+        # Messages still to build: newer ones at the bottom, older ones
+        # (oldest first) above the top, a few at a time (_step).
+        self.pending_new, self.pending_old = [], []
+        self.active = self.entered = self.building = False
+        self.at_bottom = True  # stays at the newest while things come in
+        self.anchor = None  # distance from the bottom kept while bubbles go in above
+        self.moving = False  # the place is being set here, not by the reader
+        self.scrolled_at = 0.0  # when the reader last moved it (monotonic)
+
+        self.box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        self.box.set_margin_start(16)
+        self.box.set_margin_end(16)
+        self.box.set_margin_bottom(12)
+        # Over the top message while an older page is on its way.
+        self.busy = Gtk.Box(spacing=12, halign=Gtk.Align.CENTER)
+        self.busy.set_margin_top(12)
+        self.spinner = Gtk.Spinner()
+        self.spinner.set_size_request(32, 32)
+        self.busy.pack_start(self.spinner, False, False, 0)
+        self.busy.pack_start(label("загрузка…", "older"), False, False, 0)
+        self.busy.set_no_show_all(True)
+        for w in self.busy.get_children():
+            w.show()
+        column = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        column.set_margin_top(12)
+        column.pack_start(self.busy, False, False, 0)
+        column.pack_start(self.box, False, False, 0)
+        viewport = Gtk.Viewport()
+        viewport.set_shadow_type(Gtk.ShadowType.NONE)
+        viewport.add(column)
+        self.widget = Gtk.ScrolledWindow()
+        self.widget.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        self.widget.set_kinetic_scrolling(True)
+        self.widget.add(viewport)
+        self.widget.show_all()
+        adj = self.widget.get_vadjustment()
+        adj.connect("changed", self._keep_place)
+        adj.connect("value-changed", self._moved)
+
+        for m in cached[-FIRST:]:  # a screen at once, the rest above it later
+            self._append(m)
+        self._queue_older(cached[:-FIRST])
+
+    # --- the interface --------------------------------------------------------
+    @property
+    def empty(self):
+        return not self.shown
+
+    def newest(self, msgs, gap, done=None):
+        """The newest page fetched on opening. If more came than a screen
+        (or MAX says there is a gap after the cache), what was built is not
+        continuous with it: start again from these. done() runs once drawn."""
+        latest = max((m["time"] for m in msgs if m["id"] in self.shown), default=0)
+        new = [m for m in msgs if m["id"] not in self.shown and m["time"] >= latest]
+        if gap or len(new) > FIRST:
+            self._clear()
+            new = list(msgs)
+        for m in msgs:
+            if m["id"] in self.msgs:  # reactions may have changed meanwhile
+                self.reacted(m["id"], m["reactions"], m["yours"])
+        if self.shown:
+            self.pending_new.extend(new)  # a few newer ones: at the bottom
+        else:
+            for m in new[-FIRST:]:
+                self._append(m)
+            self._queue_older(new[:-FIRST])
+        self.prefetch = PREFETCH  # fetched once the bubbles are built
+        self._start()
+        if not self.building and self.active:  # nothing to build: on to older pages
+            GLib.timeout_add(800, lambda: self._load_older(background=True) and False)
+        if done:
+            GLib.idle_add(lambda: done() and False)  # an idle runs after the redraw
+
+    def add(self, msg):
+        """A message just come or sent: at the bottom. The own one scrolls
+        there; another's only if the reader is already there."""
+        if msg["id"] in self.shown:
+            return
+        if self.pending_new:
+            self.pending_new.append(msg)
+            self._start()
+        else:
+            self._append(msg)
+        if msg["mine"]:
+            self._to_bottom()
+
+    def reacted(self, msg_id, reactions, yours=...):
+        """New reactions of a message (yours: ... when not known to change)."""
+        if msg_id not in self.msgs:
+            return
+        m = self.msgs[msg_id][0]
+        if m.get("reactions") != reactions or yours is not ... and m.get("yours") != yours:
+            m["reactions"] = reactions
+            if yours is not ...:
+                m["yours"] = yours
+            self._fill_reactions(msg_id)
+
+    def message(self, msg_id):
+        """The message as built, or None."""
+        return self.msgs[msg_id][0] if msg_id in self.msgs else None
+
+    def enter(self):
+        """Shown: the first time at the newest message, later where it was."""
+        self.active = True
+        if not self.entered:
+            self.entered = True
+            self._to_bottom()
+        self._start()
+        GLib.idle_add(self._load_visible)
+
+    def leave(self):
+        """No longer shown: nothing more is built or fetched, and only the
+        newest BUBBLES stay."""
+        if not self.active:
+            return
+        self.active = False
+        self._show_busy()
+        self._trim()
+
+    def destroy(self):
+        self.active = False
+        self.widget.destroy()
+
+    # --- building ---------------------------------------------------------------
+    def _day_label(self, ms):
+        sep = label(day_label(ms), "day", xalign=0.5)
+        sep.set_halign(Gtk.Align.CENTER)
+        sep.is_day = True
+        self.box.pack_start(sep, False, False, 6)
+        sep.show()
+        return sep
+
+    def _append(self, m):
+        """A message at the bottom (the newest)."""
+        day = datetime.fromtimestamp(m["time"] / 1000).date() if m["time"] else None
+        if day and day != self.last_day:
+            self.last_day = day
+            sep = self._day_label(m["time"])
+            if self.top_sep is None:
+                self.first_day, self.top_sep = day, sep
+        if self.oldest is None or (m["time"] or 0) < self.oldest:
+            self.oldest = m["time"] or 0
+        self.box.pack_start(self._bubble(m), False, False, 0)
+
+    def _prepend(self, msgs):
+        """Older messages (oldest first) at the top, under their day labels."""
+        pos, prev, first_sep = 0, None, None
+        for m in msgs:
+            if m["id"] in self.shown:
+                continue
+            day = datetime.fromtimestamp(m["time"] / 1000).date() if m["time"] else None
+            if day and day != prev:
+                sep = self._day_label(m["time"])
+                self.box.reorder_child(sep, pos)
+                pos += 1
+                first_sep = first_sep or (day, sep)
+                prev = day
+            w = self._bubble(m)
+            self.box.pack_start(w, False, False, 0)
+            self.box.reorder_child(w, pos)
+            pos += 1
+            self.oldest = min(self.oldest or m["time"], m["time"])
+        if first_sep is None:
+            return
+        if prev == self.first_day and self.top_sep is not None:
+            self.top_sep.destroy()  # that day now starts higher up
+        if self.last_day is None:
+            self.last_day = prev
+        self.first_day, self.top_sep = first_sep
+
+    def _bubble(self, m):
+        self.shown.add(m["id"])
+        bubble = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        bubble.get_style_context().add_class("bubble")
+        bubble.get_style_context().add_class("mine" if m["mine"] else "theirs")
+        # A long press offers the reactions.
+        hold = Gtk.EventBox()
+        hold.set_halign(Gtk.Align.END if m["mine"] else Gtk.Align.START)
+        hold.add(bubble)
+        hold.press = Gtk.GestureLongPress.new(hold)
+        hold.press.connect("pressed", lambda _g, _x, _y: self.on_hold(m["id"], bubble))
+        if self.group and not m["mine"] and m["who"]:
+            bubble.pack_start(label(m["who"], "who"), False, False, 0)
+        for url in m["photos"]:
+            img = Gtk.Image.new_from_icon_name("image-x-generic", Gtk.IconSize.DIALOG)
+            img.set_size_request(460, 200)
+            bubble.pack_start(img, False, False, 0)
+            self.photos.append((img, url))  # loaded once near the screen
+        for item in m.get("media") or []:
+            bubble.pack_start(self._media(m, item), False, False, 0)
+        if m["text"]:
+            text = label(m["text"], "msg", wrap=True)
+            text.set_max_width_chars(38)
+            text.set_selectable(False)
+            bubble.pack_start(text, False, False, 0)
+        reacts = Gtk.Box(spacing=6)
+        bubble.pack_start(reacts, False, False, 0)
+        self.msgs[m["id"]] = (m, reacts)
+        self._fill_reactions(m["id"])
+        bubble.pack_start(label(when(m["time"], full=True), "when", xalign=1.0), False, False, 0)
+        hold.msg_id = m["id"]
+        hold.show_all()
+        return hold
+
+    def _media(self, m, item):
+        """The controls of a voice message, a video or a file; what they do
+        is on_media's."""
+        if item["kind"] == "audio":
+            box = Gtk.Box(spacing=12)
+            play = Gtk.Button(label="▶")
+            play.get_style_context().add_class("media")
+            play.set_can_focus(False)
+            bar = Gtk.ProgressBar(valign=Gtk.Align.CENTER)
+            bar.set_size_request(260, -1)
+            length = label(mmss(secs(item["duration"])), "when")
+            controls = {"button": play, "bar": bar, "length": length}
+            play.connect("clicked", lambda _b: self.on_media(m, item, controls))
+            box.pack_start(play, False, False, 0)
+            box.pack_start(bar, True, True, 0)
+            box.pack_start(length, False, False, 0)
+            return box
+        if item["kind"] == "video":
+            box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+            if item["thumb"]:
+                img = Gtk.Image.new_from_icon_name("video-x-generic", Gtk.IconSize.DIALOG)
+                img.set_size_request(460, 200)
+                box.pack_start(img, False, False, 0)
+                self.photos.append((img, item["thumb"]))  # load_photo checks the host
+            sec = secs(item["duration"])
+            b = Gtk.Button(label="▶  Видео %s" % mmss(sec) if sec else "▶  Видео")
+            b.get_style_context().add_class("file")
+            b.set_can_focus(False)
+            b.connect("clicked", lambda _b: self.on_media(m, item, {"button": b}))
+            box.pack_start(b, False, False, 0)
+            return box
+        b = Gtk.Button(label="📄  %s · %s" % (item["name"], size_text(item["size"])))
+        b.get_style_context().add_class("file")
+        b.get_child().set_ellipsize(Pango.EllipsizeMode.MIDDLE)
+        b.get_child().set_max_width_chars(32)
+        b.set_can_focus(False)
+        b.connect("clicked", lambda _b: self.on_media(m, item, {"button": b}))
+        return b
+
+    def _fill_reactions(self, msg_id):
+        """The reactions under a message: emoji and count, the account's own
+        highlighted; a tap puts that one on, or takes the own one off."""
+        m, box = self.msgs[msg_id]
+        for child in box.get_children():
+            child.destroy()
+        for emoji, count in m.get("reactions") or []:
+            b = Gtk.Button(label="%s %d" % (emoji, count))
+            b.get_style_context().add_class("react")
+            yours = emoji == m.get("yours")
+            if yours:
+                b.get_style_context().add_class("yours")
+            b.set_can_focus(False)
+            b.connect("clicked", lambda _b, e=None if yours else emoji: self.on_react(msg_id, e))
+            box.pack_start(b, False, False, 0)
+        box.show_all()
+
+    def _start(self):
+        if self.active and not self.building and (self.pending_new or self.pending_old):
+            self.building = True
+            GLib.idle_add(self._step, priority=GLib.PRIORITY_LOW)
+
+    def _step(self):
+        """A few bubbles, between the window's other work; stops when the
+        chat is left and goes on when it is entered again."""
+        if not self.active or not (self.pending_new or self.pending_old):
+            self.building = False
+            self._show_busy()
+            if self.active:
+                GLib.idle_add(self._load_visible)
+                if self.prefetch > 0:  # all built: the next older page
+                    GLib.timeout_add(300, lambda: self._load_older(background=True) and False)
+            return False
+        if self.pending_new:
+            for m in self.pending_new[:STEP]:
+                if m["id"] not in self.shown:
+                    self._append(m)
+            del self.pending_new[:STEP]
+        elif time.monotonic() - self.scrolled_at < SETTLE:
+            # The reader is scrolling: bubbles put in above now would fight
+            # the kinetic scroll and throw the place. Wait until it rests.
+            GLib.timeout_add(300, lambda: GLib.idle_add(self._step,
+                                                        priority=GLib.PRIORITY_LOW) and False)
+            return False  # still building: resumed by the timeout
+        else:
+            chunk = self.pending_old[-STEP:]
+            del self.pending_old[-STEP:]
+            adj = self.widget.get_vadjustment()
+            if not self.at_bottom:  # keep the place being read
+                self.anchor = adj.get_upper() - adj.get_value()
+            self._prepend(chunk)
+            GLib.timeout_add(400, self._drop_anchor)
+        return True
+
+    def _queue_older(self, msgs):
+        """Older messages (oldest first) to build above the top later; the
+        oldest known time moves at once, so a page asked for meanwhile does
+        not repeat them."""
+        msgs = [m for m in msgs or [] if m["id"] not in self.shown]
+        if not msgs:
+            return
+        self.pending_old = msgs + self.pending_old
+        times = [m["time"] or 0 for m in msgs]
+        self.oldest = min([self.oldest] + times) if self.oldest is not None else min(times)
+
+    def _load_older(self, background=False):
+        """The page before the oldest message known; the background ones
+        stop when the chat is left."""
+        if self.loading or self.done or self.oldest is None or self.pending_old:
+            return False  # one page at a time, after the built ones
+        if not self.active or background and self.prefetch <= 0:
+            return False
+        self.loading = True
+        if background:
+            self.prefetch -= 1
+        self._show_busy()
+
+        def done(msgs, err):
+            self.loading = False
+            if not err:
+                if msgs:
+                    self._queue_older(msgs)  # built above, a few at a time
+                    self._start()
+                else:
+                    self.done = True
+            self._show_busy()
+
+        self.fetch_older(self.oldest, done)
+        return False
+
+    def _show_busy(self):
+        """The spinner, while an older page comes or waits to be built and
+        the reader is up at the top for it."""
+        adj = self.widget.get_vadjustment()
+        near_top = adj.get_value() < adj.get_page_size() * 0.5
+        on = self.active and near_top and (self.loading or bool(self.pending_old))
+        if on != self.busy.get_visible():
+            self.busy.set_visible(on)
+            (self.spinner.start if on else self.spinner.stop)()
+
+    # --- the place --------------------------------------------------------------
+    def _keep_place(self, adj):
+        self.moving = True
+        if self.at_bottom:
+            adj.set_value(adj.get_upper() - adj.get_page_size())
+        elif self.anchor is not None:  # older messages came in above: stay put
+            adj.set_value(adj.get_upper() - self.anchor)
+        self.moving = False
+        GLib.idle_add(self._load_visible)
+
+    def _moved(self, adj):
+        if not self.moving:
+            self.scrolled_at = time.monotonic()
+        self.at_bottom = adj.get_value() + adj.get_page_size() >= adj.get_upper() - 60
+        if self.active and adj.get_value() < adj.get_page_size() * 0.5:
+            self._load_older()
+        self._show_busy()
+        self._load_visible()
+
+    def _to_bottom(self):
+        self.at_bottom = True
+        adj = self.widget.get_vadjustment()
+        self.moving = True
+        adj.set_value(adj.get_upper() - adj.get_page_size())
+        self.moving = False
+
+    def _drop_anchor(self):
+        self.anchor = None
+        return False
+
+    def _load_visible(self):
+        """Fetch the photos within a screen of what is shown."""
+        if not self.photos:
+            return False
+        adj = self.widget.get_vadjustment()
+        top, page = adj.get_value(), adj.get_page_size()
+        keep = []
+        for img, url in self.photos:
+            pos = img.translate_coordinates(self.box, 0, 0)
+            if img.get_realized() and pos and top - page <= pos[1] <= top + 2 * page:
+                load_photo(url, lambda pix, img=img: pix and (
+                    img.set_from_pixbuf(pix), img.set_size_request(-1, -1)))
+            else:
+                keep.append((img, url))
+        self.photos = keep
+        return False
+
+    # --- forgetting -------------------------------------------------------------
+    def _trim(self):
+        """Only the newest BUBBLES messages stay built."""
+        holds = [w for w in self.box.get_children() if hasattr(w, "msg_id")]
+        if len(holds) <= BUBBLES:
+            return
+        gone = set()
+        for w in self.box.get_children():
+            if hasattr(w, "msg_id"):
+                if len(holds) - len(gone) <= BUBBLES:
+                    break
+                gone.add(w.msg_id)
+            w.destroy()
+        self.shown -= gone
+        self.pending_new, self.pending_old = [], []  # no longer continuous
+        for i in gone:
+            self.msgs.pop(i, None)
+        self.photos = [(img, url) for img, url in self.photos if img.get_parent()]
+        first = self.box.get_children()[0]
+        m = self.msgs[first.msg_id][0]
+        self.first_day = datetime.fromtimestamp(m["time"] / 1000).date()
+        self.top_sep = self._day_label(m["time"])
+        self.box.reorder_child(self.top_sep, 0)
+        self.oldest, self.done = m["time"], False
+
+    def _clear(self):
+        for w in self.box.get_children():
+            w.destroy()
+        self.shown, self.msgs, self.photos = set(), {}, []
+        self.pending_new, self.pending_old = [], []
+        self.last_day = self.first_day = self.top_sep = self.oldest = None
+        self.done = False
+
+
 # --- the window -------------------------------------------------------------
 class Max(Gtk.Application):
     def __init__(self):
@@ -1248,8 +1704,8 @@ class Max(Gtk.Application):
         self.playing = None  # (progress bar, button, duration) of what plays
         self.held = 0.0  # when a row was long-pressed: its release opens nothing
         self.open_chat = None
-        self.views = {}  # chat id -> built view, most recently used last
-        self.view = None
+        self.views = {}  # chat id -> its ChatView, most recently used last
+        self.view = None  # the one on the chat page
         self.background = "--background" in sys.argv[1:]
 
     def do_activate(self):
@@ -1402,23 +1858,8 @@ class Max(Gtk.Application):
         for w in (self.name_entry, save, cancel):
             w.show()
         chat.pack_start(self.naming, False, False, 0)
-        self.msg_scroll = Gtk.ScrolledWindow()
-        self.msg_scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
-        self.msg_scroll.set_kinetic_scrolling(True)
-        self.viewport = Gtk.Viewport()
-        self.viewport.set_shadow_type(Gtk.ShadowType.NONE)
-        self.msg_scroll.add(self.viewport)
-        # Stay at the newest message while photos load and messages come in,
-        # unless the reader has scrolled up to older ones.
-        self.at_bottom = True
-        self.anchor = None  # distance from the bottom kept while older messages come in
-        self.building = False  # the idle builder of bubbles is scheduled
-        self.moving = False  # the scroll position is being set here, not by the reader
-        self.scrolled_at = 0.0  # when the reader last moved the chat (monotonic)
-        adj = self.msg_scroll.get_vadjustment()
-        adj.connect("changed", self.keep_bottom)
-        adj.connect("value-changed", self.track_bottom)
-        chat.pack_start(self.msg_scroll, True, True, 0)
+        self.chat_area = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)  # the open ChatView's
+        chat.pack_start(self.chat_area, True, True, 0)
         self.inputbar = Gtk.Box(spacing=10)
         self.inputbar.get_style_context().add_class("inputbar")
         self.entry = Gtk.Entry()
@@ -1563,10 +2004,8 @@ class Max(Gtk.Application):
             return False  # from a stranger: no bubble, no buzz, left unread
         here = self.open_chat == msg["chat"] and self.win.is_visible()
         view = self.views.get(msg["chat"])
-        if view and msg["id"] not in view.shown:
-            self.add_bubble(view, msg)
-            if here:
-                self.scroll_down()
+        if view:
+            view.add(msg)
         if here and not msg["mine"] and self.win.is_active():
             self.backend.run(self.backend.read(msg["chat"], msg["id"]))
             if msg["chat"] in self.summaries:
@@ -1721,8 +2160,6 @@ class Max(Gtk.Application):
         self.fill_list()
 
     def show_list(self):
-        if self.view is not None:
-            self.trim(self.view)
         self.open_chat = None
         self.back.hide()
         self.title.set_text("MAX")
@@ -1940,7 +2377,6 @@ class Max(Gtk.Application):
             view = self.views.pop(chat_id, None)
             if view is not None:
                 if view is self.view:
-                    self.viewport.remove(view)
                     self.view = None
                 view.destroy()
             if self.open_chat == chat_id:
@@ -2019,6 +2455,8 @@ class Max(Gtk.Application):
         if page != "chat":
             self.confirm.hide()
             self.naming.hide()
+            if self.view is not None:
+                self.view.leave()
         self.moved()
 
     def moved(self):
@@ -2043,30 +2481,16 @@ class Max(Gtk.Application):
         return self.summaries.get(chat_id) or self.pending.get(chat_id, {})
 
     def view_for(self, chat_id):
-        """The built chat, from memory, else from the disk cache."""
+        """The chat's ChatView: kept from before, else built from the cache."""
         view = self.views.pop(chat_id, None)
         if view is None:
-            view = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
-            view.set_margin_start(16)
-            view.set_margin_end(16)
-            view.set_margin_top(12)
-            view.set_margin_bottom(12)
-            view.chat_id = chat_id
-            view.shown = set()
-            view.msgs = {}  # message id -> (its dict, the box of its reactions)
-            view.last_day = None  # of the newest message shown
-            view.first_day, view.top_sep = None, None  # of the oldest, and its day label
-            view.oldest = None  # time of the oldest message shown
-            view.loading = view.done = False  # older pages: one at a time, none left
-            view.prefetch = 0  # older pages still to fetch in the background
-            view.photos = []  # (image, url) not loaded yet: only when near the screen
-            # Messages still to build: newer ones at the bottom, older ones
-            # (oldest first) above the top, a few at a time (build_step).
-            view.pending_new, view.pending_old = [], []
-            cached = cache_read(chat_id)
-            for m in cached[-FIRST:]:
-                self.add_bubble(view, m)
-            self.queue_older(view, cached[:-FIRST])
+            view = ChatView(
+                chat_id, self.about(chat_id).get("type"), cache_read(chat_id),
+                fetch_older=lambda before, done: self.backend.run(
+                    self.backend.older(chat_id, before), done),
+                on_hold=lambda msg_id, widget: self.pick_reaction(chat_id, msg_id, widget),
+                on_media=lambda m, item, controls: self.media(chat_id, m, item, controls),
+                on_react=lambda msg_id, emoji: self.react(chat_id, msg_id, emoji))
         self.views[chat_id] = view  # most recently used last
         while len(self.views) > VIEWS:
             old_id = next(iter(self.views))
@@ -2088,180 +2512,45 @@ class Max(Gtk.Application):
         view = self.view_for(chat_id)
         if self.view is not view:
             if self.view is not None:
-                self.trim(self.view)
-                self.viewport.remove(self.view)
-            self.viewport.add(view)
+                self.view.leave()
+                self.chat_area.remove(self.view.widget)
+            self.chat_area.pack_start(view.widget, True, True, 0)
             self.view = view
-        view.show_all()
         self.title.set_text(s.get("title", ""))
-        self.sub.set_text("" if view.shown else "загрузка…")
+        self.sub.set_text("" if not view.empty else "загрузка…")
         self.back.show()
         self.inputbar.set_visible(s.get("type") != "CHANNEL")
         self.stack.set_visible_child_name("chat")
-        self.scroll_down()
-        self.start_builder()  # the cached messages beyond the first screen
+        view.enter()
 
         def done(res, err):
             came = time.monotonic()
             if err:
                 if self.open_chat == chat_id:
-                    self.sub.set_text("" if view.shown else "не удалось загрузить")
+                    self.sub.set_text("" if not view.empty else "не удалось загрузить")
                 return
             msgs, gap = res
-            latest = max((m["time"] for m in msgs if m["id"] in view.shown), default=0)
-            new = [m for m in msgs or [] if m["id"] not in view.shown and m["time"] >= latest]
-            if gap or len(new) > FIRST:
-                # More came than a screen: what was built is not continuous
-                # with it, so start from the newest.
-                self.clear_view(view)
-                new = list(msgs or [])
-            for m in msgs or []:
-                if m["id"] in view.msgs:  # reactions may have changed meanwhile
-                    self.reacted(chat_id, m["id"], m["reactions"], m["yours"])
-            if view.shown:
-                view.pending_new.extend(new)  # a few newer ones: at the bottom
-            else:
-                for m in new[-FIRST:]:  # a screen at once, the rest above it later
-                    self.add_bubble(view, m)
-                self.queue_older(view, new[:-FIRST])
-            if self.open_chat == chat_id:
-                self.sub.set_text("")
-                view.prefetch = PREFETCH  # fetched once the bubbles are built
-            self.start_builder()
-            if not self.building and self.open_chat == chat_id:  # nothing to build
-                GLib.timeout_add(800, lambda: self.load_older(view, background=True) and False)
 
-                def drawn():  # an idle runs after the redraw
+            def drawn():
+                if self.open_chat == chat_id:
                     self.telemetry.chat_shown(int((came - start) * 1000),
                                               int((time.monotonic() - came) * 1000))
-                    return False
-                GLib.idle_add(drawn)
+            view.newest(msgs or [], gap, done=drawn)
+            if self.open_chat == chat_id:
+                self.sub.set_text("")
             if chat_id in self.summaries:
                 self.summaries[chat_id]["unread"] = 0
                 self.fill_list()
 
         self.backend.run(self.backend.history(chat_id), done)
-        GLib.idle_add(self.load_visible)
-
-    def day_sep(self, view, ms):
-        sep = label(day_label(ms), "day", xalign=0.5)
-        sep.set_halign(Gtk.Align.CENTER)
-        sep.is_day = True
-        view.pack_start(sep, False, False, 6)
-        sep.show()
-        return sep
-
-    def add_bubble(self, view, m):
-        """A message at the bottom of a chat (the newest)."""
-        day = datetime.fromtimestamp(m["time"] / 1000).date() if m["time"] else None
-        if day and day != view.last_day:
-            view.last_day = day
-            sep = self.day_sep(view, m["time"])
-            if view.top_sep is None:
-                view.first_day, view.top_sep = day, sep
-        if view.oldest is None or (m["time"] or 0) < view.oldest:
-            view.oldest = m["time"] or 0
-        view.pack_start(self.bubble(view, m), False, False, 0)
-
-    def prepend(self, view, msgs):
-        """Older messages (oldest first) at the top, under their day labels."""
-        pos, prev = 0, None
-        first_sep = None
-        for m in msgs:
-            if m["id"] in view.shown:
-                continue
-            day = datetime.fromtimestamp(m["time"] / 1000).date() if m["time"] else None
-            if day and day != prev:
-                sep = self.day_sep(view, m["time"])
-                view.reorder_child(sep, pos)
-                pos += 1
-                first_sep = first_sep or (day, sep)
-                prev = day
-            w = self.bubble(view, m)
-            view.pack_start(w, False, False, 0)
-            view.reorder_child(w, pos)
-            pos += 1
-            view.oldest = min(view.oldest or m["time"], m["time"])
-        if first_sep is None:
-            return 0
-        if prev == view.first_day and view.top_sep is not None:
-            view.top_sep.destroy()  # that day now starts higher up
-        if view.last_day is None:
-            view.last_day = prev
-        view.first_day, view.top_sep = first_sep
-        return pos
-
-    def bubble(self, view, m):
-        view.shown.add(m["id"])
-        bubble = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
-        bubble.get_style_context().add_class("bubble")
-        bubble.get_style_context().add_class("mine" if m["mine"] else "theirs")
-        # A long press offers the reactions.
-        hold = Gtk.EventBox()
-        hold.set_halign(Gtk.Align.END if m["mine"] else Gtk.Align.START)
-        hold.add(bubble)
-        hold.press = Gtk.GestureLongPress.new(hold)
-        hold.press.connect("pressed", lambda _g, _x, _y: self.pick_reaction(view, m["id"], bubble))
-        group = self.summaries.get(view.chat_id, {}).get("type") in ("CHAT", "CHANNEL")
-        if group and not m["mine"] and m["who"]:
-            bubble.pack_start(label(m["who"], "who"), False, False, 0)
-        for url in m["photos"]:
-            img = Gtk.Image.new_from_icon_name("image-x-generic", Gtk.IconSize.DIALOG)
-            img.set_size_request(460, 200)
-            bubble.pack_start(img, False, False, 0)
-            view.photos.append((img, url))  # loaded once near the screen
-        for item in m.get("media") or []:
-            bubble.pack_start(self.media_widget(view, m, item), False, False, 0)
-        if m["text"]:
-            text = label(m["text"], "msg", wrap=True)
-            text.set_max_width_chars(38)
-            text.set_selectable(False)
-            bubble.pack_start(text, False, False, 0)
-        reacts = Gtk.Box(spacing=6)
-        bubble.pack_start(reacts, False, False, 0)
-        view.msgs[m["id"]] = (m, reacts)
-        self.fill_reactions(view, m["id"])
-        bubble.pack_start(label(when(m["time"], full=True), "when", xalign=1.0), False, False, 0)
-        hold.msg_id = m["id"]
-        hold.show_all()
-        return hold
 
     # voice messages, videos, files
-    def media_widget(self, view, m, item):
+    def media(self, chat_id, m, item, controls):
+        """A media control of a chat tapped (ChatView's on_media)."""
         if item["kind"] == "audio":
-            box = Gtk.Box(spacing=12)
-            play = Gtk.Button(label="▶")
-            play.get_style_context().add_class("media")
-            play.set_can_focus(False)
-            bar = Gtk.ProgressBar(valign=Gtk.Align.CENTER)
-            bar.set_size_request(260, -1)
-            length = label(mmss(secs(item["duration"])), "when")
-            play.connect("clicked", lambda _b: self.play_sound(item, play, bar, length))
-            box.pack_start(play, False, False, 0)
-            box.pack_start(bar, True, True, 0)
-            box.pack_start(length, False, False, 0)
-            return box
-        if item["kind"] == "video":
-            box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
-            if item["thumb"]:
-                img = Gtk.Image.new_from_icon_name("video-x-generic", Gtk.IconSize.DIALOG)
-                img.set_size_request(460, 200)
-                box.pack_start(img, False, False, 0)
-                view.photos.append((img, item["thumb"]))  # load_photo checks the host
-            sec = secs(item["duration"])
-            b = Gtk.Button(label="▶  Видео %s" % mmss(sec) if sec else "▶  Видео")
-            b.get_style_context().add_class("file")
-            b.set_can_focus(False)
-            b.connect("clicked", lambda _b: self.open_media(view.chat_id, m["id"], item, b))
-            box.pack_start(b, False, False, 0)
-            return box
-        b = Gtk.Button(label="📄  %s · %s" % (item["name"], size_text(item["size"])))
-        b.get_style_context().add_class("file")
-        b.get_child().set_ellipsize(Pango.EllipsizeMode.MIDDLE)
-        b.get_child().set_max_width_chars(32)
-        b.set_can_focus(False)
-        b.connect("clicked", lambda _b: self.open_media(view.chat_id, m["id"], item, b))
-        return b
+            self.play_sound(item, controls["button"], controls["bar"], controls["length"])
+        else:
+            self.open_media(chat_id, m["id"], item, controls["button"])
 
     def play_sound(self, item, play, bar, length):
         if self.sound is None:
@@ -2276,6 +2565,9 @@ class Max(Gtk.Application):
             return
         self.sound_end()
         self.playing = (bar, play, length, item["duration"])
+        # Its bubble gone (the chat cut or deleted): the sound stops too.
+        play.connect("destroy", lambda b: self.playing and self.playing[1] is b and (
+            self.sound.stop(), setattr(self, "playing", None)))
         play.set_label("⏸")
         self.sound.play(item["url"])
 
@@ -2345,29 +2637,13 @@ class Max(Gtk.Application):
         self.backend.run(self.backend.media_url(chat_id, msg_id, item), done)
 
     # reactions
-    def fill_reactions(self, view, msg_id):
-        """The reactions under a message: emoji and count, the account's own
-        highlighted; a tap puts that one on, or takes the own one off."""
-        m, box = view.msgs[msg_id]
-        for child in box.get_children():
-            child.destroy()
-        for emoji, count in m.get("reactions") or []:
-            b = Gtk.Button(label="%s %d" % (emoji, count))
-            b.get_style_context().add_class("react")
-            yours = emoji == m.get("yours")
-            if yours:
-                b.get_style_context().add_class("yours")
-            b.set_can_focus(False)
-            b.connect("clicked", lambda _b, e=None if yours else emoji:
-                      self.react(view.chat_id, msg_id, e))
-            box.pack_start(b, False, False, 0)
-        box.show_all()
-
-    def pick_reaction(self, view, msg_id, bubble):
-        if msg_id not in view.msgs:
+    def pick_reaction(self, chat_id, msg_id, bubble):
+        view = self.views.get(chat_id)
+        m = view.message(msg_id) if view else None
+        if m is None:
             return
         self.buzz()
-        yours = view.msgs[msg_id][0].get("yours")
+        yours = m.get("yours")
         pop = Gtk.Popover.new(bubble)
         row = Gtk.Box(spacing=4)
         row.set_margin_start(6)
@@ -2381,7 +2657,7 @@ class Max(Gtk.Application):
                 b.get_style_context().add_class("yours")  # a tap takes it off
             b.set_can_focus(False)
             b.connect("clicked", lambda _b, e=emoji: (
-                pop.popdown(), self.react(view.chat_id, msg_id, None if e == yours else e)))
+                pop.popdown(), self.react(chat_id, msg_id, None if e == yours else e)))
             row.pack_start(b, False, False, 0)
         pop.add(row)
         pop.connect("closed", lambda p: GLib.idle_add(p.destroy))
@@ -2398,9 +2674,9 @@ class Max(Gtk.Application):
                 return
             if res is None:
                 view = self.views.get(chat_id)
-                if not view or msg_id not in view.msgs:
+                m = view.message(msg_id) if view else None
+                if m is None:
                     return
-                m = view.msgs[msg_id][0]
                 counts = dict(m.get("reactions") or [])
                 if m.get("yours") in counts:
                     counts[m["yours"]] -= 1
@@ -2415,172 +2691,9 @@ class Max(Gtk.Application):
     def reacted(self, chat_id, msg_id, reactions, yours):
         """New reactions of a message (yours: ... when not known to change)."""
         view = self.views.get(chat_id)
-        if view and msg_id in view.msgs:
-            m = view.msgs[msg_id][0]
-            if m.get("reactions") != reactions or yours is not ... and m.get("yours") != yours:
-                m["reactions"] = reactions
-                if yours is not ...:
-                    m["yours"] = yours
-                self.fill_reactions(view, msg_id)
+        if view:
+            view.reacted(msg_id, reactions, yours)
         return False
-
-    def keep_bottom(self, adj):
-        self.moving = True
-        if self.at_bottom:
-            adj.set_value(adj.get_upper() - adj.get_page_size())
-        elif self.anchor is not None:  # older messages came in above: stay put
-            adj.set_value(adj.get_upper() - self.anchor)
-        self.moving = False
-        GLib.idle_add(self.load_visible)
-
-    def track_bottom(self, adj):
-        if not self.moving:
-            self.scrolled_at = time.monotonic()
-        self.at_bottom = adj.get_value() + adj.get_page_size() >= adj.get_upper() - 60
-        view = self.view
-        if view is not None and adj.get_value() < adj.get_page_size() * 0.5 and \
-                self.stack.get_visible_child_name() == "chat":
-            self.load_older(view)
-        self.load_visible()
-
-    def load_visible(self):
-        """Fetch the photos of a chat within a screen of what is shown."""
-        view = self.view
-        if view is None or not view.photos:
-            return False
-        adj = self.msg_scroll.get_vadjustment()
-        top, page = adj.get_value(), adj.get_page_size()
-        keep = []
-        for img, url in view.photos:
-            pos = img.translate_coordinates(view, 0, 0)
-            if img.get_realized() and pos and top - page <= pos[1] <= top + 2 * page:
-                load_photo(url, lambda pix, img=img: pix and (
-                    img.set_from_pixbuf(pix), img.set_size_request(-1, -1)))
-            else:
-                keep.append((img, url))
-        view.photos = keep
-        return False
-
-    def load_older(self, view, background=False):
-        """The page before the oldest message shown; the background ones
-        stop when the reader leaves the chat."""
-        if view.loading or view.done or view.oldest is None or view.pending_old:
-            return False  # one page at a time, after the built ones
-        if background and (view.prefetch <= 0 or self.view is not view):
-            return False
-        view.loading = True
-        if background:
-            view.prefetch -= 1
-        else:
-            self.sub.set_text("загрузка…")
-
-        def done(msgs, err):
-            view.loading = False
-            if self.view is view and not background:
-                self.sub.set_text("")
-            if err:
-                return
-            if not msgs:
-                view.done = True
-                return
-            self.queue_older(view, msgs)  # built above, a few at a time
-            self.start_builder()
-
-        self.backend.run(self.backend.older(view.chat_id, view.oldest), done)
-        return False
-
-    def queue_older(self, view, msgs):
-        """Older messages (oldest first) to build above the top later; the
-        oldest known time moves at once, so a page asked for meanwhile does
-        not repeat them."""
-        msgs = [m for m in msgs or [] if m["id"] not in view.shown]
-        if not msgs:
-            return
-        view.pending_old = msgs + view.pending_old
-        times = [m["time"] or 0 for m in msgs]
-        view.oldest = min([view.oldest] + times) if view.oldest is not None else min(times)
-
-    def start_builder(self):
-        if not self.building and self.view is not None and \
-                (self.view.pending_new or self.view.pending_old):
-            self.building = True
-            GLib.idle_add(self.build_step, priority=GLib.PRIORITY_LOW)
-
-    def build_step(self):
-        """A few bubbles of the open chat, between the window's other work;
-        stops while the chat is not shown and goes on when it is again."""
-        view = self.view
-        shown = view is not None and self.stack.get_visible_child_name() == "chat"
-        if not shown or not (view.pending_new or view.pending_old):
-            self.building = False
-            if shown:
-                GLib.idle_add(self.load_visible)
-                if view.prefetch > 0:  # all built: the next older page
-                    GLib.timeout_add(300, lambda: self.load_older(view, background=True) and False)
-            return False
-        if view.pending_new:
-            for m in view.pending_new[:STEP]:
-                if m["id"] not in view.shown:
-                    self.add_bubble(view, m)
-            del view.pending_new[:STEP]
-        elif time.monotonic() - self.scrolled_at < SETTLE:
-            # The reader is scrolling: bubbles put in above now would fight
-            # the kinetic scroll and throw the place. Wait until it rests.
-            GLib.timeout_add(300, lambda: GLib.idle_add(self.build_step,
-                                                        priority=GLib.PRIORITY_LOW) and False)
-            return False  # still building: resumed by the timeout
-        else:
-            chunk = view.pending_old[-STEP:]
-            del view.pending_old[-STEP:]
-            adj = self.msg_scroll.get_vadjustment()
-            if not self.at_bottom:  # keep the place being read
-                self.anchor = adj.get_upper() - adj.get_value()
-            self.prepend(view, chunk)
-            GLib.timeout_add(400, self.drop_anchor)
-        return True
-
-    def drop_anchor(self):
-        self.anchor = None
-        return False
-
-    def trim(self, view):
-        """A chat left keeps only its newest BUBBLES messages built."""
-        holds = [w for w in view.get_children() if hasattr(w, "msg_id")]
-        if len(holds) <= BUBBLES:
-            return
-        gone = set()
-        for w in view.get_children():
-            if hasattr(w, "msg_id"):
-                if len(holds) - len(gone) <= BUBBLES:
-                    break
-                gone.add(w.msg_id)
-            w.destroy()
-        view.shown -= gone
-        view.pending_new, view.pending_old = [], []  # no longer continuous
-        for i in gone:
-            view.msgs.pop(i, None)
-        view.photos = [(img, url) for img, url in view.photos if img.get_parent()]
-        first = view.get_children()[0]
-        m = view.msgs[first.msg_id][0]
-        view.first_day = datetime.fromtimestamp(m["time"] / 1000).date()
-        view.top_sep = self.day_sep(view, m["time"])
-        view.reorder_child(view.top_sep, 0)
-        view.oldest, view.done = m["time"], False
-
-    def clear_view(self, view):
-        for w in view.get_children():
-            w.destroy()
-        view.shown, view.msgs, view.photos = set(), {}, []
-        view.pending_new, view.pending_old = [], []
-        view.last_day = view.first_day = view.top_sep = view.oldest = None
-        view.done = False
-
-    def scroll_down(self):
-        self.at_bottom = True
-        adj = self.msg_scroll.get_vadjustment()
-        self.moving = True
-        adj.set_value(adj.get_upper() - adj.get_page_size())
-        self.moving = False
 
     def send(self):
         text = self.entry.get_text().strip()
@@ -2597,9 +2710,8 @@ class Max(Gtk.Application):
             self.entry.set_text("")
             self.sub.set_text("")
             view = self.views.get(chat_id)
-            if msg and view and msg["id"] not in view.shown:
-                self.add_bubble(view, msg)
-                self.scroll_down()
+            if msg and view:
+                view.add(msg)
             if chat_id in self.pending:  # the dialog exists now
                 self.summaries.setdefault(chat_id, self.pending.pop(chat_id))
                 self.trash.set_visible(self.open_chat == chat_id)

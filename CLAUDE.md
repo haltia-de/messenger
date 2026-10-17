@@ -83,12 +83,19 @@ it from the checkout still needs PyMax installed there.
   `PREFS` (`chats.json`), locally — PyMax has no pin/mute request (`CHAT_PERSONAL_CONFIG` is bare).
   A long press on the list (`row_menu`, one gesture on the ListBox, `get_row_at_y`) opens the menu;
   `held` stops the release from opening the chat. `look()` must include whatever a row shows.
-- **Paging.** `Backend.history` returns the newest `PAGE` and whether they leave a gap after the
-  cache (then the cache and the view start anew); `older(chat, before)` returns the page before.
-  The view prepends pages (`prepend`, fixing the day labels at the seam) when scrolled near the
-  top, plus `PREFETCH` pages in the background for the open chat; `anchor` (distance from the
-  bottom) keeps the place while the content grows above. `trim` cuts a left chat to `BUBBLES`.
-  Photos go to `view.photos` and load in `load_visible` only within a screen of the viewport.
+- **Chat view** (`ChatView`, see `CONTEXT.md`). One chat on screen is one deep module: its own
+  ScrolledWindow (`.widget`), the bubbles, day labels, reactions and media controls, the build
+  queue (`FIRST` at once, then `STEP` per idle, nothing above while the reader scrolled within
+  `SETTLE`), older pages (`fetch_older` as the reader nears the top, `PREFETCH` in the background,
+  a spinner while one comes), the place (`anchor`; the first `enter()` goes to the bottom, later
+  ones stay; the own message scrolls down, another's only if already there), photos loaded only
+  near the screen, and `leave()` cutting it to `BUBBLES`. Its interface is `newest(msgs, gap,
+  done)`, `add`, `reacted`, `message`, `enter`/`leave`/`destroy`, `empty`; what it needs comes in at
+  creation (cached messages and `fetch_older`/`on_hold`/`on_media`/`on_react`). `Max` only keeps
+  up to `VIEWS` of them, puts the open one's widget on the chat page and answers the callbacks.
+  Keep chat-screen behaviour inside it, and test it through that interface (its widget tree).
+  `Backend.history` returns the newest `PAGE` and whether they leave a gap after the cache;
+  `older(chat, before)` returns the page before.
 - **Media.** `media_of` turns AUDIO/VIDEO/FILE attachments into `media` items. Voice plays in the
   bubble through `Sound` (libmpv, `video=False`; an `end-file` with reason ABORTED is a stop or a
   switch, not an end). Video and files get a link from `Backend.media_url`
@@ -99,8 +106,9 @@ it from the checkout still needs PyMax installed there.
   host list tight. Photos, voice and video are asked for as web.max.ru asks (`AGENT`, PyMax's
   browser user agent, set at login; `Referer`/`Origin` `WEB`). What fails goes to
   `~/.cache/b8k-max/player.log` (600, host and path only; the players' own output too). Thumbnails go through `photo_ok` like photos.
+  A voice message stops when its button is destroyed (its chat cut or deleted).
 - **Reactions.** Message dicts carry `reactions` ([[emoji, count]]) and `yours`; a long press on a
-  bubble (`Gtk.GestureLongPress`, kept on the event box) opens a popover of `REACTIONS`.
+  bubble (`ChatView`'s `on_hold`) opens `Max.pick_reaction`, a popover of `REACTIONS`.
   `Backend.react` uses `messages.add_reaction`/`remove_reaction`; when MAX answers without counts
   the window counts itself. `on_reaction_update` events carry no own reaction, so `reacted(..., ...)`
   (Ellipsis) leaves `yours` alone. Emoji need `font-noto-emoji` (in the tablet image).
@@ -120,6 +128,8 @@ it from the checkout still needs PyMax installed there.
 
 ## Conventions
 
+- Domain terms (chat view, chat list, chat summary, message cache, known people) are in
+  `CONTEXT.md`; name new modules after them.
 - UI text is Russian; code comments, docstrings and commit messages are English. The README is
   Russian.
 - Large type is the point ("MAX in large type"): font and widget sizes live in the `CSS` block at
