@@ -1065,6 +1065,12 @@ class Max(Gtk.Application):
         self.win.connect("unmap", lambda _w: self.telemetry.go(SCREEN_BACKGROUND))
 
         self.stack = Gtk.Stack()
+        # Only the page shown sets the window's size. A stack is as tall as
+        # its tallest page by default: the QR page and the search page kept
+        # the window taller than the room the on-screen keyboard leaves, and
+        # the window covered the keyboard's top row.
+        self.stack.set_vhomogeneous(False)
+        self.stack.set_hhomogeneous(False)
         self.win.add(self.stack)
         wait = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
         wait.set_valign(Gtk.Align.CENTER)
@@ -1189,13 +1195,17 @@ class Max(Gtk.Application):
         ask.pack_start(self.find_entry, True, True, 0)
         ask.pack_start(go, False, False, 0)
         find.pack_start(ask, False, False, 0)
+        # The hint scrolls with the results: a wrapped label outside the
+        # scrolled part made the page taller than the keyboard leaves room.
         self.find_hint = label("", "hint", wrap=True)
-        find.pack_start(self.find_hint, False, False, 0)
         self.found = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
+        found_body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
+        found_body.pack_start(self.find_hint, False, False, 0)
+        found_body.pack_start(self.found, False, False, 0)
         found_scroll = Gtk.ScrolledWindow()
         found_scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
         found_scroll.set_kinetic_scrolling(True)
-        found_scroll.add(self.found)
+        found_scroll.add(found_body)
         find.pack_start(found_scroll, True, True, 0)
         self.stack.add_named(find, "find")
 
