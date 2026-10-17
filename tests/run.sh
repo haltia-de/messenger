@@ -38,7 +38,7 @@ trap 'kill $bw 2>/dev/null' EXIT INT TERM
 i=0
 while [ ! -e "$run/broadway$((n + 1)).socket" ] && [ $i -lt 50 ]; do sleep 0.1; i=$((i + 1)); done
 
-[ $# -gt 0 ] || set -- test_chatlist.py test_backend.py test_window.py
+[ $# -gt 0 ] || set -- test_chatlist.py test_media.py test_backend.py test_window.py
 cd "$here"
 log=$(mktemp)
 trap 'kill $bw 2>/dev/null; rm -f "$log"' EXIT INT TERM

@@ -45,13 +45,6 @@ assert bm.link_of("@news") == "https://max.ru/news"
 assert bm.link_of("max.ru/join/AbC-d_1") == "https://max.ru/join/AbC-d_1"
 assert bm.link_of("https://web.max.ru/rbc/") == "https://max.ru/rbc"
 assert bm.link_of("https://evil.com/max.ru/x") is None
-assert bm.media_ok("https://vd.okcdn.ru/v.mp4") and bm.media_ok("https://i.oneme.ru/f")
-assert bm.media_ok("https://x.mycdn.me/v") and not bm.media_ok("http://i.oneme.ru/a")
-for bad in ("https://192.168.1.1/a", "https://localhost/a", "file:///etc/passwd",
-            "https://127.0.0.1/", "https://0x7f000001/a", "https://evil.com/a",
-            "https://okcdn.ru.evil.com/a"):
-    assert not bm.media_ok(bad), bad
-assert bm.photo_ok("https://pimg.mycdn.me/t.jpg") and not bm.photo_ok("https://evil.com/t.jpg")
 ok("helpers")
 
 # --- login: the chat list, names, known people ------------------------------------
@@ -72,7 +65,7 @@ summaries = {s["id"]: s for s in said(ui, "show_chats")[-1][0]}
 assert summaries[anna]["title"] == "Анна Петрова" and summaries[petya]["title"] == "Петя"
 assert B.known == {ANNA, PETYA}  # the first time: everyone already in a dialog
 assert oct(os.stat(bm.KNOWN).st_mode & 0o777) == "0o600"
-assert said(ui, "logged_in")[-1] == (fake.me.id, 7) and bm.AGENT == fake.agent
+assert said(ui, "logged_in")[-1] == (fake.me.id, 7) and B.agent == fake.agent
 assert fake.asked("chat_invites") == [{"contacts_only": True}]  # the default, once
 run(B.on_login(fake.me, [], [], fake.agent, 7))
 assert len(fake.asked("chat_invites")) == 1  # not again at the next login
@@ -169,12 +162,3 @@ assert B.title(fake.rooms[anna]) == "Анна Петрова"
 back(B.set_invites(False))
 assert fake.asked("chat_invites")[-1] == {"contacts_only": False}
 ok("search, join, remove, rename, invites")
-
-# --- the photo cache is pruned by use ---------------------------------------------------
-os.makedirs(bm.CHATS, exist_ok=True)
-old = os.path.join(bm.PHOTOS, "a.img")
-open(old, "w").close()
-os.utime(old, (0, 0))
-bm.prune_photos()
-assert not os.path.exists(old) and os.path.isdir(bm.CHATS)
-ok("photo pruning")

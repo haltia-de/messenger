@@ -113,17 +113,22 @@ it from the checkout still needs PyMax installed there.
   `Backend.history` returns the newest `PAGE` and whether they leave a gap after the cache
   (no request at all when the cache holds a full page ending at the chat's last message);
   `older(chat, before)` returns the page before.
-- **Media.** `media_of` turns AUDIO/VIDEO/FILE attachments into `media` items. Voice plays in the
-  bubble through `Sound` (libmpv, `video=False`; an `end-file` with reason ABORTED is a stop or a
-  switch, not an end). Video and files get a link from `Backend.media_url`
-  (`get_video_by_id`/`get_file_by_id`), checked by `media_ok` (https on `MEDIA_HOSTS` only: MAX's hosts
-  and its CDNs `okcdn.ru`/`mycdn.me`; `photo_ok` is the same check), then `b8k-vplay`/`mpv --fs`
-  with `ytdl=no` and `load-unsafe-playlists=no`, or the browser. An `external` video link is never
-  followed. This is a security boundary like the photo one: links come inside messages; keep the
-  host list tight. Photos, voice and video are asked for as web.max.ru asks (`AGENT`, PyMax's
-  browser user agent, set at login; `Referer`/`Origin` `WEB`). What fails goes to
-  `~/.cache/b8k-max/player.log` (600, host and path only; the players' own output too). Thumbnails go through `photo_ok` like photos.
-  A voice message stops when its button is destroyed (its chat cut or deleted).
+- **Media** (`Media`, CONTEXT.md «Медиа»). The one place that decides how to reach MAX's CDNs:
+  `media_ok` (https on `MEDIA_HOSTS` only: MAX's hosts and its CDNs `okcdn.ru`/`mycdn.me`;
+  `photo_ok` is the same) for photos, previews, voice, video and files; one header, the
+  `agent` (PyMax's browser user agent, set by `Max.logged_in`), and no `Referer`/`Origin` — the
+  video CDN answers 400 to those; photos never follow a redirect off those hosts
+  (`PhotoRedirect`). It caches photos (`photo(url, done)`, touched when shown, `prune()` after
+  `PHOTO_DAYS` unshown), plays voice through libmpv (`voice`/`toggle`/`stop`, `on_time`/`on_end`;
+  an `end-file` with reason ABORTED is a stop or a switch, not an end), starts a video in
+  `b8k-vplay`/`mpv --fs` with `ytdl=no` and `load-unsafe-playlists=no` (`video(url, title)`), and
+  gives a file to the browser (`file(url)`). What fails goes to `~/.cache/b8k-max/player.log`
+  (600, host and path only; the players' own output too). Its hands come in at creation —
+  `spawn`, `open_uri`, `fetch`, `player` — real by default, `tests/fake_hands.py` in tests.
+  `media_of` turns AUDIO/VIDEO/FILE attachments into `media` items; the link for a video or a
+  file comes from `Backend.media_url` (never an `external` one). This is a security boundary:
+  links come inside messages; keep the host list tight. What plays and where its button is stays
+  with `Max` (`playing`); a voice message stops when its button is destroyed.
 - **Reactions.** Message dicts carry `reactions` ([[emoji, count]]) and `yours`; a long press on a
   bubble (`ChatView`'s `on_hold`) opens `Max.pick_reaction`, a popover of `REACTIONS`.
   `Backend.react` uses `messages.add_reaction`/`remove_reaction`; when MAX answers without counts
@@ -161,8 +166,9 @@ it from the checkout still needs PyMax installed there.
 ## Tests
 
 `sh tests/run.sh` makes `.cache/venv` once (system PyGObject plus the PyMax wheel `install.sh`
-pins), starts a `broadwayd` of its own and runs three plain scripts with `assert`s, each printing
+pins), starts a `broadwayd` of its own and runs four plain scripts with `assert`s, each printing
 «… ok» per part: `tests/test_chatlist.py` (the chat list's rules: no MAX, no window),
+`tests/test_media.py` (Media with fake hands: hosts, the header, redirects, cache, players),
 `tests/test_backend.py` (Backend on the fake link, no window) and `tests/test_window.py` (the real
 window and Backend on the fake link). Tests build MAX's state in `FakeLink` (people, dialogs,
 groups, channels, messages with attachments and reactions), drive the window as a person would,

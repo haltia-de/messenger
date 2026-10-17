@@ -9,6 +9,7 @@ import time
 from common import load, ok
 
 bm = load()
+from fake_hands import FakeHands  # noqa: E402
 from fake_link import FakeLink, audio, file, now_ms, video  # noqa: E402
 from gi.repository import GLib, Gtk  # noqa: E402
 
@@ -101,7 +102,8 @@ fake.say(dacha, "Фото с участка", PETYA, t=t0 + 3000)
 fake.say(news, "Перекрытие улицы", t=t0 + 4000)
 
 bm.save_json(bm.KNOWN, [MAMA, PETYA])  # not the first run: the stranger is not known
-app = bm.Max(link=fake)
+hands = FakeHands()
+app = bm.Max(link=fake, media=bm.Media(hands.spawn, hands.open_uri, hands.fetch, hands.player))
 buzzes = []
 app.buzz = lambda *a: buzzes.append(1) or True
 app.register(None)
@@ -278,9 +280,7 @@ wait(lambda: at_bottom(v), what="own message at the bottom")
 ok("scroll rules")
 
 # --- media: voice in the bubble, video in the player, a file in the browser -------------------
-launched, uris = [], []
-bm.subprocess.Popen = lambda cmd, **kw: launched.append(cmd)
-Gtk.show_uri_on_window = lambda w, u, t: uris.append(u)
+# (what Media does with them is test_media's; here, that the window hands them over)
 m = fake.incoming(mama, "", MAMA, attaches=[audio("https://vd.okcdn.ru/a.ogg"),
                                             video(5, "https://i.oneme.ru/t.jpg"),
                                             file(6, "Документ с очень длинным названием.pdf", 2500000)])
@@ -292,41 +292,25 @@ wait(lambda: any(w.msg_id == m.id for w in holds_of(app.view)), what="media mess
 hold = [w for w in holds_of(app.view) if w.msg_id == m.id][0]
 play, vid, doc = buttons(hold)
 assert play.get_label() == "▶" and vid.get_label() == "▶  Видео 0:42" and doc.get_label().startswith("📄")
+assert app.media.agent == fake.agent  # set at login
 shot("media.png")
-vid.clicked()
-wait(lambda: launched, what="player")
-assert launched[-1][-2:] == ["--", "https://vd.okcdn.ru/v.mp4"] and "--ytdl=no" in launched[-1]
-assert "--user-agent=" + fake.agent in launched[-1]
-log = open(bm.PLAYER_LOG).read()
-assert "video vd.okcdn.ru/v.mp4 via mpv" in log and oct(os.stat(bm.PLAYER_LOG).st_mode & 0o777) == "0o600"
-doc.clicked()
-wait(lambda: uris, what="file")
-assert uris == ["https://fd.oneme.ru/f.pdf"]
-
-
-class FakeSound:
-    mpv = True
-
-    def __init__(self):
-        self.did = []
-
-    def play(self, url):
-        self.did.append(("play", url))
-
-    def stop(self):
-        self.did.append(("stop",))
-
-    def toggle(self):
-        return True
-
-
-app.sound = FakeSound()
 play.clicked()
-assert app.sound.did == [("play", "https://vd.okcdn.ru/a.ogg")] and play.get_label() == "⏸"
+assert hands.sound.did == [("play", "https://vd.okcdn.ru/a.ogg", fake.agent)] and play.get_label() == "⏸"
+hands.sound.on_time(3.5)
+spin(0.1)
+assert "0:03" in [w.get_text() for w in walk(hold) if isinstance(w, Gtk.Label)]
+vid.clicked()  # the voice stops for the video
+wait(lambda: hands.spawned, what="player")
+assert hands.spawned[-1][-1] == "https://vd.okcdn.ru/v.mp4" and hands.sound.did[-1] == ("stop",)
+assert play.get_label() == "▶"
+doc.clicked()
+wait(lambda: hands.opened, what="file")
+assert hands.opened == ["https://fd.oneme.ru/f.pdf"]
+play.clicked()
 app.views.pop(mama).destroy()  # the bubble goes (the chat cut or deleted): so does the sound
 app.view = None
 spin(0.1)
-assert app.sound.did[-1] == ("stop",) and app.playing is None
+assert hands.sound.did[-1] == ("stop",) and app.playing is None
 ok("media")
 
 # --- telemetry: the screens really gone through ----------------------------------------------
