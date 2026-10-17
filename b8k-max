@@ -119,6 +119,9 @@ BUBBLES = 150  # a chat left keeps no more messages built than this
 # https from MAX's own CDN (i.oneme.ru), never the LAN, a file or a redirect
 # elsewhere.
 PHOTO_HOSTS = ("oneme.ru", "max.ru")
+# Voice messages, videos and files: MAX's hosts and the CDNs it serves them
+# from. A link anywhere else is not played or opened.
+MEDIA_HOSTS = PHOTO_HOSTS + ("okcdn.ru", "mycdn.me")
 PHOTO_DAYS = 30  # cached photos older than this are removed
 CHATS = os.path.join(PHOTOS, "chats")  # message cache, one file per chat
 KEEP = 80  # messages kept per chat on disk
@@ -681,10 +684,9 @@ class Backend:
             got = await api.get_video_by_id(chat_id, msg_id, item["id"])
         else:
             got = await api.get_file_by_id(chat_id, msg_id, item["id"])
-        url = getattr(got, "url", None) if got else None
-        if not url and got is not None and isinstance(got.external, str):
-            url = got.external
-        return url
+        # Only MAX's own link: an "external" one (a video elsewhere) is not
+        # followed, since the player would fetch whatever it names.
+        return getattr(got, "url", None) if got else None
 
     async def send(self, chat_id, text):
         chat = self.chats.get(chat_id)
@@ -1046,18 +1048,13 @@ class Telemetry:
 
 
 def media_ok(url):
-    """A link MAX handed out for a video, a voice message or a file: https,
-    and not to this machine or the LAN (a player or browser opens it)."""
-    import ipaddress
-
+    """A link for a video, a voice message or a file: https on MAX's own
+    hosts only, as with photos (a player or the browser opens it, and a
+    sender must not point it at the LAN or anywhere else)."""
     parts = urllib.parse.urlsplit(url or "")
     host = (parts.hostname or "").lower()
-    if parts.scheme != "https" or not host or host == "localhost" or host.endswith(".local"):
-        return False
-    try:
-        return ipaddress.ip_address(host).is_global
-    except ValueError:
-        return True  # a name, not an address
+    return parts.scheme == "https" and any(host == h or host.endswith("." + h)
+                                           for h in MEDIA_HOSTS)
 
 
 def secs(duration):
@@ -1086,8 +1083,8 @@ class Sound:
         self.on_time = self.on_end = lambda *_a: None
         try:
             import mpv
-            self.mpv = mpv.MPV(video=False, ytdl=False, input_default_bindings=False,
-                               input_vo_keyboard=False)
+            self.mpv = mpv.MPV(video=False, ytdl=False, load_unsafe_playlists=False,
+                               input_default_bindings=False, input_vo_keyboard=False)
         except Exception:
             return
         self.mpv.observe_property(
@@ -2241,8 +2238,10 @@ class Max(Gtk.Application):
                 if self.playing:
                     self.sound.stop()
                     self.sound_end()
-                cmd = ([PLAYER, "--title", self.title.get_text(), url]
-                       if os.access(PLAYER, os.X_OK) else ["mpv", "--fs", url])
+                # No youtube-dl and no playlists: the link is played as it is.
+                cmd = ([PLAYER, "--title", self.title.get_text(), url, "ytdl=no",
+                        "load-unsafe-playlists=no"] if os.access(PLAYER, os.X_OK) else
+                       ["mpv", "--fs", "--ytdl=no", "--load-unsafe-playlists=no", "--", url])
                 try:
                     subprocess.Popen(cmd, start_new_session=True, stdout=subprocess.DEVNULL,
                                      stderr=subprocess.DEVNULL)

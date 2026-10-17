@@ -92,8 +92,10 @@ it from the checkout still needs PyMax installed there.
 - **Media.** `media_of` turns AUDIO/VIDEO/FILE attachments into `media` items. Voice plays in the
   bubble through `Sound` (libmpv, `video=False`; an `end-file` with reason ABORTED is a stop or a
   switch, not an end). Video and files get a link from `Backend.media_url`
-  (`get_video_by_id`/`get_file_by_id`), checked by `media_ok` (https, no LAN/loopback), then
-  `b8k-vplay`/`mpv --fs` or the browser. Thumbnails go through `photo_ok` like photos.
+  (`get_video_by_id`/`get_file_by_id`), checked by `media_ok` (https on `MEDIA_HOSTS` only: MAX's hosts
+  and its CDNs `okcdn.ru`/`mycdn.me`), then `b8k-vplay`/`mpv --fs` with `ytdl=no` and
+  `load-unsafe-playlists=no`, or the browser. An `external` video link is never followed. This is
+  a security boundary like the photo one: links come inside messages; keep the host list tight. Thumbnails go through `photo_ok` like photos.
 - **Reactions.** Message dicts carry `reactions` ([[emoji, count]]) and `yours`; a long press on a
   bubble (`Gtk.GestureLongPress`, kept on the event box) opens a popover of `REACTIONS`.
   `Backend.react` uses `messages.add_reaction`/`remove_reaction`; when MAX answers without counts
