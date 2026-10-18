@@ -343,7 +343,7 @@ button.media {
   padding: 0;
   font-size: 22px;
 }
-button.media label { color: #ffffff; }
+button.media label, button.media image { color: #ffffff; }
 button.down {
   background-image: none;
   background-color: #3584e4;
@@ -356,6 +356,37 @@ button.down {
   box-shadow: 0 2px 6px rgba(0, 0, 0, 0.35);
 }
 button.down label { color: #ffffff; }
+button.share {
+  background-image: none;
+  background-color: rgba(0, 0, 0, 0.08);
+  border: none;
+  box-shadow: none;
+  border-radius: 26px;
+  min-width: 52px;
+  min-height: 52px;
+  padding: 0;
+  font-size: 26px;
+  color: #3584e4;
+}
+button.share image { color: #3584e4; }
+button.save {
+  background-image: none;
+  background-color: rgba(255, 255, 255, 0.85);
+  border: 1px solid #c0bfbc;
+  box-shadow: none;
+  border-radius: 26px;
+  min-width: 52px;
+  min-height: 52px;
+  padding: 0;
+}
+button.save image { color: #2e3436; }
+button.save.big { min-width: 76px; min-height: 76px; border-radius: 38px; }
+.nowplay { background-color: #c4dcf7; padding: 6px 12px; }
+button.nowplay-chat { background-image: none; background-color: transparent; border: none;
+                      box-shadow: none; min-height: 56px; }
+label.nowplay { font-size: 22px; color: #1c71d8; }
+label.saved { font-size: 22px; color: #ffffff; background-color: rgba(0, 0, 0, 0.6);
+              border-radius: 14px; padding: 6px 16px; }
 button.file {
   background-image: none;
   background-color: #e6e6e4;
@@ -413,6 +444,19 @@ def note_text(summary, msg):
         body = "%s: %s" % (msg["who"], body)
     return (plain(summary.get("title") or "MAX"),
             GLib.markup_escape_text(plain(body)[:200]))
+
+
+PLAY_ICONS = {"play": "media-playback-start-symbolic", "pause": "media-playback-pause-symbolic",
+              "fail": "dialog-error-symbolic"}
+
+
+def set_play(button, state):
+    """A play button's look: "play" (▶), "pause" (it plays) or "fail" (it
+    cannot); theme icons, which read at any size, unlike ⏸ in most fonts."""
+    button.state = state
+    button.set_image(Gtk.Image.new_from_icon_name(PLAY_ICONS[state], Gtk.IconSize.LARGE_TOOLBAR))
+    button.set_always_show_image(True)
+    button.set_tooltip_text({"play": "Слушать", "pause": "Пауза", "fail": "Не проиграть"}[state])
 
 
 def label(text, cls, xalign=0.0, wrap=False, ellipsize=False):
@@ -1786,17 +1830,20 @@ class ChatView:
     fetch_older(before_ms, done(msgs, err)) for the page before a time, and
     what a long press (on_hold(msg_id, widget)), a media control
     (on_media(msg, item, controls)) and a reaction chip (on_react(msg_id,
-    emoji or None)) and a tap on a photo (on_photo(url)) do, and photo(url,
-    done) that fetches a photo. Everything is called on the GTK side."""
+    emoji or None)), a tap on a photo (on_photo(url)) and on the ↪ beside a
+    bubble (on_forward(msg_id)) do, and photo(url, done) that fetches a
+    photo. Everything is called on the GTK side."""
 
     def __init__(self, chat_id, kind, cached, fetch_older, on_hold, on_media, on_react,
-                 photo, on_photo=lambda url: None):
+                 photo, on_photo=lambda url: None, on_forward=None, on_save=None):
         self.chat_id = chat_id
         self.group = kind in ("CHAT", "CHANNEL")  # senders' names over their bubbles
         self.fetch_older, self.on_hold = fetch_older, on_hold
         self.on_media, self.on_react = on_media, on_react
         self.photo = photo  # photo(url, done(pixbuf)): Media.photo
         self.on_photo = on_photo  # a photo tapped: shown full screen
+        self.on_forward = on_forward  # the ↪ beside a bubble: on_forward(msg_id)
+        self.on_save = on_save  # the save button of a photo or a file: on_save(msg, item)
         self.held_at = 0.0  # a long press just now: its release is no tap
         self.shown = set()  # ids of the messages built
         self.msgs = {}  # message id -> (its dict, the box of its reactions)
@@ -2000,10 +2047,27 @@ class ChatView:
         bubble = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
         bubble.get_style_context().add_class("bubble")
         bubble.get_style_context().add_class("mine" if m["mine"] else "theirs")
-        # A long press offers the reactions.
+        # A long press offers the reactions. Beside the bubble, at its foot
+        # and on the side with room (as Telegram has it), the ↪ to forward it.
         hold = Gtk.EventBox()
         hold.set_halign(Gtk.Align.END if m["mine"] else Gtk.Align.START)
-        hold.add(bubble)
+        side = Gtk.Box(spacing=8)
+        if self.on_forward is not None:
+            share = Gtk.Button.new_from_icon_name("mail-forward-symbolic", Gtk.IconSize.LARGE_TOOLBAR)
+            share.set_valign(Gtk.Align.END)
+            share.get_style_context().add_class("share")
+            share.set_can_focus(False)
+            share.set_tooltip_text("Переслать")
+            share.connect("clicked", lambda _b: self.on_forward(m["id"]))
+            side.pack_start(bubble, False, False, 0)
+            if m["mine"]:
+                side.pack_start(share, False, False, 0)
+                side.reorder_child(share, 0)  # left of the own bubble
+            else:
+                side.pack_start(share, False, False, 0)  # right of another's
+        else:
+            side.pack_start(bubble, False, False, 0)
+        hold.add(side)
         hold.press = Gtk.GestureLongPress.new(hold)
         hold.press.connect("pressed", lambda _g, _x, _y: (
             setattr(self, "held_at", time.monotonic()), self.on_hold(m["id"], bubble)))
@@ -2022,7 +2086,17 @@ class ChatView:
             frame.tap = Gtk.GestureMultiPress.new(frame)
             frame.tap.connect("released", lambda _g, _n, _x, _y, url=url: (
                 time.monotonic() - self.held_at > 1.0 and self.on_photo(url)))
-            bubble.pack_start(frame, False, False, 0)
+            over = Gtk.Overlay()
+            over.add(frame)
+            save = self._save_button(m, {"kind": "photo", "url": url,
+                                         "n": m["photos"].index(url) + 1})
+            if save:
+                save.set_halign(Gtk.Align.END)
+                save.set_valign(Gtk.Align.END)
+                save.set_margin_end(8)
+                save.set_margin_bottom(8)
+                over.add_overlay(save)
+            bubble.pack_start(over, False, False, 0)
             self.photos.append((img, url))  # loaded once near the screen
         for item in m.get("media") or []:
             bubble.pack_start(self._media(m, item), False, False, 0)
@@ -2040,12 +2114,35 @@ class ChatView:
         hold.show_all()
         return hold
 
+    def _save_button(self, m, item):
+        """The round button that keeps one photo or file on the tablet."""
+        if self.on_save is None:
+            return None
+        b = Gtk.Button.new_from_icon_name("document-save-symbolic", Gtk.IconSize.LARGE_TOOLBAR)
+        b.get_style_context().add_class("save")
+        b.set_can_focus(False)
+        b.set_valign(Gtk.Align.CENTER)
+        b.set_tooltip_text("Сохранить на планшет")
+        b.connect("clicked", lambda _b: self.on_save(m, item))
+        return b
+
+    def _with_save(self, widget, m, item):
+        """A control with its save button after it, in a row."""
+        save = self._save_button(m, item)
+        if save is None:
+            return widget
+        row = Gtk.Box(spacing=10)
+        row.pack_start(widget, True, True, 0)
+        row.pack_start(save, False, False, 0)
+        return row
+
     def _media(self, m, item):
-        """The controls of a voice message, a video or a file; what they do
-        is on_media's."""
+        """The controls of a voice message, a video or a file, each with its
+        save button; what they do is on_media's and on_save's."""
         if item["kind"] == "audio":
             box = Gtk.Box(spacing=12)
-            play = Gtk.Button(label="▶")
+            play = Gtk.Button()
+            set_play(play, "play")
             play.get_style_context().add_class("media")
             play.set_can_focus(False)
             bar = Gtk.ProgressBar(valign=Gtk.Align.CENTER)
@@ -2057,6 +2154,9 @@ class ChatView:
             box.pack_start(play, False, False, 0)
             box.pack_start(bar, True, True, 0)
             box.pack_start(length, False, False, 0)
+            save = self._save_button(m, item)
+            if save:
+                box.pack_start(save, False, False, 0)
             if not item.get("name"):
                 return box
             named = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
@@ -2078,7 +2178,7 @@ class ChatView:
             b.get_style_context().add_class("file")
             b.set_can_focus(False)
             b.connect("clicked", lambda _b: self.on_media(m, item, {"button": b}))
-            box.pack_start(b, False, False, 0)
+            box.pack_start(self._with_save(b, m, item), False, False, 0)
             return box
         b = Gtk.Button(label="📄  %s · %s" % (item["name"], size_text(item["size"])))
         b.get_style_context().add_class("file")
@@ -2086,7 +2186,7 @@ class ChatView:
         b.get_child().set_max_width_chars(32)
         b.set_can_focus(False)
         b.connect("clicked", lambda _b: self.on_media(m, item, {"button": b}))
-        return b
+        return self._with_save(b, m, item)
 
     def _fill_reactions(self, msg_id):
         """The reactions under a message: emoji and count, the account's own
@@ -2294,6 +2394,8 @@ class Max(Gtk.Application):
         self.tab = "chats"  # or "channels"
         self.media = media or Media()  # photos, voice, video, files: how MAX's CDNs are reached
         self.playing = None  # (progress bar, button, duration) of what plays
+        self.playing_chat = None  # the chat it plays in
+        self.keep_sound = SETTINGS.get_bool("keep_sound", False)  # plays on outside its chat
         self.held = 0.0  # when a row was long-pressed: its release opens nothing
         self.open_chat = None
         self.views = {}  # chat id -> its ChatView, most recently used last
@@ -2349,7 +2451,8 @@ class Max(Gtk.Application):
         bar.pack_end(self.edit)
         self.win.set_titlebar(bar)
         self.win.connect("map", lambda _w: self.moved())
-        self.win.connect("unmap", lambda _w: self.telemetry.go(SCREEN_BACKGROUND))
+        self.win.connect("unmap", lambda _w: (self.keep_sound or self.stop_sound(),
+                                               self.telemetry.go(SCREEN_BACKGROUND)))
 
         self.stack = Gtk.Stack()
         # Only the page shown sets the window's size. A stack is as tall as
@@ -2358,7 +2461,37 @@ class Max(Gtk.Application):
         # the window covered the keyboard's top row.
         self.stack.set_vhomogeneous(False)
         self.stack.set_hhomogeneous(False)
-        self.win.add(self.stack)
+        # What plays elsewhere, while its chat is not in front (keep_sound on):
+        # its chat (a tap goes back to it), the time, pause and stop.
+        self.nowplay = Gtk.Box(spacing=12)
+        self.nowplay.get_style_context().add_class("nowplay")
+        back_to = Gtk.Button()
+        back_to.get_style_context().add_class("nowplay-chat")
+        back_to.set_can_focus(False)
+        self.nowplay_label = label("", "nowplay", ellipsize=True)
+        back_to.add(self.nowplay_label)
+        back_to.connect("clicked", lambda _b: self.playing_chat is not None and
+                        self.open(self.playing_chat))
+        self.nowplay_toggle = Gtk.Button()
+        set_play(self.nowplay_toggle, "pause")
+        self.nowplay_stop = Gtk.Button.new_from_icon_name("window-close-symbolic",
+                                                          Gtk.IconSize.LARGE_TOOLBAR)
+        self.nowplay_stop.set_tooltip_text("Остановить")
+        for b in (self.nowplay_toggle, self.nowplay_stop):
+            b.get_style_context().add_class("media")
+            b.set_can_focus(False)
+        self.nowplay_toggle.connect("clicked", lambda _b: self.toggle_sound())
+        self.nowplay_stop.connect("clicked", lambda _b: self.stop_sound())
+        self.nowplay.pack_start(back_to, True, True, 0)
+        self.nowplay.pack_start(self.nowplay_toggle, False, False, 0)
+        self.nowplay.pack_start(self.nowplay_stop, False, False, 0)
+        self.nowplay.set_no_show_all(True)
+        for w in (back_to, self.nowplay_label, self.nowplay_toggle, self.nowplay_stop):
+            w.show()
+        column = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        column.pack_start(self.nowplay, False, False, 0)
+        column.pack_start(self.stack, True, True, 0)
+        self.win.add(column)
         wait = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
         wait.set_valign(Gtk.Align.CENTER)
         self.wait_text = label("Подключение к MAX…", "big", xalign=0.5)
@@ -2540,7 +2673,27 @@ class Max(Gtk.Application):
         self.viewer.tap.connect("released", lambda *_a: self.close_photo())
         self.viewer.connect("size-allocate", lambda _w, _a: self.fit_photo())
         self.viewer_pix = None  # the photo as loaded, fitted again on each size
-        self.stack.add_named(self.viewer, "photo")
+        self.viewer_url = None
+        viewer_page = Gtk.Overlay()
+        viewer_page.add(self.viewer)
+        self.viewer_save = Gtk.Button.new_from_icon_name("document-save-symbolic",
+                                                         Gtk.IconSize.LARGE_TOOLBAR)
+        self.viewer_save.get_style_context().add_class("save")
+        self.viewer_save.get_style_context().add_class("big")
+        self.viewer_save.set_can_focus(False)
+        self.viewer_save.set_halign(Gtk.Align.END)
+        self.viewer_save.set_valign(Gtk.Align.START)
+        self.viewer_save.set_margin_end(24)
+        self.viewer_save.set_margin_top(24)
+        self.viewer_save.connect("clicked", lambda _b: self.save_viewed())
+        viewer_page.add_overlay(self.viewer_save)
+        self.viewer_note = label("", "saved", xalign=0.5)
+        self.viewer_note.set_halign(Gtk.Align.CENTER)
+        self.viewer_note.set_valign(Gtk.Align.END)
+        self.viewer_note.set_margin_bottom(32)
+        self.viewer_note.set_no_show_all(True)  # only while saying something
+        viewer_page.add_overlay(self.viewer_note)
+        self.stack.add_named(viewer_page, "photo")
         self.win.connect("key-press-event", lambda _w, e: (
             e.keyval == Gdk.KEY_Escape and self.stack.get_visible_child_name() == "photo"
             and (self.close_photo() or True)))
@@ -2578,6 +2731,12 @@ class Max(Gtk.Application):
             "Оповещение о новом сообщении", self.buzz_new, self.on_buzz,
             "Уведомление рабочего стола: на планшете оно вздрагивает или звучит, "
             "как настроено в системе. Для отдельных чатов — в их меню."), False, False, 0)
+        settings.pack_start(self.setting(
+            "Звук играет и вне чата", self.keep_sound, self.on_keep_sound,
+            "Голосовое или аудиофайл продолжают играть в других чатах, в списке и "
+            "при закрытом окне; полоса под заголовком возвращает к ним, ставит на "
+            "паузу или останавливает. Если выключено, звук останавливается, когда "
+            "вы уходите из чата."), False, False, 0)
         settings.pack_start(self.setting(
             "Отправлять телеметрию в MAX", self.telemetry.on, self.on_telemetry,
             "Приложение MAX само сообщает серверу, какие экраны открыты и как быстро "
@@ -2944,6 +3103,8 @@ class Max(Gtk.Application):
     # a photo full screen
     def show_photo(self, url):
         self.viewer_pix = None
+        self.viewer_url = url
+        self.viewer_note.hide()
         self.viewer_image.set_from_icon_name("image-x-generic", Gtk.IconSize.DIALOG)
         self.stack.set_visible_child_name("photo")
         self.win.get_titlebar().hide()  # no header, no panel: the whole screen
@@ -2967,6 +3128,18 @@ class Max(Gtk.Application):
         current = self.viewer_image.get_pixbuf()
         if current is None or (current.get_width(), current.get_height()) != (w, h):
             self.viewer_image.set_from_pixbuf(pix.scale_simple(w, h, GdkPixbuf.InterpType.BILINEAR))
+
+    def save_viewed(self):
+        """The photo shown, kept on the tablet."""
+        url = self.viewer_url
+        if not url:
+            return
+        self.viewer_note.set_text("сохраняю…")
+        self.viewer_note.show()
+        name = "фото-%s.jpg" % hashlib.sha1(url.encode()).hexdigest()[:10]
+        self.media.save(url, load_text("folder", default_folder()), name, lambda path: (
+            self.viewer_note.set_text("сохранено: %s" % os.path.basename(path) if path
+                                      else "не удалось сохранить")))
 
     def close_photo(self):
         if self.stack.get_visible_child_name() != "photo":
@@ -3039,7 +3212,9 @@ class Max(Gtk.Application):
         jobs = [] if items else \
             [(url, "фото-%s-%d.jpg" % (m["id"], n + 1)) for n, url in enumerate(m["photos"])]
         for item in items or m.get("media") or []:
-            if item["kind"] == "audio" and item["url"]:  # a voice message
+            if item["kind"] == "photo":
+                jobs.append((item["url"], "фото-%s-%d.jpg" % (m["id"], item.get("n", 1))))
+            elif item["kind"] == "audio" and item["url"]:  # a voice message
                 ext = os.path.splitext(urllib.parse.urlsplit(item["url"]).path)[1] or ".ogg"
                 jobs.append((item["url"], "голосовое-%s%s" % (m["id"], ext)))
             elif item["kind"] == "audio":  # an audio file
@@ -3253,6 +3428,10 @@ class Max(Gtk.Application):
             INVITES_HINT.get(value, INVITES_HINT["unknown"]))
         return False
 
+    def on_keep_sound(self, on):
+        self.keep_sound = on
+        save_setting("keep_sound", on)
+
     def on_buzz(self, on):
         self.buzz_new = on
         save_setting("buzz", on)
@@ -3267,6 +3446,9 @@ class Max(Gtk.Application):
         self.gear.set_visible(page in ("chats", "wait", "qr"))
         self.findb.set_visible(page == "chats")
         self.edit.set_visible(page == "chat" and self.chatlist.listed(self.open_chat))
+        if page not in ("chat", "photo", "forward") and not self.keep_sound:
+            self.stop_sound()  # the chat is left: its sound stops
+        self.show_nowplay()
         if page != "chat":
             self.smile.set_active(False)
             self.confirm.hide()
@@ -3309,7 +3491,9 @@ class Max(Gtk.Application):
                 on_hold=lambda msg_id, widget: self.pick_reaction(chat_id, msg_id, widget),
                 on_media=lambda m, item, ctl: self.media_tapped(chat_id, m, item, ctl),
                 on_react=lambda msg_id, emoji: self.react(chat_id, msg_id, emoji),
-                photo=self.media.photo, on_photo=self.show_photo)
+                photo=self.media.photo, on_photo=self.show_photo,
+                on_forward=lambda msg_id: self.show_forward(chat_id, msg_id),
+                on_save=lambda m, item: self.save_message(chat_id, m, [item]))
         self.views[chat_id] = view  # most recently used last
         while len(self.views) > VIEWS:
             old_id = next(iter(self.views))
@@ -3328,6 +3512,9 @@ class Max(Gtk.Application):
         self.confirm.hide()
         self.naming.hide()
         self.edit.set_visible(self.chatlist.listed(chat_id))
+        if self.playing and self.playing_chat != chat_id and not self.keep_sound:
+            self.stop_sound()  # another chat in front: the sound of the last one stops
+        GLib.idle_add(lambda: self.show_nowplay() and False)
         view = self.view_for(chat_id)
         if self.view is not view:
             if self.view is not None:
@@ -3369,7 +3556,8 @@ class Max(Gtk.Application):
         if item["kind"] == "audio":
             play = controls["button"]
             if item["url"] or (self.playing and self.playing[1] is play):
-                self.play_sound(item, play, controls["bar"], controls["length"], item["url"])
+                self.play_sound(chat_id, item, play, controls["bar"], controls["length"],
+                                item["url"])
                 return
             play.set_sensitive(False)  # an audio file: its link first
 
@@ -3379,33 +3567,54 @@ class Max(Gtk.Application):
                     log_line("audio file no link: %r" % (err,))
                     self.sub.set_text("не удалось открыть")
                     return
-                self.play_sound(item, play, controls["bar"], controls["length"], url)
+                self.play_sound(chat_id, item, play, controls["bar"], controls["length"], url)
 
             self.backend.run(self.backend.media_url(
                 chat_id, m["id"], {"kind": "file", "id": item["file"]}), done)
-        elif item["kind"] == "file":  # any file: open it, or keep it on the tablet
-            button = controls["button"]
-            self.popup_menu(button, [
-                ("📂 Открыть", lambda: self.open_media(chat_id, m["id"], item, button)),
-                ("💾 Сохранить на планшет", lambda: self.save_message(chat_id, m, [item]))])
         else:
             self.open_media(chat_id, m["id"], item, controls["button"])
 
-    def play_sound(self, item, play, bar, length, url):
+    def play_sound(self, chat_id, item, play, bar, length, url):
         """What plays and where its button is are the window's; the playing
-        is Media's."""
+        is Media's. It plays only while its chat is in front: leaving it (for
+        the list, another chat, the search, the settings) or hiding the
+        window stops it (stop_sound)."""
         if self.playing and self.playing[1] is play:
-            play.set_label("⏸" if self.media.toggle() else "▶")
+            self.toggle_sound()
             return
         self.sound_end()
         if not self.media.voice(url):
-            play.set_label("✕")  # no libmpv here, or a link not to be opened
+            set_play(play, "fail")  # no libmpv here, or a link not to be opened
             return
         self.playing = [bar, play, length, secs(item["duration"]), item]
+        self.playing_chat = chat_id
         # Its bubble gone (the chat cut or deleted): the sound stops too.
         play.connect("destroy", lambda b: self.playing and self.playing[1] is b and (
             self.media.stop(), setattr(self, "playing", None)))
-        play.set_label("⏸")
+        set_play(play, "pause")
+
+    def stop_sound(self):
+        """Whatever plays stops, and its button shows ▶ again."""
+        if self.playing:
+            self.media.stop()
+            self.sound_end()
+
+    def toggle_sound(self):
+        if self.playing:
+            on = self.media.toggle()
+            set_play(self.playing[1], "pause" if on else "play")
+            set_play(self.nowplay_toggle, "pause" if on else "play")
+
+    def show_nowplay(self):
+        """The bar of what plays elsewhere: only while its chat is not in front."""
+        here = self.stack.get_visible_child_name() in ("chat", "photo", "forward") and \
+            self.open_chat == self.playing_chat
+        show = bool(self.playing) and not here
+        if show:
+            title = (self.chatlist.get(self.playing_chat) or {}).get("title", "")
+            self.nowplay_label.set_text("🎵  %s  ·  %s" % (title, self.playing[2].get_text()))
+            set_play(self.nowplay_toggle, self.playing[1].state)
+        self.nowplay.set_visible(show)
 
     def sound_time(self, pos, total=None):
         """How far it played; the length is the message's, else the player's
@@ -3417,15 +3626,18 @@ class Max(Gtk.Application):
             if known:
                 bar.set_fraction(min(1.0, pos / known))
             length.set_text(mmss(pos))
+            if self.nowplay.get_visible():
+                self.show_nowplay()
         return False
 
     def sound_end(self):
         if self.playing:
             bar, play, length, known, item = self.playing
             bar.set_fraction(0)
-            play.set_label("▶")
+            set_play(play, "play")
             length.set_text(mmss(known) if known else size_text(item.get("size") or 0))
             self.playing = None
+            self.show_nowplay()
         return False
 
     def open_media(self, chat_id, msg_id, item, button):
@@ -3471,9 +3683,7 @@ class Max(Gtk.Application):
             row.pack_start(b, False, False, 0)
         column = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         column.pack_start(row, False, False, 0)
-        acts = [("↪ Переслать", lambda: self.show_forward(chat_id, msg_id))]
-        if m["photos"] or m.get("media"):
-            acts.append(("💾 Сохранить на планшет", lambda: self.save_message(chat_id, m)))
+        acts = []  # forwarding is the ↪ beside the bubble; saving, each item's own button
         for text, act in acts:
             b = Gtk.Button(label=text)
             b.get_style_context().add_class("menu")

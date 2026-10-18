@@ -53,6 +53,19 @@ def walk(w):
             yield from walk(c)
 
 
+def share_of(hold):
+    """The ↪ beside a bubble, and whether it is left of it."""
+    side = hold.get_child()
+    kids = side.get_children()
+    share = [b for b in kids if isinstance(b, Gtk.Button) and b.get_style_context().has_class("share")][0]
+    return share, kids.index(share) == 0
+
+
+def saves_of(w):
+    """The save buttons inside a widget, in order."""
+    return [b for b in walk(w) if isinstance(b, Gtk.Button) and b.get_style_context().has_class("save")]
+
+
 def buttons(w):
     return [b for b in walk(w) if isinstance(b, Gtk.Button)]
 
@@ -246,8 +259,15 @@ ok("reactions, rename, chat menu")
 # --- forwarding a message ---------------------------------------------------------------------
 app.pick_reaction(mama, first, holds_of(v)[0].get_child())
 spin(0.1)
-assert "↪ Переслать" in menu_items() and "💾 Сохранить на планшет" not in menu_items()  # text only
-menu_items()["↪ Переслать"].clicked()
+assert not [k for k in menu_items() if "Переслать" in k or "Сохранить" in k]  # reactions only
+app.menu.popdown()
+share, left = share_of(holds_of(v)[0])  # Мама's message: the ↪ right of it
+assert not left and share.get_valign() == Gtk.Align.END
+assert share.get_image().get_icon_name()[0] == "mail-forward-symbolic"
+mine = [h for h in holds_of(v) if v.message(h.msg_id)["mine"]][0]
+assert share_of(mine)[1]  # an own message: the ↪ left of it
+shot("share.png")
+share.clicked()
 spin(0.1)
 assert app.stack.get_visible_child_name() == "forward" and app.title.get_text() == "Переслать"
 targets = [r.chat_id for r in app.fwd_list.get_children()]
@@ -425,6 +445,11 @@ shown = app.viewer_image.get_pixbuf()
 assert abs(shown.get_width() / shown.get_height() - 4 / 3) < 0.02  # its shape kept
 assert shown.get_width() == alloc.width or shown.get_height() == alloc.height  # as large as fits
 shot("photo-full.png")
+pics = os.path.join(os.environ["HOME"], "Фото")
+app.set_folder(pics)
+app.viewer_save.clicked()  # saved from the viewer, which stays open
+wait(lambda: app.viewer_note.get_text().startswith("сохранено"), what="saved from the viewer")
+assert app.stack.get_visible_child_name() == "photo" and len(os.listdir(pics)) == 1
 app.viewer.tap.emit("released", 1, 5.0, 5.0)
 spin(0.2)
 assert app.stack.get_visible_child_name() == "chat" and app.win.get_titlebar().get_visible()
@@ -432,6 +457,10 @@ frame.tap.emit("released", 1, 5.0, 5.0)
 spin(0.1)
 app.go_back()  # the back way closes it too
 assert app.stack.get_visible_child_name() == "chat" and app.open_chat == mama
+psave = saves_of([w for w in holds_of(app.view) if w.msg_id == pic.id][0])
+assert len(psave) == 1  # in the photo's corner
+psave[0].clicked()
+wait(lambda: "фото-%s-1.jpg" % pic.id in os.listdir(pics), what="photo saved from the bubble")
 ok("photo full screen")
 
 # --- media: voice in the bubble, video in the player, a file in the browser -------------------
@@ -445,23 +474,22 @@ app.show_list()
 app.open(mama)
 wait(lambda: any(w.msg_id == m.id for w in holds_of(app.view)), what="media message")
 hold = [w for w in holds_of(app.view) if w.msg_id == m.id][0]
-play, vid, doc = buttons(hold)
-assert play.get_label() == "▶" and vid.get_label() == "▶  Видео 0:42" and doc.get_label().startswith("📄")
+play, vid, doc = [b for b in buttons(hold) if not b.get_style_context().has_class("share")
+                  and not b.get_style_context().has_class("save")]
+assert len(saves_of(hold)) == 3  # the voice, the video and the file each have one
+assert play.state == "play" and vid.get_label() == "▶  Видео 0:42" and doc.get_label().startswith("📄")
 assert app.media.agent == fake.agent  # set at login
 shot("media.png")
 play.clicked()
-assert hands.sound.did == [("play", "https://vd.okcdn.ru/a.ogg", fake.agent)] and play.get_label() == "⏸"
+assert hands.sound.did == [("play", "https://vd.okcdn.ru/a.ogg", fake.agent)] and play.state == "pause"
 hands.sound.on_time(3.5)
 spin(0.1)
 assert "0:03" in [w.get_text() for w in walk(hold) if isinstance(w, Gtk.Label)]
 vid.clicked()  # the voice stops for the video
 wait(lambda: hands.spawned, what="player")
 assert hands.spawned[-1][-1] == "https://vd.okcdn.ru/v.mp4" and hands.sound.did[-1] == ("stop",)
-assert play.get_label() == "▶"
-doc.clicked()  # a file: open it or save it
-spin(0.1)
-assert list(menu_items()) == ["📂 Открыть", "💾 Сохранить на планшет"]
-menu_items()["📂 Открыть"].clicked()
+assert play.state == "play"
+doc.clicked()  # a file: opened; its save button keeps it
 wait(lambda: hands.opened, what="file")
 assert hands.opened == ["https://fd.oneme.ru/f.pdf"]
 # an audio file plays in the bubble too: its link is asked of MAX first
@@ -472,11 +500,12 @@ shold = [w for w in holds_of(app.view) if w.msg_id == song.id][0]
 texts = [w.get_text() for w in walk(shold) if isinstance(w, Gtk.Label)]
 assert "🎵  Песня про лето.mp3" in texts and "3.1 МБ" in texts, texts
 splay = buttons(shold)[0]
-assert splay.get_label() == "▶" and not any(b.get_label().startswith("📄") for b in buttons(shold))
+assert len(saves_of(shold)) == 1
+assert splay.state == "play" and not any((b.get_label() or "").startswith("📄") for b in buttons(shold))
 splay.clicked()
 wait(lambda: hands.sound.did[-1][:2] == ("play", "https://fd.oneme.ru/song.mp3"), what="audio file plays")
 assert fake.asked("media_url")[-1] == {"chat_id": mama, "msg_id": song.id, "kind": "file"}
-assert splay.get_label() == "⏸"
+assert splay.state == "pause"
 hands.sound.on_time(5.0, 200.0)
 spin(0.1)
 texts = [w.get_text() for w in walk(shold) if isinstance(w, Gtk.Label)]
@@ -484,37 +513,99 @@ bar = [w for w in walk(shold) if isinstance(w, Gtk.ProgressBar)][0]
 assert "0:05" in texts and 0 < bar.get_fraction() < 0.1
 shot("audio-file.png")
 splay.clicked()  # pause: no new link asked
-assert splay.get_label() == "▶" and hands.sound.did[-1] == ("toggle",)
-# saving all a message carries into the folder set
+assert splay.state == "play" and hands.sound.did[-1] == ("toggle",)
+# saving: each photo, voice, video or file by its own button, into the folder set
 folder = os.path.join(os.environ["HOME"], "Сохранённое")
 app.set_folder(folder)
 assert bm.load_text("folder", "") == folder and app.folder_label.get_text() == folder
-app.pick_reaction(mama, m.id, hold.get_child())
-spin(0.1)
-menu_items()["💾 Сохранить на планшет"].clicked()
-wait(lambda: app.sub.get_text().startswith("сохранено"), what="saved")
-assert app.sub.get_text() == "сохранено файлов: 3", app.sub.get_text()
+vsave, video_save, file_save = saves_of(hold)
+for b in (vsave, video_save, file_save):
+    b.clicked()
+wait(lambda: len(os.listdir(folder)) == 3, what="three saved")
 assert sorted(os.listdir(folder)) == sorted(["голосовое-%s.ogg" % m.id, "видео-%s.mp4" % m.id,
                                              "Документ с очень длинным названием.pdf"])
-assert {u for u, _h in hands.downloaded} == {"https://vd.okcdn.ru/a.ogg", "https://vd.okcdn.ru/v.mp4",
+assert {u for u, _h in hands.downloaded} >= {"https://vd.okcdn.ru/a.ogg", "https://vd.okcdn.ru/v.mp4",
                                              "https://fd.oneme.ru/f.pdf"}
-one = os.path.join(os.environ["HOME"], "Один файл")
-app.set_folder(one)
-doc.clicked()
-spin(0.1)
-menu_items()["💾 Сохранить на планшет"].clicked()  # only this file
-wait(lambda: app.sub.get_text().startswith("сохранено:"), what="one file saved")
-assert os.listdir(one) == ["Документ с очень длинным названием.pdf"]
-assert app.sub.get_text() == "сохранено: Документ с очень длинным названием.pdf"
-app.set_folder(folder)
+wait(lambda: app.sub.get_text() == "сохранено: Документ с очень длинным названием.pdf"
+     or app.sub.get_text().startswith("сохранено"), what="said saved")
+saves_of(shold)[0].clicked()  # the audio file, by its name
+wait(lambda: "Песня про лето.mp3" in os.listdir(folder), what="audio file saved")
 hands.fail_download = True
-app.save_message(mama, app.view.message(m.id))
+app.sub.set_text("")
+file_save.clicked()
 wait(lambda: app.sub.get_text().startswith("не удалось"), what="save failed")
-assert app.sub.get_text() == "не удалось сохранить: 3 из 3" and len(os.listdir(folder)) == 3
+assert app.sub.get_text() == "не удалось сохранить: 1 из 1" and len(os.listdir(folder)) == 4
 hands.fail_download = False
-app.save_message(mama, app.view.message(m.id))  # again: numbered, nothing overwritten
-wait(lambda: len(os.listdir(folder)) == 6, what="saved again")
-assert "Документ с очень длинным названием (2).pdf" in os.listdir(folder)
+file_save.clicked()  # again: numbered, nothing overwritten
+wait(lambda: "Документ с очень длинным названием (2).pdf" in os.listdir(folder), what="saved again")
+# the sound plays only while its chat is in front
+def playing_again():
+    play.clicked()
+    assert play.state == "pause" and app.playing is not None
+
+
+def stopped():
+    return app.playing is None and play.state == "play" and hands.sound.did[-1] == ("stop",)
+
+
+playing_again()
+app.show_forward(mama, m.id)  # within the chat: forwarding, a photo…
+assert app.playing is not None
+app.end_forward()
+app.show_list()  # the chat left
+assert stopped()
+app.open(mama)
+spin(0.2)
+playing_again()
+app.open(dacha)  # another chat
+spin(0.2)
+assert stopped()
+app.open(mama)
+spin(0.2)
+playing_again()
+app.win.hide()  # the window closed (hidden: MAX lives on in the background)
+spin(0.2)
+assert stopped()
+app.win.show()
+spin(0.2)
+assert not app.nowplay.get_visible()  # nothing plays: no bar
+ok("the sound stops with its chat")
+
+# or, with «Звук играет и вне чата», it plays on and a bar under the header shows it
+app.on_keep_sound(True)
+assert bm.SETTINGS.get_bool("keep_sound", False)
+app.open(mama)
+spin(0.2)
+playing_again()
+assert not app.nowplay.get_visible()  # its chat in front: no bar
+app.show_list()
+spin(0.2)
+assert app.playing is not None and app.nowplay.get_visible()
+assert app.nowplay_label.get_text().startswith("🎵  Мамочка  ·  ")
+shot("nowplay.png")
+app.nowplay_toggle.clicked()  # pause from the bar
+assert hands.sound.did[-1] == ("toggle",) and app.nowplay_toggle.state == "play"
+assert play.state == "play"
+app.nowplay_toggle.clicked()
+app.open(dacha)  # another chat: still playing, the bar there too
+spin(0.2)
+assert app.playing is not None and app.nowplay.get_visible()
+back = [w for w in walk(app.nowplay) if isinstance(w, Gtk.Button)][0]
+back.clicked()  # a tap on the bar goes back to its chat
+spin(0.2)
+assert app.open_chat == mama and not app.nowplay.get_visible()
+app.win.hide()  # the window hidden: it plays on
+spin(0.2)
+assert app.playing is not None
+app.win.show()
+app.show_list()
+spin(0.2)
+app.nowplay_stop.clicked()  # ✕ on the bar
+assert stopped() and not app.nowplay.get_visible()
+app.on_keep_sound(False)
+app.open(mama)
+spin(0.2)
+ok("the sound plays on, with its bar")
 play.clicked()
 app.views.pop(mama).destroy()  # the bubble goes (the chat cut or deleted): so does the sound
 app.view = None

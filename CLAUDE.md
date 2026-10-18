@@ -142,7 +142,13 @@ APKBUILD's `_whl`). Bumping the version: `pkgver` and the metainfo `<release>`.
   comes from libmpv: `on_time(sec, total)`); the link for a video or a
   file comes from `Backend.media_url` (never an `external` one). This is a security boundary:
   links come inside messages; keep the host list tight. What plays and where its button is stays
-  with `Max` (`playing`); a voice message stops when its button is destroyed.
+  with `Max` (`playing`, `playing_chat`); a voice message stops when its button is destroyed.
+  By default it plays only while its chat is in front (`chat`, `photo`, `forward` pages):
+  `stop_sound` on leaving it, opening another chat or the window's unmap. With `keep_sound`
+  (setting, off by default) it plays on, and `show_nowplay` shows the bar above the stack while
+  its chat is not in front: the chat (a tap returns to it), the time, pause (`toggle_sound`),
+  stop. Play buttons use theme icons through `set_play(button, "play"|"pause"|"fail")`, whose
+  `state` the tests read (⏸ is tiny in most fonts).
 - **Reactions.** Message dicts carry `reactions` ([[emoji, count]]) and `yours`; a long press on a
   bubble (`ChatView`'s `on_hold`) opens `Max.pick_reaction`, a popover of `REACTIONS`.
   `Backend.react` uses `messages.add_reaction`/`remove_reaction`; when MAX answers without counts
@@ -153,11 +159,15 @@ APKBUILD's `_whl`). Bumping the version: `pkgver` and the metainfo `<release>`.
   `ChatView`'s `on_photo(url)` → `Max.show_photo`: the `photo` page, black, the titlebar hidden
   and the window fullscreen; `Media.photo(url, done, size=2048)` loads it, `fit_photo` scales it
   to the page on every size. A tap, back or Esc (`close_photo`) returns to the chat.
-- **Forwarding and saving.** A long press on a message (`pick_reaction`) offers, under the
-  reactions, «↪ Переслать» (the `forward` page: chats but no channels, searchable; then
-  `Backend.forward` → the link's `forward`, MAX's own `forward_message`, attachments go with it)
-  and «💾 Сохранить на планшет» (`save_message`: every photo and media item, files of any
-  type; a tap on a file offers «Открыть»/«Сохранить» for it alone, `save_message(…, [item])`; links of videos and
+- **Forwarding and saving.** Beside every bubble, at its foot on the side with room (right of
+  another's, left of the own, as Telegram has it), a round `mail-forward-symbolic` button
+  (`ChatView`'s `on_forward(msg_id)`) opens the `forward` page: chats but no channels,
+  searchable; then `Backend.forward` → the link's `forward`, MAX's own `forward_message`,
+  attachments go with it. Saving is per item: every photo
+  (in its corner, and in the viewer's), voice, audio file, video and file has its own
+  `document-save-symbolic` button (`ChatView._save_button`, `on_save(msg, item)` →
+  `save_message(chat_id, m, [item])`; a photo is the item `{"kind": "photo", "url", "n"}`); the
+  long-press menu has only the reactions, and a tap on a file opens it (`save_message`: links of videos and
   files asked of MAX first; `Media.save` into `load_text("folder", default_folder())`, set in the
   settings, under `safe_name`, numbered when taken, via `.part`). A forwarded message's text and
   attachments are inside `msg.link.message` (`Backend.carried`); its dict has `forwarded`.
