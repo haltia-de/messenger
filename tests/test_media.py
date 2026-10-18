@@ -142,6 +142,31 @@ hands.browser = False
 assert not media.file("https://fd.oneme.ru/g.pdf")
 ok("files")
 
+# --- saving: a harmless name, never over another, nothing left of a failure --------------
+assert bm.safe_name("../../etc/passwd") == "passwd" and bm.safe_name(".bashrc") == "bashrc"
+assert bm.safe_name("a\x00b\nc.mp3") == "abc.mp3" and bm.safe_name("") == "файл"
+assert bm.safe_name("x" * 300).startswith("x") and len(bm.safe_name("x" * 300)) == 120
+folder = os.path.join(os.environ["HOME"], "Загрузки", "MAX")
+saver = bm.Media(hands.spawn, hands.open_uri, hands.fetch, hands.player, hands.download)
+saver.agent = "Agent/1"
+paths = []
+saver.save("https://evil.com/x.pdf", folder, "x.pdf", paths.append)
+drain(0.2)
+assert paths == [None] and not hands.downloaded and "save refused: evil.com/x.pdf" in log()
+for _ in range(2):
+    saver.save("https://fd.oneme.ru/f.pdf?sig=SECRET", folder, "../Отчёт.pdf", paths.append)
+drain()
+assert sorted(os.listdir(folder)) == ["Отчёт (2).pdf", "Отчёт.pdf"], os.listdir(folder)
+assert hands.downloaded[-1] == ("https://fd.oneme.ru/f.pdf?sig=SECRET", {"User-Agent": "Agent/1"})
+assert open(os.path.join(folder, "Отчёт.pdf"), "rb").read().startswith(b"file from")
+hands.fail_download = True
+saver.save("https://fd.oneme.ru/g.pdf", folder, "g.pdf", paths.append)
+drain()
+assert paths[-1] is None and "g.pdf" not in os.listdir(folder) and "g.pdf.part" not in os.listdir(folder)
+hands.fail_download = False
+assert bm.default_folder().endswith(os.sep + "MAX")
+ok("saving")
+
 # --- the log: 600, links without their signatures ----------------------------------------------
 assert oct(os.stat(bm.PLAYER_LOG).st_mode & 0o777) == "0o600"
 assert "SECRET" not in log() and "video vd.okcdn.ru/v.mp4 via mpv" in log()

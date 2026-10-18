@@ -139,6 +139,19 @@ while not said(ui, "reacted"):
 assert said(ui, "reacted")[-1] == (anna, m.id, [["😂", 1]], ...)
 ok("messages, reactions")
 
+# --- forwarding: the new message carries the original, and says from whom -------------------
+src = fake.say(anna, "Смотри", ANNA, attaches=[file(8, "план.pdf", 100)])
+out, summary = back(B.forward(petya, src.id, anna))
+assert out["text"] == "Смотри" and out["media"][0]["name"] == "план.pdf" and out["mine"]
+assert out["forwarded"] == "Анна Петрова"  # a dialog has no name: the sender's
+assert summary["last"] == "Вы: ↪ Смотри" and [m["id"] for m in bm.cache_read(petya)][-1] == out["id"]
+fake.group(-80, "Работа", members=[PETYA])
+fake.say(-80, "Собрание", PETYA)
+src = fake.msgs[-80][-1]
+out, _ = back(B.forward(anna, src.id, -80))
+assert out["forwarded"] == "Работа"  # from a group: its name
+ok("forwarding")
+
 # --- search, contacts, joining, removing, renaming, invites ----------------------------
 fake.person(40, "Ольга", phone="+79001234567")
 p = back(B.find_phone("+79001234567"))

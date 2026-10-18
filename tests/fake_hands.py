@@ -12,6 +12,8 @@ class FakeHands:
         self.photo_bytes = photo_bytes
         self.sound = None  # the FakePlayer, once made
         self.browser = True  # open_uri succeeds
+        self.downloaded = []  # (url, headers) saved
+        self.fail_download = False
 
     def spawn(self, cmd):
         self.spawned.append(cmd)
@@ -23,6 +25,13 @@ class FakeHands:
     def fetch(self, url, headers):
         self.fetched.append((url, dict(headers)))
         return self.photo_bytes
+
+    def download(self, url, headers, path):
+        self.downloaded.append((url, dict(headers)))
+        if self.fail_download:
+            raise OSError("connection reset")
+        with open(path, "wb") as fh:
+            fh.write(b"file from " + url.encode())
 
     def player(self, on_time, on_end):
         self.sound = FakePlayer(on_time, on_end)

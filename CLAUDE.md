@@ -64,7 +64,8 @@ it from the checkout still needs PyMax installed there.
   (a channel or group: `LINK_INFO` invoked directly so public `max.ru/name` links work too, then
   `chats.join_channel`), else filters the own chats by title. A dialog opened from the search
   waits in `Max.pending` (chat id = own id XOR theirs, as PyMax numbers dialogs) until its first
-  message. The bin on a chat asks on the page (`confirm` bar), then `Backend.remove`: a dialog
+  message. The chat menu's delete (the edit button in the header, `chat_menu`; it also renames, pins
+  and switches notifications) asks on the page (`confirm` bar), then `Backend.remove`: a dialog
   is deleted, a group or channel left, always `for_all=False` — never for the others in it.
   A message from a chat not in the list fetches it (`Backend.chat`).
 - **Contacts only.** MAX has no "who may write to me" setting, so `contacts_only` (on by default)
@@ -138,6 +139,14 @@ it from the checkout still needs PyMax installed there.
   `Backend.react` uses `messages.add_reaction`/`remove_reaction`; when MAX answers without counts
   the window counts itself. `on_reaction_update` events carry no own reaction, so `reacted(..., ...)`
   (Ellipsis) leaves `yours` alone. Emoji need `font-noto-emoji` (in the tablet image).
+- **Forwarding and saving.** A long press on a message (`pick_reaction`) offers, under the
+  reactions, «↪ Переслать» (the `forward` page: chats but no channels, searchable; then
+  `Backend.forward` → the link's `forward`, MAX's own `forward_message`, attachments go with it)
+  and «💾 Сохранить на планшет» (`save_message`: every photo and media item, files of any
+  type; a tap on a file offers «Открыть»/«Сохранить» for it alone, `save_message(…, [item])`; links of videos and
+  files asked of MAX first; `Media.save` into `load_text("folder", default_folder())`, set in the
+  settings, under `safe_name`, numbered when taken, via `.part`). A forwarded message's text and
+  attachments are inside `msg.link.message` (`Backend.carried`); its dict has `forwarded`.
 - **Emoji in messages.** The «😊» toggle left of the entry opens a non-modal popover (`EMOJI`
   groups, the recent ones first from `EMOJI_RECENT`, `emoji.json`); a tap inserts at the cursor
   (`put_emoji`). Non-modal on purpose: the entry keeps the focus, so the on-screen keyboard

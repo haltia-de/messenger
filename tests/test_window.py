@@ -89,6 +89,11 @@ def down_of(v):
     return found[0] if found else None
 
 
+def menu_items():
+    """The labels and buttons of the menu open now."""
+    return {b.get_label(): b for b in walk(app.menu) if isinstance(b, Gtk.Button)}
+
+
 def at_bottom(v):
     adj = adj_of(v)
     return adj.get_value() + adj.get_page_size() >= adj.get_upper() - 60
@@ -115,7 +120,8 @@ fake.say(news, "Перекрытие улицы", t=t0 + 4000)
 
 bm.save_json(bm.KNOWN, [MAMA, PETYA])  # not the first run: the stranger is not known
 hands = FakeHands()
-app = bm.Max(link=fake, media=bm.Media(hands.spawn, hands.open_uri, hands.fetch, hands.player))
+app = bm.Max(link=fake, media=bm.Media(hands.spawn, hands.open_uri, hands.fetch, hands.player,
+                                       hands.download))
 buzzes = []
 app.buzz = lambda *a: buzzes.append(1) or True
 app.register(None)
@@ -195,12 +201,56 @@ fake.counts = True
 fake.reaction(mama, first, [("👍", 3), ("😂", 1)])
 wait(lambda: len(chips(v, first)) == 2, what="someone's reaction")
 assert [b.get_label() for b in chips(v, first)] == ["👍 3", "😂 1"]
-app.ask_rename()
+app.edit.clicked()  # the chat's menu: rename, pin, notifications, delete
+spin(0.1)
+assert list(menu_items()) == ["✏️ Переименовать", "📌 Закрепить сверху", "🔕 Без оповещений",
+                              "🗑 Удалить переписку"], list(menu_items())
+shot("chat-menu.png")
+menu_items()["✏️ Переименовать"].clicked()
+assert app.naming.get_visible()
 app.name_entry.set_text("  Мамочка ")
 app.rename()
 wait(lambda: app.title.get_text() == "Мамочка", what="rename")
 assert app.chatlist.get(mama)["title"] == "Мамочка"
-ok("reactions, rename")
+app.edit.clicked()
+menu_items()["📌 Закрепить сверху"].clicked()
+assert app.chatlist.is_pinned(mama)
+app.edit.clicked()
+menu_items()["🔕 Без оповещений"].clicked()
+assert app.chatlist.quiet(mama)
+app.edit.clicked()
+assert "📌 Открепить" in menu_items() and "🔔 Включить оповещения" in menu_items()
+menu_items()["📌 Открепить"].clicked()
+app.edit.clicked()
+menu_items()["🔔 Включить оповещения"].clicked()
+assert not app.chatlist.is_pinned(mama) and not app.chatlist.quiet(mama)
+ok("reactions, rename, chat menu")
+
+# --- forwarding a message ---------------------------------------------------------------------
+app.pick_reaction(mama, first, holds_of(v)[0].get_child())
+spin(0.1)
+assert "↪ Переслать" in menu_items() and "💾 Сохранить на планшет" not in menu_items()  # text only
+menu_items()["↪ Переслать"].clicked()
+spin(0.1)
+assert app.stack.get_visible_child_name() == "forward" and app.title.get_text() == "Переслать"
+targets = [r.chat_id for r in app.fwd_list.get_children()]
+assert dacha in targets and mama in targets and news not in targets  # no channels
+app.fwd_entry.set_text("дач")
+wait(lambda: [r.chat_id for r in app.fwd_list.get_children()] == [dacha], what="forward search")
+shot("forward.png")
+app.fwd_list.emit("row-activated", app.fwd_list.get_children()[0])
+wait(lambda: app.sub.get_text() == "переслано: Дача", what="forwarded")
+assert app.stack.get_visible_child_name() == "chat" and app.open_chat == mama
+assert fake.asked("forward")[-1] == {"chat_id": dacha, "msg_id": first, "from_chat_id": mama}
+assert app.chatlist.get(dacha)["last"].startswith("Вы: ↪ Привет! Как дела?")
+app.open(dacha)
+wait(lambda: any("Переслано от" in w.get_text() for w in walk(app.view.widget)
+                 if isinstance(w, Gtk.Label)), what="forwarded bubble")
+fwd = [w.get_text() for w in walk(app.view.widget) if isinstance(w, Gtk.Label)]
+assert "↪ Переслано от Мамочка" in fwd and "Привет! Как дела?" in fwd, fwd
+app.open(mama)
+spin(0.2)
+ok("forward")
 
 # --- emoji into the message ---------------------------------------------------------------------
 app.entry.set_text("Привет ")
@@ -264,7 +314,8 @@ assert join.get_label() == "Подписаться"
 join.clicked()
 wait(lambda: app.open_chat == -70, what="joined")
 assert not app.inputbar.get_visible()
-app.trash.clicked()
+app.edit.clicked()
+menu_items()["🚪 Отписаться от канала"].clicked()
 assert app.confirm_yes.get_label() == "Отписаться"
 app.confirm_yes.clicked()
 wait(lambda: app.stack.get_visible_child_name() == "chats", what="left")
@@ -358,7 +409,10 @@ vid.clicked()  # the voice stops for the video
 wait(lambda: hands.spawned, what="player")
 assert hands.spawned[-1][-1] == "https://vd.okcdn.ru/v.mp4" and hands.sound.did[-1] == ("stop",)
 assert play.get_label() == "▶"
-doc.clicked()
+doc.clicked()  # a file: open it or save it
+spin(0.1)
+assert list(menu_items()) == ["📂 Открыть", "💾 Сохранить на планшет"]
+menu_items()["📂 Открыть"].clicked()
 wait(lambda: hands.opened, what="file")
 assert hands.opened == ["https://fd.oneme.ru/f.pdf"]
 # an audio file plays in the bubble too: its link is asked of MAX first
@@ -382,6 +436,36 @@ assert "0:05" in texts and 0 < bar.get_fraction() < 0.1
 shot("audio-file.png")
 splay.clicked()  # pause: no new link asked
 assert splay.get_label() == "▶" and hands.sound.did[-1] == ("toggle",)
+# saving all a message carries into the folder set
+folder = os.path.join(os.environ["HOME"], "Сохранённое")
+app.set_folder(folder)
+assert bm.load_text("folder", "") == folder and app.folder_label.get_text() == folder
+app.pick_reaction(mama, m.id, hold.get_child())
+spin(0.1)
+menu_items()["💾 Сохранить на планшет"].clicked()
+wait(lambda: app.sub.get_text().startswith("сохранено"), what="saved")
+assert app.sub.get_text() == "сохранено файлов: 3", app.sub.get_text()
+assert sorted(os.listdir(folder)) == sorted(["голосовое-%s.ogg" % m.id, "видео-%s.mp4" % m.id,
+                                             "Документ с очень длинным названием.pdf"])
+assert {u for u, _h in hands.downloaded} == {"https://vd.okcdn.ru/a.ogg", "https://vd.okcdn.ru/v.mp4",
+                                             "https://fd.oneme.ru/f.pdf"}
+one = os.path.join(os.environ["HOME"], "Один файл")
+app.set_folder(one)
+doc.clicked()
+spin(0.1)
+menu_items()["💾 Сохранить на планшет"].clicked()  # only this file
+wait(lambda: app.sub.get_text().startswith("сохранено:"), what="one file saved")
+assert os.listdir(one) == ["Документ с очень длинным названием.pdf"]
+assert app.sub.get_text() == "сохранено: Документ с очень длинным названием.pdf"
+app.set_folder(folder)
+hands.fail_download = True
+app.save_message(mama, app.view.message(m.id))
+wait(lambda: app.sub.get_text().startswith("не удалось"), what="save failed")
+assert app.sub.get_text() == "не удалось сохранить: 3 из 3" and len(os.listdir(folder)) == 3
+hands.fail_download = False
+app.save_message(mama, app.view.message(m.id))  # again: numbered, nothing overwritten
+wait(lambda: len(os.listdir(folder)) == 6, what="saved again")
+assert "Документ с очень длинным названием (2).pdf" in os.listdir(folder)
 play.clicked()
 app.views.pop(mama).destroy()  # the bubble goes (the chat cut or deleted): so does the sound
 app.view = None

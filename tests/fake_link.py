@@ -181,6 +181,21 @@ class FakeLink:
             self._chat(chat_id, "DIALOG", None, {self.me.id: 0, peer: 0}, 0)
         return self.say(chat_id, text, self.me.id)
 
+    async def forward(self, chat_id, msg_id, from_chat_id):
+        self._call("forward", chat_id=chat_id, msg_id=msg_id, from_chat_id=from_chat_id)
+        src = next(m for m in self.msgs[from_chat_id] if m.id == msg_id)
+        origin = self.rooms.get(from_chat_id)
+        msg = Message.model_validate({
+            "id": next(self.ids), "chatId": chat_id, "sender": self.me.id, "text": "",
+            "time": now_ms(), "type": "USER",
+            "link": {"type": "FORWARD", "chatId": from_chat_id,
+                     "chatName": origin.title if origin is not None else None,
+                     "message": src.model_dump(by_alias=True)}})
+        self.msgs.setdefault(chat_id, []).append(msg)
+        if chat_id in self.rooms:
+            self.rooms[chat_id].last_message = msg
+        return msg
+
     async def react(self, chat_id, msg_id, emoji):
         self._call("react", chat_id=chat_id, msg_id=msg_id, emoji=emoji)
         msg = next(m for m in self.msgs[chat_id] if m.id == msg_id)

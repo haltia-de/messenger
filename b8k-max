@@ -23,10 +23,15 @@ and a chat (bubbles, photos, a large entry and a send button). New
 messages arrive live and buzz (unless switched off in the settings).
 The search (the magnifier over the list) finds a person by phone number,
 to write to or add to the contacts, a channel or group by its max.ru link,
-to join, or one of the own chats by name; a chat is deleted (a dialog, for
-this account only) or left (a group, a channel) with the bin in its header,
-after a question on the page. One thing at a time, by hand: nothing here
-searches or adds in bulk.
+to join, or one of the own chats by name. The edit button in a chat's
+header opens its menu: rename the person, pin, notifications, and delete
+(a dialog, for this account only) or leave (a group, a channel), after a
+question on the page. One thing at a time, by hand: nothing here searches
+or adds in bulk.
+
+A long press on a message offers, beside the reactions, to forward it
+(MAX forwards it with its attachments; a forwarded one says from whom) and
+to save what it carries into a folder (Загрузки/MAX unless set otherwise).
 
 MAX has no setting for who may write to an account, so by default the
 dialogs of people outside the contacts are kept off the list, the badge
@@ -73,7 +78,7 @@ Reactions: a long press on a message offers six emoji; those on it show
 under it with their counts, the own one highlighted, a tap puts one on or
 takes the own off. Others' reactions arrive live.
 
-The person of a dialog can be renamed (the pencil): here only, kept in
+The person of a dialog can be renamed (the edit menu): here only, kept in
 ~/.local/share/b8k-max/names.json, since MAX's web protocol as PyMax has it
 offers no renaming of contacts.
 """
@@ -83,6 +88,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -287,6 +293,7 @@ button.smile {
 }
 button.smile:checked { background-color: #c4dcf7; }
 label.emoji-group { font-size: 18px; color: #77767b; }
+label.forwarded { font-size: 19px; font-style: italic; color: #1c71d8; }
 .tabs { background-color: #dcdcda; padding: 8px 12px; }
 .tabs radiobutton, .tabs button {
   background-image: none;
@@ -610,6 +617,11 @@ class PyMaxLink:
     async def send(self, chat_id, text):
         return await self._api.messages.send_message(chat_id, text)
 
+    async def forward(self, chat_id, msg_id, from_chat_id):
+        """A message (its attachments with it) into another chat, as MAX
+        forwards: the new message links to the original."""
+        return await self._api.messages.forward_message(chat_id, msg_id, from_chat_id)
+
     async def react(self, chat_id, msg_id, emoji):
         """The account's reaction put on (None: taken off); MAX's counts
         afterwards (ReactionInfo), or None when it sends none."""
@@ -817,13 +829,25 @@ class Backend:
             return self.name(others[0], "Собеседник")
         return "Чат"
 
+    @staticmethod
+    def carried(msg):
+        """The message whose text and attachments are shown: a forwarded
+        one carries the original inside its link."""
+        link = getattr(msg, "link", None)
+        if link is not None and kind(getattr(link, "type", "")) == "FORWARD" and link.message:
+            return link.message
+        return msg
+
     def preview(self, msg):
         if not msg:
             return ""
-        text = (msg.text or "").replace("\n", " ")
+        shown = self.carried(msg)
+        text = (shown.text or "").replace("\n", " ")
         if not text:
-            parts = [attach_summary(a)[0] or "фото" for a in msg.attaches or []]
+            parts = [attach_summary(a)[0] or "фото" for a in shown.attaches or []]
             text = ", ".join(p for p in parts if p).capitalize()
+        if shown is not msg:
+            text = "↪ " + text
         if msg.sender == self.me and self.me:
             text = "Вы: " + text
         return text
@@ -837,8 +861,12 @@ class Backend:
                 "stranger": peer is not None and peer not in self.known}
 
     def message(self, msg):
+        shown = self.carried(msg)
+        forwarded = None
+        if shown is not msg:  # from whom: the chat it came from, else its sender
+            forwarded = msg.link.chat_name or self.name(shown.sender) or "…"
         texts, photos, media = [], [], []
-        for a in msg.attaches or []:
+        for a in shown.attaches or []:
             what, url = attach_summary(a)
             item = media_of(a)
             if url:
@@ -847,14 +875,15 @@ class Backend:
                 media.append(item)
             elif what:
                 texts.append("[%s]" % what)
-        body = msg.text or ""
+        body = shown.text or ""
         if texts:
             body = (body + "\n" if body else "") + " ".join(texts)
         reactions, yours = reactions_of(msg.reaction_info)
         return {"id": msg.id, "chat": msg.chat_id, "sender": msg.sender,
                 "who": self.name(msg.sender), "text": body, "photos": photos,
                 "time": msg.time, "mine": bool(self.me) and msg.sender == self.me,
-                "reactions": reactions, "yours": yours, "media": media}
+                "reactions": reactions, "yours": yours, "media": media,
+                "forwarded": forwarded}
 
     async def chat(self, chat_id):
         """The chat, from the list or asked for (one just joined, a new
@@ -919,6 +948,17 @@ class Backend:
         """Where a video or a file of a message can be fetched (MAX hands
         out short-lived links on request)."""
         return await self.link.media_url(chat_id, msg_id, item)
+
+    async def forward(self, chat_id, msg_id, from_chat_id):
+        """Forward a message into a chat; (the new message, that chat's
+        summary) as the window shows them."""
+        msg = await self.link.forward(chat_id, msg_id, from_chat_id)
+        out = self.message(msg)
+        cache_add(chat_id, [out])
+        chat = await self.chat(chat_id)
+        if chat is not None:
+            chat.last_message = msg
+        return out, self.summary(chat) if chat is not None else None
 
     async def send(self, chat_id, text):
         chat = self.chats.get(chat_id)
@@ -1116,12 +1156,19 @@ def load_setting(key):
         return True
 
 
+def load_text(key, default):
+    """A text setting of [max] in CONFIG (the folder for files)."""
+    conf = configparser.ConfigParser(interpolation=None)
+    conf.read(CONFIG, encoding="utf-8")
+    return conf.get("max", key, fallback=default) or default
+
+
 def save_setting(key, on):
     conf = configparser.ConfigParser(interpolation=None)
     conf.read(CONFIG, encoding="utf-8")
     if not conf.has_section("max"):
         conf.add_section("max")
-    conf["max"][key] = "yes" if on else "no"
+    conf["max"][key] = on if isinstance(on, str) else "yes" if on else "no"
     try:
         os.makedirs(os.path.dirname(CONFIG), exist_ok=True)
         with open(CONFIG + ".new", "w", encoding="utf-8") as fh:
@@ -1340,6 +1387,28 @@ def open_in_browser(url):
         return False
 
 
+def download_file(url, headers, path):
+    """A file to disk as it comes, never wholly in memory (videos are big)."""
+    req = urllib.request.Request(url, headers=headers)
+    with PHOTO_OPENER.open(req, timeout=30) as fh, open(path, "wb") as out:
+        shutil.copyfileobj(fh, out, 64 * 1024)
+
+
+def safe_name(name):
+    """A file name from a message, made harmless: no directories, no hidden
+    file, nothing unprintable."""
+    name = os.path.basename((name or "").replace("\\", "/"))
+    name = "".join(c for c in name if c.isprintable()).strip().lstrip(".")
+    return name[:120] or "файл"
+
+
+def default_folder():
+    """Where files are saved unless set otherwise: «Загрузки/MAX»."""
+    down = GLib.get_user_special_dir(GLib.UserDirectory.DIRECTORY_DOWNLOAD) or \
+        os.path.expanduser("~/Downloads")
+    return os.path.join(down, "MAX")
+
+
 def fetch_photo(url, headers):
     req = urllib.request.Request(url, headers=headers)
     with PHOTO_OPENER.open(req, timeout=20) as fh:
@@ -1360,14 +1429,18 @@ class Media:
     youtube-dl or playlists; a file in the browser. What fails, and what
     the players say, goes to PLAYER_LOG (600, host and path only).
 
+    It also saves what a message carries into a folder (save()), under a
+    harmless name that never overwrites another.
+
     Its hands come in at creation, the real ones by default: spawn(cmd),
-    open_uri(url) -> bool, fetch(url, headers) -> bytes, and
-    player(on_time, on_end) -> an object with play(url, agent), toggle(),
-    stop(). Tests give their own."""
+    open_uri(url) -> bool, fetch(url, headers) -> bytes, player(on_time,
+    on_end) -> an object with play(url, agent), toggle(), stop(), and
+    download(url, headers, path). Tests give their own."""
 
     def __init__(self, spawn=spawn_player, open_uri=open_in_browser, fetch=fetch_photo,
-                 player=Libmpv):
+                 player=Libmpv, download=download_file):
         self.spawn, self.open_uri, self.fetch, self.player = spawn, open_uri, fetch, player
+        self.download = download
         self.agent = "Mozilla/5.0"  # PyMax's browser user agent, once logged in
         self.on_time = self.on_end = lambda *_a: None
         self._sound = None  # the voice player, made at the first voice message
@@ -1420,6 +1493,43 @@ class Media:
                     os.remove(path)
             except OSError:
                 continue
+
+    # --- saving -----------------------------------------------------------------
+    def save(self, url, folder, name, done):
+        """A file into folder, in a thread; done(path or None) on the GTK side.
+        The name is made harmless and, if taken, numbered: «песня (2).mp3»."""
+        if not media_ok(url):
+            log_line("save refused: %s" % where(url))
+            GLib.idle_add(lambda: done(None) and False)
+            return
+
+        def work():
+            path = None
+            try:
+                os.makedirs(folder, exist_ok=True)
+                stem, ext = os.path.splitext(safe_name(name))
+                for n in range(1, 1000):
+                    path = os.path.join(folder, stem + (" (%d)" % n if n > 1 else "") + ext)
+                    try:  # the name is taken here at once: two saves never meet
+                        os.close(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644))
+                        break
+                    except FileExistsError:
+                        continue
+                self.download(url, self.headers(), path + ".part")
+                os.replace(path + ".part", path)
+                log_line("saved %s as %s" % (where(url), path))
+            except Exception as exc:
+                log_line("save %s: %r" % (where(url), exc))
+                for junk in (path, path and path + ".part"):
+                    try:
+                        if junk:
+                            os.remove(junk)
+                    except OSError:
+                        pass
+                path = None
+            GLib.idle_add(lambda: done(path) and False)
+
+        threading.Thread(target=work, daemon=True).start()
 
     # --- voice ----------------------------------------------------------------
     def voice(self, url):
@@ -1871,6 +1981,8 @@ class ChatView:
         hold.press.connect("pressed", lambda _g, _x, _y: self.on_hold(m["id"], bubble))
         if self.group and not m["mine"] and m["who"]:
             bubble.pack_start(label(m["who"], "who"), False, False, 0)
+        if m.get("forwarded"):
+            bubble.pack_start(label("↪ Переслано от %s" % m["forwarded"], "forwarded"), False, False, 0)
         for url in m["photos"]:
             img = Gtk.Image.new_from_icon_name("image-x-generic", Gtk.IconSize.DIALOG)
             img.set_size_request(460, 200)
@@ -2191,16 +2303,12 @@ class Max(Gtk.Application):
         self.findb.connect("clicked", lambda _b: self.show_find())
         self.findb.set_no_show_all(True)
         bar.pack_end(self.findb)
-        self.trash = Gtk.Button.new_from_icon_name("user-trash-symbolic", Gtk.IconSize.DIALOG)
-        self.trash.get_style_context().add_class("gear")
-        self.trash.connect("clicked", lambda _b: self.ask_remove())
-        self.trash.set_no_show_all(True)
-        bar.pack_end(self.trash)
-        self.pencil = Gtk.Button.new_from_icon_name("document-edit-symbolic", Gtk.IconSize.DIALOG)
-        self.pencil.get_style_context().add_class("gear")
-        self.pencil.connect("clicked", lambda _b: self.ask_rename())
-        self.pencil.set_no_show_all(True)
-        bar.pack_end(self.pencil)
+        # A chat's own menu: rename, pin, notifications, delete.
+        self.edit = Gtk.Button.new_from_icon_name("document-edit-symbolic", Gtk.IconSize.DIALOG)
+        self.edit.get_style_context().add_class("gear")
+        self.edit.connect("clicked", lambda _b: self.chat_menu())
+        self.edit.set_no_show_all(True)
+        bar.pack_end(self.edit)
         self.win.set_titlebar(bar)
         self.win.connect("map", lambda _w: self.moved())
         self.win.connect("unmap", lambda _w: self.telemetry.go(SCREEN_BACKGROUND))
@@ -2365,6 +2473,27 @@ class Max(Gtk.Application):
         find.pack_start(found_scroll, True, True, 0)
         self.stack.add_named(find, "find")
 
+        # Where to forward a message: the chats, a search over them.
+        fwd = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        fwd.set_margin_start(24)
+        fwd.set_margin_end(24)
+        fwd.set_margin_top(16)
+        self.fwd_entry = Gtk.SearchEntry()
+        self.fwd_entry.get_style_context().add_class("input")
+        self.fwd_entry.set_placeholder_text("Кому переслать")
+        self.fwd_entry.connect("search-changed", lambda _e: self.fill_forward())
+        fwd.pack_start(self.fwd_entry, False, False, 0)
+        self.fwd_list = Gtk.ListBox()
+        self.fwd_list.set_selection_mode(Gtk.SelectionMode.NONE)
+        self.fwd_list.connect("row-activated", lambda _l, row: self.forward_to(row.chat_id))
+        fwd_scroll = Gtk.ScrolledWindow()
+        fwd_scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        fwd_scroll.set_kinetic_scrolling(True)
+        fwd_scroll.add(self.fwd_list)
+        fwd.pack_start(fwd_scroll, True, True, 0)
+        self.stack.add_named(fwd, "forward")
+        self.forwarding = None  # (chat id, message id) being forwarded
+
         settings = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=20)
         settings.set_margin_start(24)
         settings.set_margin_end(24)
@@ -2379,6 +2508,22 @@ class Max(Gtk.Application):
             "Это настройка самого MAX: незнакомые не смогут добавить вас в чат. "
             "Она действует и на телефоне; там же её можно поменять.")
         settings.pack_start(self.invites_card, False, False, 0)
+        card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
+        card.get_style_context().add_class("settings")
+        row = Gtk.Box(spacing=24)
+        row.pack_start(label("Папка для файлов", "setting", wrap=True), True, True, 0)
+        change = Gtk.Button(label="Изменить…")
+        change.get_style_context().add_class("plain")
+        change.set_valign(Gtk.Align.CENTER)
+        change.connect("clicked", lambda _b: self.choose_folder())
+        row.pack_end(change, False, False, 0)
+        card.pack_start(row, False, False, 0)
+        self.folder_label = label(load_text("folder", default_folder()), "hint", wrap=True)
+        card.pack_start(self.folder_label, False, False, 0)
+        card.pack_start(label("Сюда сохраняются фото и файлы из сообщений: долгое нажатие "
+                              "на сообщение → «Сохранить на планшет».", "hint", wrap=True),
+                        False, False, 0)
+        settings.pack_start(card, False, False, 0)
         settings.pack_start(self.setting(
             "Вибрация при новом сообщении", self.buzz_new, self.on_buzz,
             "Планшет вздрагивает, когда приходит сообщение. Касания кнопок "
@@ -2456,7 +2601,7 @@ class Max(Gtk.Application):
             was_pending = not self.chatlist.listed(summary["id"]) and self.chatlist.get(summary["id"])
             self.chatlist.update(summary)
             if was_pending and self.open_chat == summary["id"]:
-                self.trash.set_visible(self.stack.get_visible_child_name() == "chat")
+                self.edit.set_visible(self.stack.get_visible_child_name() == "chat")
         if self.chatlist.hidden(msg["chat"]) and self.open_chat != msg["chat"]:
             self.fill_list()
             return False  # from a stranger: no bubble, no buzz, left unread
@@ -2566,21 +2711,11 @@ class Max(Gtk.Application):
         self.held = time.monotonic()
         self.buzz()
         s = row.summary
-        pop = Gtk.Popover.new(row)
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         pinned, muted = self.chatlist.is_pinned(s["id"]), self.chatlist.quiet(s["id"])
-        for text, act in (("📌 Открепить" if pinned else "📌 Закрепить сверху", self.toggle_pin),
-                          ("🔔 Включить оповещения" if muted else "🔕 Без оповещений",
-                           self.toggle_mute)):
-            b = Gtk.Button(label=text)
-            b.get_style_context().add_class("menu")
-            b.get_child().set_xalign(0.0)
-            b.connect("clicked", lambda _b, a=act: (pop.popdown(), a(s)))
-            box.pack_start(b, False, False, 0)
-        pop.add(box)
-        pop.connect("closed", lambda p: GLib.idle_add(p.destroy))
-        box.show_all()
-        pop.popup()
+        self.popup_menu(row, [
+            ("📌 Открепить" if pinned else "📌 Закрепить сверху", lambda: self.toggle_pin(s)),
+            ("🔔 Включить оповещения" if muted else "🔕 Без оповещений",
+             lambda: self.toggle_mute(s))])
 
     def toggle_pin(self, s):
         self.chatlist.pin(s["id"])
@@ -2733,6 +2868,125 @@ class Max(Gtk.Application):
             self.action(buttons, "Подписаться" if channel else "Вступить", "act", join)
         self.found.show_all()
 
+    # forwarding a message
+    def show_forward(self, chat_id, msg_id):
+        self.forwarding = (chat_id, msg_id)
+        self.title.set_text("Переслать")
+        self.sub.set_text("")
+        self.fwd_entry.set_text("")
+        self.fill_forward()
+        self.stack.set_visible_child_name("forward")
+
+    def fill_forward(self):
+        """The chats a message can go to: dialogs and groups, the newest
+        first (channels take only their owners' posts), or what the search
+        finds."""
+        for child in self.fwd_list.get_children():
+            child.destroy()
+        text = self.fwd_entry.get_text().strip()
+        chats = self.chatlist.find(text) if text else [e[0] for e in self.chatlist.entries("chats")]
+        for c in chats:
+            if c.get("type") != "CHANNEL":
+                self.fwd_list.add(self.chat_row((c, False, False)))
+        self.fwd_list.show_all()
+
+    def forward_to(self, target):
+        if not self.forwarding:
+            return
+        self.buzz()
+        source, msg_id = self.forwarding
+        title = (self.chatlist.get(target) or {}).get("title", "")
+        self.end_forward()
+        self.sub.set_text("пересылаю…")
+
+        def done(res, err):
+            if err or not res:
+                self.sub.set_text("не удалось переслать")
+                return
+            out, summary = res
+            if summary:
+                self.chatlist.update(summary)
+                self.fill_list()
+            view = self.views.get(target)
+            if view:
+                view.add(out)
+            if self.open_chat == source:
+                self.sub.set_text("переслано: %s" % title)
+
+        self.backend.run(self.backend.forward(target, msg_id, source), done)
+
+    def end_forward(self):
+        """Back from choosing where to forward: to the chat the message is in."""
+        self.forwarding = None
+        s = self.chatlist.get(self.open_chat) or {}
+        self.title.set_text(s.get("title", ""))
+        self.stack.set_visible_child_name("chat" if self.open_chat is not None else "chats")
+
+    # saving what a message carries
+    def save_message(self, chat_id, m, items=None):
+        """Every photo and file of a message (or only the items given) into
+        the folder set in the settings; any kind of file, not only media.
+        The link of a video or a file is asked of MAX first."""
+        folder = load_text("folder", default_folder())
+        jobs = [] if items else \
+            [(url, "фото-%s-%d.jpg" % (m["id"], n + 1)) for n, url in enumerate(m["photos"])]
+        for item in items or m.get("media") or []:
+            if item["kind"] == "audio" and item["url"]:  # a voice message
+                ext = os.path.splitext(urllib.parse.urlsplit(item["url"]).path)[1] or ".ogg"
+                jobs.append((item["url"], "голосовое-%s%s" % (m["id"], ext)))
+            elif item["kind"] == "audio":  # an audio file
+                jobs.append(({"kind": "file", "id": item["file"]}, item["name"]))
+            elif item["kind"] == "video":
+                jobs.append((item, "видео-%s.mp4" % m["id"]))
+            else:
+                jobs.append((item, item["name"]))
+        if not jobs:
+            return
+        state = {"left": len(jobs), "saved": [], "failed": 0}
+        self.sub.set_text("сохраняю…")
+
+        def one(path):
+            state["left"] -= 1
+            if path:
+                state["saved"].append(os.path.basename(path))
+            else:
+                state["failed"] += 1
+            if state["left"]:
+                return
+            if state["failed"]:
+                self.sub.set_text("не удалось сохранить: %d из %d" % (state["failed"], len(jobs)))
+            elif len(state["saved"]) == 1:
+                self.sub.set_text("сохранено: %s" % state["saved"][0])
+            else:
+                self.sub.set_text("сохранено файлов: %d" % len(state["saved"]))
+
+        for what, name in jobs:
+            if isinstance(what, str):
+                self.media.save(what, folder, name, one)
+            else:
+                def linked(url, err, name=name):
+                    if err or not url:
+                        one(None)
+                    else:
+                        self.media.save(url, folder, name, one)
+                self.backend.run(self.backend.media_url(chat_id, m["id"], what), linked)
+
+    def choose_folder(self):
+        """Another folder for saved files."""
+        dialog = Gtk.FileChooserDialog(title="Папка для файлов", parent=self.win,
+                                       action=Gtk.FileChooserAction.SELECT_FOLDER)
+        dialog.add_buttons("Отмена", Gtk.ResponseType.CANCEL, "Выбрать", Gtk.ResponseType.OK)
+        current = load_text("folder", default_folder())
+        os.makedirs(current, exist_ok=True)
+        dialog.set_current_folder(current)
+        if dialog.run() == Gtk.ResponseType.OK and dialog.get_filename():
+            self.set_folder(dialog.get_filename())
+        dialog.destroy()
+
+    def set_folder(self, path):
+        save_setting("folder", path)
+        self.folder_label.set_text(path)
+
     # renaming the person of a dialog
     def can_rename(self, chat_id):
         s = self.chatlist.get(chat_id) if self.chatlist.listed(chat_id) else None
@@ -2769,6 +3023,40 @@ class Max(Gtk.Application):
         self.backend.run(self.backend.rename(s["peer"], name), done)
 
     # deleting a dialog, leaving a group or a channel
+    def chat_menu(self):
+        """The open chat's menu, under the edit button."""
+        chat_id = self.open_chat
+        s = self.chatlist.get(chat_id) if self.chatlist.listed(chat_id) else None
+        if not s:
+            return
+        self.buzz()
+        quiet = self.chatlist.quiet(chat_id)
+        leave = {"CHANNEL": "🚪 Отписаться от канала", "CHAT": "🚪 Выйти из группы"}.get(
+            s["type"], "🗑 Удалить переписку")
+        items = [("✏️ Переименовать", self.ask_rename)] if self.can_rename(chat_id) else []
+        items += [("📌 Открепить" if self.chatlist.is_pinned(chat_id) else "📌 Закрепить сверху",
+                   lambda: self.toggle_pin(s)),
+                  ("🔔 Включить оповещения" if quiet else "🔕 Без оповещений",
+                   lambda: self.toggle_mute(s)),
+                  (leave, self.ask_remove)]
+        self.popup_menu(self.edit, items)
+
+    def popup_menu(self, under, items):
+        """A menu of (text, action) under a widget; it closes on a choice."""
+        pop = Gtk.Popover.new(under)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        for text, act in items:
+            b = Gtk.Button(label=text)
+            b.get_style_context().add_class("menu")
+            b.get_child().set_xalign(0.0)
+            b.connect("clicked", lambda _b, a=act: (pop.popdown(), a()))
+            box.pack_start(b, False, False, 0)
+        pop.add(box)
+        pop.connect("closed", lambda p: GLib.idle_add(p.destroy))
+        box.show_all()
+        pop.popup()
+        self.menu = pop  # the one open, for the tests
+
     def ask_remove(self):
         s = self.chatlist.get(self.open_chat) if self.chatlist.listed(self.open_chat) else None
         if not s:
@@ -2816,7 +3104,9 @@ class Max(Gtk.Application):
         self.stack.set_visible_child_name("settings")
 
     def go_back(self):
-        if self.stack.get_visible_child_name() == "settings" and self.came_from != "chats":
+        if self.stack.get_visible_child_name() == "forward":
+            self.end_forward()
+        elif self.stack.get_visible_child_name() == "settings" and self.came_from != "chats":
             self.back.hide()  # to the login page, which has no list behind it
             self.title.set_text("MAX")
             self.stack.set_visible_child_name(self.came_from)
@@ -2867,14 +3157,15 @@ class Max(Gtk.Application):
         # switched off before anything is sent.
         self.gear.set_visible(page in ("chats", "wait", "qr"))
         self.findb.set_visible(page == "chats")
-        self.trash.set_visible(page == "chat" and self.chatlist.listed(self.open_chat))
-        self.pencil.set_visible(page == "chat" and self.can_rename(self.open_chat))
+        self.edit.set_visible(page == "chat" and self.chatlist.listed(self.open_chat))
         if page != "chat":
             self.smile.set_active(False)
             self.confirm.hide()
             self.naming.hide()
             if self.view is not None:
                 self.view.leave()
+        elif self.view is not None:
+            self.view.enter()  # back in it (from forwarding): building goes on
         self.moved()
 
     def moved(self):
@@ -2926,8 +3217,7 @@ class Max(Gtk.Application):
         self.open_chat = chat_id
         self.confirm.hide()
         self.naming.hide()
-        self.trash.set_visible(self.chatlist.listed(chat_id))
-        self.pencil.set_visible(self.can_rename(chat_id))
+        self.edit.set_visible(self.chatlist.listed(chat_id))
         view = self.view_for(chat_id)
         if self.view is not view:
             if self.view is not None:
@@ -2983,6 +3273,11 @@ class Max(Gtk.Application):
 
             self.backend.run(self.backend.media_url(
                 chat_id, m["id"], {"kind": "file", "id": item["file"]}), done)
+        elif item["kind"] == "file":  # any file: open it, or keep it on the tablet
+            button = controls["button"]
+            self.popup_menu(button, [
+                ("📂 Открыть", lambda: self.open_media(chat_id, m["id"], item, button)),
+                ("💾 Сохранить на планшет", lambda: self.save_message(chat_id, m, [item]))])
         else:
             self.open_media(chat_id, m["id"], item, controls["button"])
 
@@ -3065,10 +3360,23 @@ class Max(Gtk.Application):
             b.connect("clicked", lambda _b, e=emoji: (
                 pop.popdown(), self.react(chat_id, msg_id, None if e == yours else e)))
             row.pack_start(b, False, False, 0)
-        pop.add(row)
+        column = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        column.pack_start(row, False, False, 0)
+        acts = [("↪ Переслать", lambda: self.show_forward(chat_id, msg_id))]
+        if m["photos"] or m.get("media"):
+            acts.append(("💾 Сохранить на планшет", lambda: self.save_message(chat_id, m)))
+        for text, act in acts:
+            b = Gtk.Button(label=text)
+            b.get_style_context().add_class("menu")
+            b.get_child().set_xalign(0.0)
+            b.set_can_focus(False)
+            b.connect("clicked", lambda _b, a=act: (pop.popdown(), a()))
+            column.pack_start(b, False, False, 0)
+        pop.add(column)
         pop.connect("closed", lambda p: GLib.idle_add(p.destroy))
-        row.show_all()
+        column.show_all()
         pop.popup()
+        self.menu = pop  # the one open, for the tests
 
     def react(self, chat_id, msg_id, emoji):
         """Put the account's reaction (None: take it off), then show what
@@ -3172,7 +3480,7 @@ class Max(Gtk.Application):
             if msg and view:
                 view.add(msg)
             self.chatlist.wrote(chat_id, text)  # a dialog from the search is in the list now
-            self.trash.set_visible(self.open_chat == chat_id and self.chatlist.listed(chat_id))
+            self.edit.set_visible(self.open_chat == chat_id and self.chatlist.listed(chat_id))
 
         self.backend.run(self.backend.send(chat_id, text), done)
 
