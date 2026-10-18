@@ -172,7 +172,8 @@ programs are found on `PATH` (`b8k-vplay`: `shutil.which`), never at `/usr/local
 - **Forwarding and saving.** Beside every bubble, at its foot on the side with room (right of
   another's, left of the own, as Telegram has it), a round `mail-forward-symbolic` button
   (`ChatView`'s `on_forward(msg_id)`) opens the `forward` page: chats but no channels,
-  searchable; then `Backend.forward` → the link's `forward`, MAX's own `forward_message`,
+  searchable; then `Backend.forward` → the link's `forward` (MSG_SEND built by `forward_payload`:
+  PyMax 2.4.1's `forward_message` sends the message id as a string, which MAX refuses),
   attachments go with it. Saving is per item: every photo
   (in its corner, and in the viewer's), voice, audio file, video and file has its own
   `document-save-symbolic` button (`ChatView._save_button`, `on_save(msg, item)` →

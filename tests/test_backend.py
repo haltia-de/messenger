@@ -148,6 +148,12 @@ fake.say(-80, "Собрание", PETYA)
 src = fake.msgs[-80][-1]
 out, _ = back(B.forward(anna, src.id, -80))
 assert out["forwarded"] == "Работа"  # from a group: its name
+# what PyMaxLink sends for it: the original's id a number (MAX refuses a string)
+pl = bm.forward_payload(-80, "117455094100479781", 11, -1792000000000)
+assert pl["message"]["link"] == {"type": "FORWARD", "messageId": 117455094100479781, "chatId": 11}
+assert pl["chatId"] == -80 and pl["message"]["cid"] == -1792000000000
+import json  # noqa: E402
+assert '"messageId": 117455094100479781' in json.dumps(pl)
 ok("forwarding")
 
 # --- search, contacts, joining, removing, renaming, invites ----------------------------

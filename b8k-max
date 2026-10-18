@@ -569,6 +569,15 @@ def attach_summary(a):
 
 # --- MAX, in its own thread -------------------------------------------------
 # --- the link to MAX -------------------------------------------------------------
+def forward_payload(chat_id, msg_id, from_chat_id, cid):
+    """MSG_SEND for forwarding a message, as MAX's web client sends it: the
+    original's id a number."""
+    return {"chatId": chat_id, "notify": True,
+            "message": {"cid": cid, "attaches": [],
+                        "link": {"type": "FORWARD", "messageId": int(msg_id),
+                                 "chatId": from_chat_id}}}
+
+
 class PyMaxLink:
     """The link to MAX (CONTEXT.md: Связь с MAX) through PyMax's web client:
     every request this program makes, and the events it gets, in one place.
@@ -723,8 +732,19 @@ class PyMaxLink:
 
     async def forward(self, chat_id, msg_id, from_chat_id):
         """A message (its attachments with it) into another chat, as MAX
-        forwards: the new message links to the original."""
-        return await self._api.messages.forward_message(chat_id, msg_id, from_chat_id)
+        forwards: the new message links to the original. Sent here rather
+        than by PyMax 2.4.1's forward_message, which gives the message id as
+        a string: MAX refuses that ("proto.payload: Expected number") and
+        drops the connection."""
+        from pymax.api.binding import bind_api_model
+        from pymax.api.response import require_payload_model
+        from pymax.protocol import Opcode
+        from pymax.types.domain import Message
+
+        payload = forward_payload(chat_id, msg_id, from_chat_id,
+                                  -self._api.messages._next_cid())
+        response = await self.client._app.invoke(Opcode.MSG_SEND, payload)
+        return bind_api_model(self.client._app, require_payload_model(response, Message))
 
     async def react(self, chat_id, msg_id, emoji):
         """The account's reaction put on (None: taken off); MAX's counts
