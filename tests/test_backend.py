@@ -174,4 +174,15 @@ back(B.rename(ANNA, ""))
 assert B.title(fake.rooms[anna]) == "Анна Петрова"
 back(B.set_invites(False))
 assert fake.asked("chat_invites")[-1] == {"contacts_only": False}
+# MAX keeps the setting for its phone app: the switch hears so, logins stop asking
+fake.refuse_invites = True
+try:
+    back(B.set_invites(True))
+    raise AssertionError("a refusal must reach the switch")
+except PermissionError:
+    pass
+asked = len(fake.asked("chat_invites"))
+run(B.on_login(fake.me, [], [], fake.agent, 7))
+assert len(fake.asked("chat_invites")) == asked  # not again at the next login
+fake.refuse_invites = False
 ok("search, join, remove, rename, invites")

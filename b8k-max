@@ -645,8 +645,18 @@ class PyMaxLink:
         from pymax.api.self.enums import PrivacyAccess
         from pymax.api.self.payloads import PrivacySettingsUpdate
 
-        await self._api.account.change_profile_settings(PrivacySettingsUpdate(
-            chat_invites=PrivacyAccess.CONTACTS if contacts_only else PrivacyAccess.ALL))
+        from pymax.exceptions import ApiError
+
+        try:
+            await self._api.account.change_profile_settings(PrivacySettingsUpdate(
+                chat_invites=PrivacyAccess.CONTACTS if contacts_only else PrivacyAccess.ALL))
+        except ApiError as err:
+            # MAX keeps an account's protected settings for its phone app
+            # ("errors.safe.mode.protected.change.disabled", titled "update
+            # the app"): no web client may change them, now or later.
+            if "safe.mode" in str(getattr(err, "error", "") or err):
+                raise PermissionError("MAX lets only its phone app change this") from err
+            raise
 
     async def log(self, events):
         """Telemetry events (dicts shaped as PyMax's TelemetryEvent); dropped
@@ -1016,14 +1026,21 @@ class Backend:
         """Who may add this account to chats, in MAX's own privacy settings:
         the contacts or anyone. Sent when switched here; at login only if
         MAX has not taken the switch's value from here yet (the first time,
-        or after a failure), so a change made on the phone stays."""
+        or after a failure), so a change made on the phone stays. Once MAX
+        refuses it to this client (PermissionError), only the switch tries
+        again."""
         if not self.me:
             return  # not logged in: the login sends it
         want = "CONTACTS" if contacts else "ALL"
         sent = load_json(SENT, {})
-        if not changed and sent.get(str(self.me)) == want:
+        if not changed and sent.get(str(self.me)) in (want, "refused"):
             return
-        await self.link.chat_invites(contacts)
+        try:
+            await self.link.chat_invites(contacts)
+        except PermissionError:
+            sent[str(self.me)] = "refused"
+            save_json(SENT, sent)
+            raise
         sent[str(self.me)] = want
         save_json(SENT, sent)
 
@@ -3139,8 +3156,14 @@ class Max(Gtk.Application):
         hint.set_text(text + "\nСохраняю в MAX…")
 
         def done(_res, err):
-            hint.set_text(text + ("\nНе удалось сохранить в MAX: попробую при следующем входе."
-                                  if err else ""))
+            if isinstance(err, PermissionError):
+                note = ("\nMAX не даёт менять эту настройку с планшета: "
+                        "поменяйте её в приложении MAX на телефоне.")
+            elif err:
+                note = "\nНе удалось сохранить в MAX: попробую при следующем входе."
+            else:
+                note = ""
+            hint.set_text(text + note)
 
         self.backend.run(self.backend.set_invites(on), done)
 
