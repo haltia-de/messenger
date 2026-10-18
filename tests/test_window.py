@@ -137,7 +137,8 @@ spin(0.1)
 assert rows() == [news]
 app.tab_chats.set_active(True)
 spin(0.1)
-assert fake.asked("chat_invites") == [{"contacts_only": True}]
+assert app.invites_switch.get_active() and not app.invites_switch.get_sensitive()
+assert "официальном приложении" in app.invites_card.get_children()[1].get_text()
 shot("list.png")
 ok("list")
 

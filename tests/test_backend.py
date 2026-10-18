@@ -66,9 +66,7 @@ assert summaries[anna]["title"] == "Анна Петрова" and summaries[petya
 assert B.known == {ANNA, PETYA}  # the first time: everyone already in a dialog
 assert oct(os.stat(bm.KNOWN).st_mode & 0o777) == "0o600"
 assert said(ui, "logged_in")[-1] == (fake.me.id, 7) and B.agent == fake.agent
-assert fake.asked("chat_invites") == [{"contacts_only": True}]  # the default, once
-run(B.on_login(fake.me, [], [], fake.agent, 7))
-assert len(fake.asked("chat_invites")) == 1  # not again at the next login
+assert said(ui, "show_invites")[-1] == ("CONTACTS",)  # MAX's own setting, as it said
 # a stranger's new dialog later is not known
 spam = fake.dialog(SPAM)
 fake.say(spam, "акция", SPAM)
@@ -172,17 +170,4 @@ renamed = back(B.rename(ANNA, "Аня"))
 assert [s["title"] for s in renamed] == ["Аня"] and bm.load_json(bm.ALIASES, {}) == {str(ANNA): "Аня"}
 back(B.rename(ANNA, ""))
 assert B.title(fake.rooms[anna]) == "Анна Петрова"
-back(B.set_invites(False))
-assert fake.asked("chat_invites")[-1] == {"contacts_only": False}
-# MAX keeps the setting for its phone app: the switch hears so, logins stop asking
-fake.refuse_invites = True
-try:
-    back(B.set_invites(True))
-    raise AssertionError("a refusal must reach the switch")
-except PermissionError:
-    pass
-asked = len(fake.asked("chat_invites"))
-run(B.on_login(fake.me, [], [], fake.agent, 7))
-assert len(fake.asked("chat_invites")) == asked  # not again at the next login
-fake.refuse_invites = False
 ok("search, join, remove, rename, invites")

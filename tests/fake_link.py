@@ -214,12 +214,10 @@ class FakeLink:
         self._call("media_url", chat_id=chat_id, msg_id=msg_id, kind=item["kind"])
         return self.media.get((chat_id, msg_id, item["kind"]))
 
-    refuse_invites = False  # MAX keeping the setting for its phone app
+    invites_value = "CONTACTS"  # CHATS_INVITE as MAX sends it at login
 
-    async def chat_invites(self, contacts_only):
-        self._call("chat_invites", contacts_only=contacts_only)
-        if self.refuse_invites:
-            raise PermissionError("MAX lets only its phone app change this")
+    def invites(self):
+        return self.invites_value
 
     async def log(self, events):
         self._call("log", events=events)

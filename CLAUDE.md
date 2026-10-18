@@ -42,7 +42,7 @@ it from the checkout still needs PyMax installed there.
 - **The link to MAX** (`PyMaxLink`, CONTEXT.md «Связь с MAX»). Every request to MAX and every
   event from it goes through one link object: `run(events)`, `chats_page`, `chats`, `users`,
   `history`, `read`, `send`, `find_phone`, `add_contact`, `link_info`, `join`, `leave`, `delete`
-  (only for this account: it cannot delete for all), `react`, `media_url`, `chat_invites`, `log`.
+  (only for this account: it cannot delete for all), `react`, `media_url`, `invites`, `log`.
   It hands out PyMax's own objects (`Chat`, `Message`, `User`, `ReactionInfo`) and keeps PyMax's
   internals (`client._app`, raw opcodes `LINK_INFO`/`LOG`/`CONFIG`) to itself: Backend never
   touches `client._app` or calls methods on PyMax objects. Events go to `Backend.on_qr`,
@@ -58,7 +58,7 @@ it from the checkout still needs PyMax installed there.
   copy PyMax 2.4.1's `pymax/telemetry/payloads.py`; sent in batches via `Opcode.LOG` through
   `Backend.log` and the link. On by default, switched in the settings page (gear), stored in
   `~/.config/b8k/max.conf` (`[max] telemetry`; `buzz` there switches the buzz on new messages,
-  not on button taps; `contacts_only` and `invites`, see below). Re-check the shapes when bumping PyMax.
+  not on button taps; `contacts_only`, see below). Re-check the shapes when bumping PyMax.
 - **Search, join, delete.** The `find` page (magnifier on the list) reads its entry with
   `phone_of` (a person: `users.search_by_phone`, then write or `users.add_contact`), `link_of`
   (a channel or group: `LINK_INFO` invoked directly so public `max.ru/name` links work too, then
@@ -74,10 +74,12 @@ it from the checkout still needs PyMax installed there.
   `~/.local/share/b8k-max/known.json`, 600) holds login contacts, contacts added here, people
   written to here (`remember`), and on the very first run every existing dialog's peer — the
   login sends only changed contacts after the first one, and nobody known must go quiet on update.
-- **Chat invites.** `invites` (on by default) is MAX's own privacy setting `CHATS_INVITE`, set
-  through `account.change_profile_settings`. `Backend.set_invites` sends it when switched, and at
-  login only if `~/.local/share/b8k-max/invites.json` (account id -> value last taken) differs —
-  so it is not re-sent on every login and a change made on the phone is not overridden.
+- **Chat invites.** MAX's own privacy setting `CHATS_INVITE` is shown, not changed: MAX answers
+  `account.change_profile_settings` from a web client with `errors.safe.mode.protected.change.disabled`
+  ("update the app"; the account has `SAFE_MODE`). PyMax keeps only the hash of the login answer's
+  `config`, so `PyMaxLink._watch_login` wraps `app.invoke` and keeps `config.user` of each
+  `Opcode.LOGIN` answer; `link.invites()` gives `CHATS_INVITE`, and the settings card shows it on a
+  greyed switch with a hint that only MAX's official app changes it.
 - **Single instance, background life.** `Max` is a `Gtk.Application` with id `b8k.Max`; a second
   launch just activates the first process over D-Bus. Closing the window hides it. With
   `--background` the window is not shown at start.

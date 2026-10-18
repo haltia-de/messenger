@@ -40,8 +40,8 @@ MAX sends at login, those added here, those written to here, and, the
 first time, everyone already in a dialog; the ids are kept in
 ~/.local/share/b8k-max/known.json (mode 600), since after the first login
 MAX sends only the contacts that changed. Who may add the account to chats
-is a setting of MAX itself; contacts only by default, sent once per account
-(and when switched), not at every login, so a change on the phone stays.
+is a setting of MAX itself: shown as MAX sends it at login, changed only in
+MAX's own app (it refuses web clients that, "safe mode").
 PyMax runs in its own thread with an asyncio loop; every call from the
 window goes through run(), every answer comes back with GLib.idle_add.
 
@@ -146,7 +146,15 @@ ALIASES = os.path.join(DATA, "names.json")  # user id -> the name given here
 PREFS = os.path.join(DATA, "chats.json")  # pinned chats, notifications switched per chat
 LIST = os.path.join(CHATS, "list.json")  # the last chat list, shown at once on the next start
 EMOJI_RECENT = os.path.join(DATA, "emoji.json")  # the emoji used last, first in the panel
-SENT = os.path.join(DATA, "invites.json")  # account id -> chat-invites privacy set from here
+# The hint under MAX's own chat-invites setting, by what MAX said at login.
+INVITES_HINT = {
+    "CONTACTS": "Незнакомые не могут добавить вас в чат. Это настройка самого MAX; "
+                "поменять её можно только в официальном приложении MAX.",
+    "ALL": "Добавить вас в чат может кто угодно. Это настройка самого MAX; "
+           "поменять её можно только в официальном приложении MAX.",
+    "unknown": "Это настройка самого MAX; поменять её можно только в официальном "
+               "приложении MAX. Её значение будет видно после входа.",
+}
 # MAX's screen numbers in its telemetry (pymax.telemetry.navigation).
 SCREEN_BACKGROUND, SCREEN_CHATS, SCREEN_SEARCH, SCREEN_CHAT, SCREEN_SETTINGS = 1, 150, 151, 350, 450
 MAIN_TAB = {"source_type": 5, "source_id": 1, "tab_config": 2}  # going to the chat list
@@ -510,6 +518,7 @@ class PyMaxLink:
         self.work_dir = work_dir
         self.client = None
         self.events = None
+        self.settings = {}  # the account's own settings, from the last login
 
     async def run(self, events):
         from pymax import WebClient
@@ -522,10 +531,36 @@ class PyMaxLink:
                                 extra_config=ExtraConfig(telemetry=False, log_level="WARNING",
                                                          reconnect_delay=3.0),
                                 qr_provider=self)
+        self._watch_login()
         self.client.on_start()(self._started)
         self.client.on_message()(self._message)
         self.client.on_reaction_update()(self._reaction)
         await self.client.start()
+
+    def _watch_login(self):
+        """Keep the account's own settings from each login answer: PyMax
+        reads only the hash of its "config", the settings are in its
+        "user" part (CHATS_INVITE and the like)."""
+        from pymax.protocol import Opcode
+
+        app = self.client._app
+        invoke = app.invoke
+
+        async def watched(opcode, *args, **kwargs):
+            response = await invoke(opcode, *args, **kwargs)
+            if opcode == Opcode.LOGIN:
+                config = (getattr(response, "payload", None) or {}).get("config") or {}
+                if isinstance(config.get("user"), dict):
+                    self.settings = config["user"]
+            return response
+
+        app.invoke = watched
+
+    def invites(self):
+        """Who may add the account to chats, as MAX said at the last login:
+        "CONTACTS", "ALL", or None when not said. Only MAX's own app may
+        change it."""
+        return self.settings.get("CHATS_INVITE")
 
     async def show_qr(self, qr_url):  # PyMax's QrHandler
         await self.events.on_qr(qr_url)
@@ -640,24 +675,6 @@ class PyMaxLink:
         return getattr(got, "url", None) if got else None
 
     # the account
-    async def chat_invites(self, contacts_only):
-        """Who may add the account to chats, in MAX's privacy settings."""
-        from pymax.api.self.enums import PrivacyAccess
-        from pymax.api.self.payloads import PrivacySettingsUpdate
-
-        from pymax.exceptions import ApiError
-
-        try:
-            await self._api.account.change_profile_settings(PrivacySettingsUpdate(
-                chat_invites=PrivacyAccess.CONTACTS if contacts_only else PrivacyAccess.ALL))
-        except ApiError as err:
-            # MAX keeps an account's protected settings for its phone app
-            # ("errors.safe.mode.protected.change.disabled", titled "update
-            # the app"): no web client may change them, now or later.
-            if "safe.mode" in str(getattr(err, "error", "") or err):
-                raise PermissionError("MAX lets only its phone app change this") from err
-            raise
-
     async def log(self, events):
         """Telemetry events (dicts shaped as PyMax's TelemetryEvent); dropped
         while not connected."""
@@ -674,8 +691,8 @@ class PyMaxLink:
 class Backend:
     """What the window asks of MAX, and what MAX tells it, on top of a link
     (PyMaxLink, or tests/fake_link.py): the chat list and its summaries,
-    names, known people, the message cache and its gaps, pages, reactions,
-    the invites setting. It runs in its own thread with an asyncio loop;
+    names, known people, the message cache and its gaps, pages, reactions.
+    It runs in its own thread with an asyncio loop;
     the window calls it only through run(), and hears back through
     GLib.idle_add. It is also the link's events object (on_qr, on_login,
     on_message, on_reaction)."""
@@ -768,10 +785,6 @@ class Backend:
             self.known.update(p for p in map(self.peer, chats) if p)
             self.seeded = True
         save_json(KNOWN, sorted(self.known))
-        try:
-            await self.set_invites(load_setting("invites"), changed=False)
-        except Exception:
-            pass  # tried again at the next login
         want = set()
         for c in chats:
             if kind(c.type) == "DIALOG":
@@ -779,6 +792,7 @@ class Backend:
         await self.lookup(want)
         if self.me:
             GLib.idle_add(self.ui.logged_in, self.me, session_id)
+            GLib.idle_add(self.ui.show_invites, self.link.invites())
         GLib.idle_add(self.ui.show_chats, [self.summary(c) for c in chats])
 
     async def on_message(self, msg):
@@ -1021,28 +1035,6 @@ class Backend:
             await self.link.delete(chat_id, stamp)
         self.chats.pop(chat_id, None)
         cache_drop(chat_id)
-
-    async def set_invites(self, contacts, changed=True):
-        """Who may add this account to chats, in MAX's own privacy settings:
-        the contacts or anyone. Sent when switched here; at login only if
-        MAX has not taken the switch's value from here yet (the first time,
-        or after a failure), so a change made on the phone stays. Once MAX
-        refuses it to this client (PermissionError), only the switch tries
-        again."""
-        if not self.me:
-            return  # not logged in: the login sends it
-        want = "CONTACTS" if contacts else "ALL"
-        sent = load_json(SENT, {})
-        if not changed and sent.get(str(self.me)) in (want, "refused"):
-            return
-        try:
-            await self.link.chat_invites(contacts)
-        except PermissionError:
-            sent[str(self.me)] = "refused"
-            save_json(SENT, sent)
-            raise
-        sent[str(self.me)] = want
-        save_json(SENT, sent)
 
     async def react(self, chat_id, msg_id, emoji):
         """Put the account's reaction on a message (None takes it off);
@@ -2269,7 +2261,6 @@ class Max(Gtk.Application):
         self.telemetry = Telemetry(self.backend)
         self.came_from = "chats"  # the page the settings go back to
         self.buzz_new = load_setting("buzz")  # buzz on a new message
-        self.invites = load_setting("invites")  # only contacts may add to chats (on MAX)
         # The list's rules and state; pins and notifications are kept here
         # only: MAX's own pinning and muting are not in PyMax.
         self.chatlist = ChatList(LIST, PREFS, contacts_only=load_setting("contacts_only"))
@@ -2521,9 +2512,7 @@ class Max(Gtk.Application):
             "Своими считаются и те, кому вы написали сами. Сообщения остаются в MAX: "
             "выключите, чтобы их увидеть."), False, False, 0)
         self.invites_card = self.setting(
-            "Приглашать в чаты могут только контакты", self.invites, self.on_invites,
-            "Это настройка самого MAX: незнакомые не смогут добавить вас в чат. "
-            "Она действует и на телефоне; там же её можно поменять.")
+            "Приглашать в чаты могут только контакты", False, None, INVITES_HINT["unknown"])
         settings.pack_start(self.invites_card, False, False, 0)
         card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
         card.get_style_context().add_class("settings")
@@ -3131,13 +3120,19 @@ class Max(Gtk.Application):
             self.show_list()
 
     def setting(self, title, active, changed, hint):
-        """One card of the settings page: a title, a switch and what it does."""
+        """One card of the settings page: a title, a switch and what it does.
+        Without changed the switch only shows (greyed, untouchable)."""
         card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
         card.get_style_context().add_class("settings")
         row = Gtk.Box(spacing=24)
         row.pack_start(label(title, "setting", wrap=True), True, True, 0)
         switch = Gtk.Switch(active=active, valign=Gtk.Align.CENTER)
-        switch.connect("notify::active", lambda sw, _p: (self.buzz(), changed(sw.get_active())))
+        if changed:
+            switch.connect("notify::active",
+                           lambda sw, _p: (self.buzz(), changed(sw.get_active())))
+        else:
+            switch.set_sensitive(False)
+            self.invites_switch = switch
         row.pack_end(switch, False, False, 0)
         card.pack_start(row, False, False, 0)
         card.pack_start(label(hint, "hint", wrap=True), False, False, 0)
@@ -3148,24 +3143,12 @@ class Max(Gtk.Application):
         save_setting("contacts_only", on)
         self.fill_list()
 
-    def on_invites(self, on):
-        self.invites = on
-        save_setting("invites", on)
-        hint = self.invites_card.get_children()[1]
-        text = hint.get_text().split("\n")[0]
-        hint.set_text(text + "\nСохраняю в MAX…")
-
-        def done(_res, err):
-            if isinstance(err, PermissionError):
-                note = ("\nMAX не даёт менять эту настройку с планшета: "
-                        "поменяйте её в приложении MAX на телефоне.")
-            elif err:
-                note = "\nНе удалось сохранить в MAX: попробую при следующем входе."
-            else:
-                note = ""
-            hint.set_text(text + note)
-
-        self.backend.run(self.backend.set_invites(on), done)
+    def show_invites(self, value):
+        """MAX's own setting, as it said at login: shown, not changed here."""
+        self.invites_switch.set_active(value == "CONTACTS")
+        self.invites_card.get_children()[1].set_text(
+            INVITES_HINT.get(value, INVITES_HINT["unknown"]))
+        return False
 
     def on_buzz(self, on):
         self.buzz_new = on
