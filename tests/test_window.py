@@ -123,6 +123,7 @@ hands = FakeHands()
 app = bm.Max(link=fake, media=bm.Media(hands.spawn, hands.open_uri, hands.fetch, hands.player,
                                        hands.download))
 buzzes = []  # new messages the desktop was told of (notifications)
+_notify = app.notify
 app.notify = lambda msg: buzzes.append(msg)
 badges = []  # the counts sent as Unity's LauncherEntry
 _badge = app.badge
@@ -157,6 +158,16 @@ assert not buzzes
 fake.incoming(mama, "Позвони вечером", MAMA)
 wait(lambda: buzzes, what="notification")
 assert buzzes[-1]["text"] == "Позвони вечером" and buzzes[-1]["chat"] == mama
+sent = []
+app.send_notification = lambda key, note: sent.append((key, note))
+_notify(buzzes[-1])
+assert sent and sent[-1][0] == "chat-%d" % mama
+# what goes to the desktop: a sender's markup escaped, no control characters
+title, body = bm.note_text({"title": "Да\x1b[31mча", "type": "CHAT"},
+                           {"text": '<a href="https://evil.example">жми</a>\x07<img src="/etc/x">',
+                            "photos": [], "who": "<b>Петя</b>"})
+assert "\x1b" not in title and "\x07" not in body
+assert "<" not in body and "&lt;a href" in body and "&lt;b&gt;Петя" in body, body
 assert badges and badges[-1] == app.chatlist.counts()["loud"] > 0
 assert rows()[0] == mama and app.rows[mama] is row_before  # the row is kept, redrawn
 app.on_contacts_only(False)

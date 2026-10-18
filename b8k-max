@@ -398,6 +398,23 @@ def day_label(ms):
     return "%d %s" % (d.day, MONTHS[d.month - 1])
 
 
+def plain(text):
+    """Text from a message for a line elsewhere (a notification): no control
+    characters, line breaks as spaces."""
+    return "".join(c if c.isprintable() else " " for c in (text or "")).strip()
+
+
+def note_text(summary, msg):
+    """(title, body) of the notification of a message. The text is a
+    sender's, and notification daemons read markup in the body (links,
+    pictures): it goes escaped, as text; neither keeps control characters."""
+    body = msg["text"] or ("фото" if msg["photos"] else "вложение")
+    if summary.get("type") in ("CHAT", "CHANNEL") and msg.get("who"):
+        body = "%s: %s" % (msg["who"], body)
+    return (plain(summary.get("title") or "MAX"),
+            GLib.markup_escape_text(plain(body)[:200]))
+
+
 def label(text, cls, xalign=0.0, wrap=False, ellipsize=False):
     lab = Gtk.Label(label=text, xalign=xalign)
     lab.get_style_context().add_class(cls)
@@ -2671,12 +2688,9 @@ class Max(Gtk.Application):
     def notify(self, msg):
         """A desktop notification of a new message (the desktop buzzes or
         sounds for it, as set there); a tap opens the chat."""
-        s = self.chatlist.get(msg["chat"]) or {}
-        note = Gio.Notification.new(s.get("title") or "MAX")
-        body = msg["text"] or ("фото" if msg["photos"] else "вложение")
-        if s.get("type") in ("CHAT", "CHANNEL") and msg.get("who"):
-            body = "%s: %s" % (msg["who"], body)
-        note.set_body(body[:200])
+        title, body = note_text(self.chatlist.get(msg["chat"]) or {}, msg)
+        note = Gio.Notification.new(title)
+        note.set_body(body)
         note.set_default_action_and_target("app.open-chat", GLib.Variant("x", msg["chat"]))
         self.send_notification("chat-%d" % msg["chat"], note)
 
