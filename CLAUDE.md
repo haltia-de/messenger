@@ -141,6 +141,11 @@ it from the checkout still needs PyMax installed there.
   `Backend.react` uses `messages.add_reaction`/`remove_reaction`; when MAX answers without counts
   the window counts itself. `on_reaction_update` events carry no own reaction, so `reacted(..., ...)`
   (Ellipsis) leaves `yours` alone. Emoji need `font-noto-emoji` (in the tablet image).
+- **A photo full screen.** A tap on a photo in a bubble (`GestureMultiPress` on its frame; a
+  scroll cancels it, and a release within a second of a long press is ignored, `held_at`) calls
+  `ChatView`'s `on_photo(url)` → `Max.show_photo`: the `photo` page, black, the titlebar hidden
+  and the window fullscreen; `Media.photo(url, done, size=2048)` loads it, `fit_photo` scales it
+  to the page on every size. A tap, back or Esc (`close_photo`) returns to the chat.
 - **Forwarding and saving.** A long press on a message (`pick_reaction`) offers, under the
   reactions, «↪ Переслать» (the `forward` page: chats but no channels, searchable; then
   `Backend.forward` → the link's `forward`, MAX's own `forward_message`, attachments go with it)

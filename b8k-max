@@ -301,6 +301,7 @@ button.smile {
 }
 button.smile:checked { background-color: #c4dcf7; }
 label.emoji-group { font-size: 18px; color: #77767b; }
+.viewer { background-color: #000000; }
 label.forwarded { font-size: 19px; font-style: italic; color: #1c71d8; }
 .tabs { background-color: #dcdcda; padding: 8px 12px; }
 .tabs radiobutton, .tabs button {
@@ -1460,9 +1461,10 @@ class Media:
         return {"User-Agent": self.agent}
 
     # --- photos ---------------------------------------------------------------
-    def photo(self, url, done):
-        """A photo, from the cache or fetched in a thread; done(pixbuf or
-        None) on the GTK side. Nothing at all for a link not to be fetched."""
+    def photo(self, url, done, size=460):
+        """A photo, from the cache or fetched in a thread, fitted within
+        size × size; done(pixbuf or None) on the GTK side. Nothing at all
+        for a link not to be fetched."""
         if not media_ok(url):
             log_line("photo refused: %s" % where(url))
             return
@@ -1478,7 +1480,7 @@ class Media:
                     with open(path + ".new", "wb") as out:
                         out.write(data)
                     os.replace(path + ".new", path)
-                pix = GdkPixbuf.Pixbuf.new_from_file_at_scale(path, 460, 460, True)
+                pix = GdkPixbuf.Pixbuf.new_from_file_at_scale(path, size, size, True)
             except Exception as exc:
                 log_line("photo %s: %r" % (where(url), exc))
                 pix = None
@@ -1771,16 +1773,18 @@ class ChatView:
     fetch_older(before_ms, done(msgs, err)) for the page before a time, and
     what a long press (on_hold(msg_id, widget)), a media control
     (on_media(msg, item, controls)) and a reaction chip (on_react(msg_id,
-    emoji or None)) do, and photo(url, done) that fetches a photo. Everything
-    is called on the GTK side."""
+    emoji or None)) and a tap on a photo (on_photo(url)) do, and photo(url,
+    done) that fetches a photo. Everything is called on the GTK side."""
 
     def __init__(self, chat_id, kind, cached, fetch_older, on_hold, on_media, on_react,
-                 photo):
+                 photo, on_photo=lambda url: None):
         self.chat_id = chat_id
         self.group = kind in ("CHAT", "CHANNEL")  # senders' names over their bubbles
         self.fetch_older, self.on_hold = fetch_older, on_hold
         self.on_media, self.on_react = on_media, on_react
         self.photo = photo  # photo(url, done(pixbuf)): Media.photo
+        self.on_photo = on_photo  # a photo tapped: shown full screen
+        self.held_at = 0.0  # a long press just now: its release is no tap
         self.shown = set()  # ids of the messages built
         self.msgs = {}  # message id -> (its dict, the box of its reactions)
         self.photos = []  # (image, url) not loaded yet: only when near the screen
@@ -1988,7 +1992,8 @@ class ChatView:
         hold.set_halign(Gtk.Align.END if m["mine"] else Gtk.Align.START)
         hold.add(bubble)
         hold.press = Gtk.GestureLongPress.new(hold)
-        hold.press.connect("pressed", lambda _g, _x, _y: self.on_hold(m["id"], bubble))
+        hold.press.connect("pressed", lambda _g, _x, _y: (
+            setattr(self, "held_at", time.monotonic()), self.on_hold(m["id"], bubble)))
         if self.group and not m["mine"] and m["who"]:
             bubble.pack_start(label(m["who"], "who"), False, False, 0)
         if m.get("forwarded"):
@@ -1996,7 +2001,15 @@ class ChatView:
         for url in m["photos"]:
             img = Gtk.Image.new_from_icon_name("image-x-generic", Gtk.IconSize.DIALOG)
             img.set_size_request(460, 200)
-            bubble.pack_start(img, False, False, 0)
+            # A tap shows it full screen; a scroll or a long press does not
+            # (the gesture is cancelled, or the release follows a long press).
+            frame = Gtk.EventBox()
+            frame.add(img)
+            frame.photo_url = url
+            frame.tap = Gtk.GestureMultiPress.new(frame)
+            frame.tap.connect("released", lambda _g, _n, _x, _y, url=url: (
+                time.monotonic() - self.held_at > 1.0 and self.on_photo(url)))
+            bubble.pack_start(frame, False, False, 0)
             self.photos.append((img, url))  # loaded once near the screen
         for item in m.get("media") or []:
             bubble.pack_start(self._media(m, item), False, False, 0)
@@ -2501,6 +2514,20 @@ class Max(Gtk.Application):
         fwd_scroll.add(self.fwd_list)
         fwd.pack_start(fwd_scroll, True, True, 0)
         self.stack.add_named(fwd, "forward")
+
+        # A photo full screen: a tap anywhere (or back, or Esc) closes it.
+        self.viewer = Gtk.EventBox()
+        self.viewer.get_style_context().add_class("viewer")
+        self.viewer_image = Gtk.Image()
+        self.viewer.add(self.viewer_image)
+        self.viewer.tap = Gtk.GestureMultiPress.new(self.viewer)
+        self.viewer.tap.connect("released", lambda *_a: self.close_photo())
+        self.viewer.connect("size-allocate", lambda _w, _a: self.fit_photo())
+        self.viewer_pix = None  # the photo as loaded, fitted again on each size
+        self.stack.add_named(self.viewer, "photo")
+        self.win.connect("key-press-event", lambda _w, e: (
+            e.keyval == Gdk.KEY_Escape and self.stack.get_visible_child_name() == "photo"
+            and (self.close_photo() or True)))
         self.forwarding = None  # (chat id, message id) being forwarded
 
         settings = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=20)
@@ -2875,6 +2902,43 @@ class Max(Gtk.Application):
             self.action(buttons, "Подписаться" if channel else "Вступить", "act", join)
         self.found.show_all()
 
+    # a photo full screen
+    def show_photo(self, url):
+        self.buzz()
+        self.viewer_pix = None
+        self.viewer_image.set_from_icon_name("image-x-generic", Gtk.IconSize.DIALOG)
+        self.stack.set_visible_child_name("photo")
+        self.win.get_titlebar().hide()  # no header, no panel: the whole screen
+        self.win.fullscreen()
+
+        def loaded(pix):
+            if self.stack.get_visible_child_name() == "photo" and pix is not None:
+                self.viewer_pix = pix
+                self.fit_photo()
+
+        self.media.photo(url, loaded, size=2048)
+
+    def fit_photo(self):
+        """The photo as large as the screen lets it, its shape kept."""
+        pix = self.viewer_pix
+        alloc = self.viewer.get_allocation()
+        if pix is None or alloc.width < 2 or alloc.height < 2:
+            return
+        k = min(alloc.width / pix.get_width(), alloc.height / pix.get_height())
+        w, h = max(1, int(pix.get_width() * k)), max(1, int(pix.get_height() * k))
+        current = self.viewer_image.get_pixbuf()
+        if current is None or (current.get_width(), current.get_height()) != (w, h):
+            self.viewer_image.set_from_pixbuf(pix.scale_simple(w, h, GdkPixbuf.InterpType.BILINEAR))
+
+    def close_photo(self):
+        if self.stack.get_visible_child_name() != "photo":
+            return
+        self.win.unfullscreen()
+        self.win.get_titlebar().show()
+        self.viewer_pix = None
+        self.viewer_image.clear()
+        self.stack.set_visible_child_name("chat")
+
     # forwarding a message
     def show_forward(self, chat_id, msg_id):
         self.forwarding = (chat_id, msg_id)
@@ -3113,6 +3177,8 @@ class Max(Gtk.Application):
     def go_back(self):
         if self.stack.get_visible_child_name() == "forward":
             self.end_forward()
+        elif self.stack.get_visible_child_name() == "photo":
+            self.close_photo()
         elif self.stack.get_visible_child_name() == "settings" and self.came_from != "chats":
             self.back.hide()  # to the login page, which has no list behind it
             self.title.set_text("MAX")
@@ -3207,7 +3273,7 @@ class Max(Gtk.Application):
                 on_hold=lambda msg_id, widget: self.pick_reaction(chat_id, msg_id, widget),
                 on_media=lambda m, item, ctl: self.media_tapped(chat_id, m, item, ctl),
                 on_react=lambda msg_id, emoji: self.react(chat_id, msg_id, emoji),
-                photo=self.media.photo)
+                photo=self.media.photo, on_photo=self.show_photo)
         self.views[chat_id] = view  # most recently used last
         while len(self.views) > VIEWS:
             old_id = next(iter(self.views))

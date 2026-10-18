@@ -10,7 +10,7 @@ from common import load, ok
 
 bm = load()
 from fake_hands import FakeHands  # noqa: E402
-from fake_link import FakeLink, audio, file, now_ms, video  # noqa: E402
+from fake_link import FakeLink, audio, file, now_ms, photo, video  # noqa: E402
 from gi.repository import GLib, Gtk  # noqa: E402
 
 SHOTS = os.environ.get("B8K_SHOTS")  # a directory to save screenshots in, if set
@@ -385,6 +385,38 @@ app.entry.set_text("своё")
 app.send()
 wait(lambda: at_bottom(v), what="own message at the bottom")
 ok("scroll rules")
+
+# --- a photo full screen: a tap opens it, another closes it ----------------------------------------
+from gi.repository import GdkPixbuf  # noqa: E402
+_pix = GdkPixbuf.Pixbuf.new(GdkPixbuf.Colorspace.RGB, False, 8, 400, 300)
+_pix.fill(0x3584e4ff)
+hands.photo_bytes = _pix.save_to_bufferv("png", [], [])[1]
+pic = fake.incoming(mama, "Наша дача", MAMA, attaches=[photo("https://i.oneme.ru/dacha.png")])
+app.show_list()
+app.open(mama)
+wait(lambda: any(w.msg_id == pic.id for w in holds_of(app.view)), what="photo message")
+frame = [w for w in walk(app.view.widget) if getattr(w, "photo_url", None) == "https://i.oneme.ru/dacha.png"][0]
+app.view.held_at = time.monotonic()  # the release of a long press is no tap
+frame.tap.emit("released", 1, 5.0, 5.0)
+spin(0.1)
+assert app.stack.get_visible_child_name() == "chat"
+app.view.held_at = 0
+frame.tap.emit("released", 1, 5.0, 5.0)
+wait(lambda: app.viewer_image.get_pixbuf() is not None, what="photo full screen")
+assert app.stack.get_visible_child_name() == "photo" and not app.win.get_titlebar().get_visible()
+alloc = app.viewer.get_allocation()
+shown = app.viewer_image.get_pixbuf()
+assert abs(shown.get_width() / shown.get_height() - 4 / 3) < 0.02  # its shape kept
+assert shown.get_width() == alloc.width or shown.get_height() == alloc.height  # as large as fits
+shot("photo-full.png")
+app.viewer.tap.emit("released", 1, 5.0, 5.0)
+spin(0.2)
+assert app.stack.get_visible_child_name() == "chat" and app.win.get_titlebar().get_visible()
+frame.tap.emit("released", 1, 5.0, 5.0)
+spin(0.1)
+app.go_back()  # the back way closes it too
+assert app.stack.get_visible_child_name() == "chat" and app.open_chat == mama
+ok("photo full screen")
 
 # --- media: voice in the bubble, video in the player, a file in the browser -------------------
 # (what Media does with them is test_media's; here, that the window hands them over)
