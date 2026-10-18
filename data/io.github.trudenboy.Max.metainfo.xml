@@ -19,6 +19,7 @@
   </content_rating>
   <requires><control>touch</control></requires>
   <releases>
+    <release version="1.18.3" date="2026-10-18"/>
     <release version="1.18.2" date="2026-10-18"/>
     <release version="1.18.1" date="2026-10-18"/>
     <release version="1.18" date="2026-10-18"/>

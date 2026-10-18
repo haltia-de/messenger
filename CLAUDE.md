@@ -63,7 +63,12 @@ programs are found on `PATH` (`b8k-vplay`: `shutil.which`), never at `/usr/local
   It hands out PyMax's own objects (`Chat`, `Message`, `User`, `ReactionInfo`) and keeps PyMax's
   internals (`client._app`, raw opcodes `LINK_INFO`/`LOG`/`CONFIG`) to itself: Backend never
   touches `client._app` or calls methods on PyMax objects. Events go to `Backend.on_qr`,
-  `on_login`, `on_message`, `on_reaction`. `tests/fake_link.py` is the second link (a small MAX
+  `on_login`, `on_message`, `on_reaction`, `on_delete`. Deletions are read from the frames
+  themselves (`_watch_deletions`, set once at the login, wraps PyMax's `dispatcher.dispatch`;
+  `_peek`: `NOTIF_MSG_DELETE`, or a `NOTIF_MESSAGE` with status `REMOVED`, which PyMax 2.4.1
+  loses); `Backend.on_delete` takes them out of the cache (`cache_forget`) and the window
+  (`ChatView.remove`, day labels left empty go too) and renews the chat's last message. Messages
+  deleted while away go when a fetched page no longer has them (`history`, `ChatView.newest`). `tests/fake_link.py` is the second link (a small MAX
   in memory); `Max(link=...)`/`Backend(ui, link)` take one. A PyMax upgrade is checked in
   `PyMaxLink` only. Don't name a fake's attributes after link operations (`chats`, `users`).
 - **Login.** `PyMaxLink` is PyMax's QR provider; `Backend.on_qr` renders the QR code to scan with
@@ -172,7 +177,7 @@ programs are found on `PATH` (`b8k-vplay`: `shutil.which`), never at `/usr/local
 - **Forwarding and saving.** Beside every bubble, at its foot on the side with room (right of
   another's, left of the own, as Telegram has it), a round `mail-forward-symbolic` button
   (`ChatView`'s `on_forward(msg_id)`) opens the `forward` page: chats but no channels,
-  searchable; then `Backend.forward` → the link's `forward` (MSG_SEND built by `forward_payload`:
+  searchable; after it the chat forwarded into opens; `Backend.forward` → the link's `forward` (MSG_SEND built by `forward_payload`:
   PyMax 2.4.1's `forward_message` sends the message id as a string, which MAX refuses),
   attachments go with it. Saving is per item: every photo
   (in its corner, and in the viewer's), voice, audio file, video and file has its own

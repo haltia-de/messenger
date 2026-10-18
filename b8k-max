@@ -587,8 +587,9 @@ class PyMaxLink:
 
     run(events) logs in and lives as long as the connection: it calls
     events.on_qr(url) when a QR code is to be scanned, on_login(me, chats,
-    contacts, agent, session_id) after every (re)login, on_message(msg) and
-    on_reaction(chat_id, msg_id, reactions) as they come. All of it runs in
+    contacts, agent, session_id) after every (re)login, on_message(msg),
+    on_reaction(chat_id, msg_id, reactions) and on_delete(chat_id, [msg ids])
+    as they come. All of it runs in
     the caller's asyncio loop."""
 
     def __init__(self, work_dir):
@@ -613,6 +614,43 @@ class PyMaxLink:
         self.client.on_message()(self._message)
         self.client.on_reaction_update()(self._reaction)
         await self.client.start()
+
+    def _watch_deletions(self, client):
+        """Deletions: MAX tells them by NOTIF_MSG_DELETE, or by a message whose
+        status is REMOVED; PyMax 2.4.1 maps the second into a delete event it
+        cannot read, and the frame is lost. So the frames are looked at here
+        first, as they come. PyMax's runtime exists only once started: done
+        at the login, once."""
+        dispatcher = getattr(getattr(client, "_app", None), "dispatcher", None)
+        if dispatcher is None or getattr(dispatcher, "b8k_peeks", False):
+            return
+        dispatch = dispatcher.dispatch
+
+        async def peek_then_dispatch(frame):
+            self._peek(frame)
+            await dispatch(frame)
+        dispatcher.dispatch = peek_then_dispatch
+        dispatcher.b8k_peeks = True
+
+    def _peek(self, frame):
+        """A deletion in a frame from MAX: events.on_delete(chat, [ids])."""
+        from pymax.protocol import Opcode
+        from pymax.types.domain import Message
+
+        try:
+            payload = frame.payload if isinstance(frame.payload, dict) else {}
+            if frame.opcode == Opcode.NOTIF_MSG_DELETE:
+                chat_id, ids = payload.get("chatId"), payload.get("messageIds") or []
+            elif frame.opcode == Opcode.NOTIF_MESSAGE and \
+                    "REMOVED" in str((payload.get("message") or payload).get("status")):
+                msg = Message.model_validate(payload)
+                chat_id, ids = msg.chat_id or payload.get("chatId"), [msg.id]
+            else:
+                return
+            if chat_id is not None and ids:
+                asyncio.ensure_future(self.events.on_delete(int(chat_id), [int(i) for i in ids]))
+        except Exception as exc:  # a frame of another shape: not for us
+            log_line("delete frame: %r" % exc)
 
     def _watch_login(self):
         """Keep the account's own settings from each login answer: PyMax
@@ -648,6 +686,7 @@ class PyMaxLink:
             os.chmod(os.path.join(self.work_dir, "web.db"), 0o600)
         except OSError:
             pass
+        self._watch_deletions(client)
         device = client._app.config.device
         try:  # the browser PyMax presents itself as; media links want the same
             agent = device.user_agent.header_user_agent
@@ -897,6 +936,22 @@ class Backend:
             cache_add(msg.chat_id, [out])
         GLib.idle_add(self.ui.incoming, out, self.summary(chat) if chat is not None else None)
 
+    async def on_delete(self, chat_id, msg_ids):
+        """Messages deleted (by their sender for everyone, or here): out of
+        the cache and the window; the chat's last message anew if it went."""
+        cache_forget(chat_id, msg_ids)
+        chat = self.chats.get(chat_id)
+        summary = None
+        if chat is not None:
+            if chat.last_message is not None and chat.last_message.id in msg_ids:
+                try:
+                    newest = await self.link.history(chat_id, 1)
+                except Exception:
+                    newest = []
+                chat.last_message = newest[-1] if newest else None
+            summary = self.summary(chat)
+        GLib.idle_add(self.ui.deleted, chat_id, list(msg_ids), summary)
+
     async def on_reaction(self, chat_id, msg_id, reactions):
         """Someone's reaction changed; the event does not say whose, so the
         account's own stays as it was known."""
@@ -1039,6 +1094,12 @@ class Backend:
             except Exception:
                 pass
         out = [self.message(m) for m in msgs]
+        if out:  # deleted while away: in the cache, within the page, no longer in MAX
+            fetched = {m["id"] for m in out}
+            gone = [m["id"] for m in cached if m["time"] >= out[0]["time"] and m["id"] not in fetched]
+            if gone:
+                cache_forget(chat_id, gone)
+                cached = [m for m in cached if m["id"] not in gone]
         known = {m["id"] for m in cached}
         gap = bool(cached) and len(out) >= PAGE and not known & {m["id"] for m in out} and \
             out[0]["time"] > cached[-1]["time"]
@@ -1203,6 +1264,24 @@ def cache_react(chat_id, msg_id, reactions, yours=...):
             fd = os.open(path + ".new", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
             with os.fdopen(fd, "w") as fh:
                 json.dump(msgs, fh, ensure_ascii=False)
+            os.replace(path + ".new", path)
+        except OSError:
+            pass
+
+
+def cache_forget(chat_id, msg_ids):
+    """Deleted messages out of a chat's cache."""
+    gone = set(msg_ids)
+    with _cache_lock:
+        msgs = cache_read(chat_id)
+        keep = [m for m in msgs if m["id"] not in gone]
+        if len(keep) == len(msgs):
+            return
+        try:
+            path = os.path.join(CHATS, "%d.json" % chat_id)
+            fd = os.open(path + ".new", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w") as fh:
+                json.dump(keep, fh, ensure_ascii=False)
             os.replace(path + ".new", path)
         except OSError:
             pass
@@ -1944,6 +2023,10 @@ class ChatView:
         """The newest page fetched on opening. If more came than a screen
         (or MAX says there is a gap after the cache), what was built is not
         continuous with it: start again from these. done() runs once drawn."""
+        if msgs:  # within the page, what MAX no longer has was deleted meanwhile
+            fetched = {m["id"] for m in msgs}
+            self.remove([i for i, (m, _b) in self.msgs.items()
+                         if m["time"] >= msgs[0]["time"] and i not in fetched])
         latest = max((m["time"] for m in msgs if m["id"] in self.shown), default=0)
         new = [m for m in msgs if m["id"] not in self.shown and m["time"] >= latest]
         if gap or len(new) > FIRST:
@@ -1983,6 +2066,41 @@ class ChatView:
         elif not self.at_bottom:
             self.unseen += 1
             self._show_down()
+
+    def remove(self, msg_ids):
+        """Deleted messages out of the chat; a day left empty loses its label."""
+        gone = set(msg_ids) & self.shown
+        self.pending_new = [m for m in self.pending_new if m["id"] not in msg_ids]
+        self.pending_old = [m for m in self.pending_old if m["id"] not in msg_ids]
+        if not gone:
+            return
+        for w in self.box.get_children():
+            if getattr(w, "msg_id", None) in gone:
+                w.destroy()
+        self.shown -= gone
+        for i in gone:
+            self.msgs.pop(i, None)
+        self.photos = [(img, url) for img, url in self.photos if img.get_parent()]
+        kids = self.box.get_children()
+        for k, w in enumerate(kids):  # a day label with no message after it before the next
+            if getattr(w, "is_day", False) and (k + 1 == len(kids) or
+                                                getattr(kids[k + 1], "is_day", False)):
+                if w is self.top_sep:
+                    self.top_sep = self.first_day = None
+                w.destroy()
+        kids = self.box.get_children()
+        if not kids:
+            self.last_day = self.first_day = self.top_sep = None
+        elif self.top_sep is None and getattr(kids[0], "is_day", False):
+            self.top_sep = kids[0]
+            first = next((w for w in kids if hasattr(w, "msg_id")), None)
+            if first is not None:
+                t = self.msgs[first.msg_id][0]["time"]
+                self.first_day = datetime.fromtimestamp(t / 1000).date()
+        holds = [w for w in kids if hasattr(w, "msg_id")]
+        if holds:
+            last = self.msgs[holds[-1].msg_id][0]["time"]
+            self.last_day = datetime.fromtimestamp(last / 1000).date()
 
     def reacted(self, msg_id, reactions, yours=...):
         """New reactions of a message (yours: ... when not known to change)."""
@@ -3226,8 +3344,9 @@ class Max(Gtk.Application):
             view = self.views.get(target)
             if view:
                 view.add(out)
-            if self.open_chat == source:
-                self.sub.set_text("переслано: %s" % title)
+            if self.open_chat == source and self.stack.get_visible_child_name() == "chat":
+                self.open(target)  # to the chat it went to, as MAX's app does
+                self.sub.set_text("переслано сюда")
 
         self.backend.run(self.backend.forward(target, msg_id, source), done)
 
@@ -3808,6 +3927,16 @@ class Max(Gtk.Application):
             self.reacted(chat_id, msg_id, *res)
 
         self.backend.run(self.backend.react(chat_id, msg_id, emoji), done)
+
+    def deleted(self, chat_id, msg_ids, summary):
+        """Messages deleted in a chat (Backend.on_delete)."""
+        view = self.views.get(chat_id)
+        if view:
+            view.remove(msg_ids)
+        if summary and self.chatlist.listed(chat_id):
+            self.chatlist.update(summary)
+            self.fill_list()
+        return False
 
     def reacted(self, chat_id, msg_id, reactions, yours):
         """New reactions of a message (yours: ... when not known to change)."""

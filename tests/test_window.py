@@ -281,11 +281,10 @@ app.fwd_entry.set_text("дач")
 wait(lambda: [r.chat_id for r in app.fwd_list.get_children()] == [dacha], what="forward search")
 shot("forward.png")
 app.fwd_list.emit("row-activated", app.fwd_list.get_children()[0])
-wait(lambda: app.sub.get_text() == "переслано: Дача", what="forwarded")
-assert app.stack.get_visible_child_name() == "chat" and app.open_chat == mama
+wait(lambda: app.open_chat == dacha, what="forwarded, and in that chat")
+assert app.stack.get_visible_child_name() == "chat"
 assert fake.asked("forward")[-1] == {"chat_id": dacha, "msg_id": first, "from_chat_id": mama}
 assert app.chatlist.get(dacha)["last"].startswith("Вы: ↪ Привет! Как дела?")
-app.open(dacha)
 wait(lambda: any("Переслано от" in w.get_text() for w in walk(app.view.widget)
                  if isinstance(w, Gtk.Label)), what="forwarded bubble")
 fwd = [w.get_text() for w in walk(app.view.widget) if isinstance(w, Gtk.Label)]
@@ -293,6 +292,18 @@ assert "↪ Переслано от Мамочка" in fwd and "Привет! К
 app.open(mama)
 spin(0.2)
 ok("forward")
+
+# --- a message deleted for everyone by its sender: gone here too --------------------------------
+doomed = fake.incoming(mama, "Ой, не тебе", MAMA)
+wait(lambda: any(w.msg_id == doomed.id for w in holds_of(app.view)), what="the message to delete")
+assert app.chatlist.get(mama)["last"] == "Ой, не тебе"
+fake.deleted(mama, [doomed.id])
+wait(lambda: not any(w.msg_id == doomed.id for w in holds_of(app.view)), what="deleted bubble")
+wait(lambda: app.chatlist.get(mama)["last"] != "Ой, не тебе", what="list preview")
+assert doomed.id not in [m["id"] for m in bm.cache_read(mama)]
+col = column(app.view)
+assert all(not (a == b == "day") for a, b in zip(col, col[1:])) and col[-1] != "day"
+ok("deleted for everyone")
 
 # --- emoji into the message ---------------------------------------------------------------------
 app.entry.set_text("Привет ")

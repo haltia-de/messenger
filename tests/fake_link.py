@@ -96,6 +96,14 @@ class FakeLink:
         self._push(self.events.on_message(msg))
         return msg
 
+    def deleted(self, cid, msg_ids):
+        """Messages deleted for everyone (by their sender, elsewhere)."""
+        self.msgs[cid] = [m for m in self.msgs.get(cid, []) if m.id not in msg_ids]
+        chat = self.rooms.get(cid)
+        if chat is not None and chat.last_message is not None and chat.last_message.id in msg_ids:
+            chat.last_message = self.msgs[cid][-1] if self.msgs[cid] else None
+        self._push(self.events.on_delete(cid, list(msg_ids)))
+
     def reaction(self, cid, msg_id, reactions):
         self._push(self.events.on_reaction(cid, msg_id, [list(r) for r in reactions]))
 

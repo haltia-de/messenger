@@ -156,6 +156,67 @@ import json  # noqa: E402
 assert '"messageId": 117455094100479781' in json.dumps(pl)
 ok("forwarding")
 
+# --- deletions: MAX's frames read by the link, then the cache and the list ---------------------
+from types import SimpleNamespace  # noqa: E402
+from pymax.protocol import Opcode  # noqa: E402
+got = []
+
+
+class Events:
+    async def on_delete(self, chat_id, ids):
+        got.append((chat_id, ids))
+
+
+async def peek_all():
+    link = bm.PyMaxLink("/nonexistent")
+    link.events = Events()
+    link._peek(SimpleNamespace(opcode=Opcode.NOTIF_MSG_DELETE,
+                               payload={"chatId": 11, "messageIds": ["5", 6]}))
+    link._peek(SimpleNamespace(opcode=Opcode.NOTIF_MESSAGE, payload={
+        "chatId": 12, "message": {"id": 7, "time": 1, "type": "USER", "status": "REMOVED",
+                                  "sender": 3, "text": ""}}))
+    link._peek(SimpleNamespace(opcode=Opcode.NOTIF_MESSAGE, payload={
+        "chatId": 12, "message": {"id": 8, "time": 1, "type": "USER", "sender": 3, "text": "hi"}}))
+    link._peek(SimpleNamespace(opcode=Opcode.NOTIF_MSG_DELETE, payload="odd"))
+    await asyncio.sleep(0.05)
+asyncio.run(peek_all())
+assert got == [(11, [5, 6]), (12, [7])], got
+seen = []
+
+
+class Dispatcher:
+    async def dispatch(self, frame):
+        seen.append(frame)
+
+
+async def watched():
+    link = bm.PyMaxLink("/nonexistent")
+    link.events = Events()
+    client = SimpleNamespace(_app=SimpleNamespace(dispatcher=Dispatcher()))
+    link._watch_deletions(client)
+    link._watch_deletions(client)  # a reconnect: not wrapped twice
+    frame = SimpleNamespace(opcode=Opcode.NOTIF_MSG_DELETE, payload={"chatId": 21, "messageIds": [9]})
+    await client._app.dispatcher.dispatch(frame)
+    await asyncio.sleep(0.05)
+    assert seen == [frame]  # PyMax still gets every frame, once
+got.clear()
+asyncio.run(watched())
+assert got == [(21, [9])], got
+bm.PyMaxLink("/nonexistent")._watch_deletions(SimpleNamespace())  # no runtime yet: nothing
+ui_del = UI()
+Bd = bm.Backend(ui_del, fake)
+run(Bd.on_login(fake.me, list(fake.rooms.values()), [], fake.agent, 7))
+k1 = fake.say(anna, "первое", ANNA)
+k2 = fake.say(anna, "лишнее", ANNA)
+bm.cache_add(anna, [Bd.message(k1), Bd.message(k2)])
+Bd.chats[anna].last_message = k2
+fake.msgs[anna] = [m for m in fake.msgs[anna] if m.id != k2.id]  # deleted for all in MAX
+run(Bd.on_delete(anna, [k2.id]))
+assert k2.id not in [m["id"] for m in bm.cache_read(anna)] and k1.id in [m["id"] for m in bm.cache_read(anna)]
+chat_id, ids, summary = said(ui_del, "deleted")[-1]
+assert chat_id == anna and ids == [k2.id] and summary["last"] == "первое"
+ok("deletions")
+
 # --- search, contacts, joining, removing, renaming, invites ----------------------------
 fake.person(40, "Ольга", phone="+79001234567")
 p = back(B.find_phone("+79001234567"))
