@@ -38,7 +38,17 @@ to `PREFIX/share`, the XDG autostart file (`--background`, `X-B8K-Autostart`) to
 cached in `$B8K_CACHE`, default `.cache/`) into `PREFIX/lib/b8k-max`, and removes the shell's old
 `apps.d/max.conf` and icon. The script looks for PyMax in `/usr/local/lib/b8k-max`, `/usr/lib/b8k-max`
 and `../lib/b8k-max` from itself. Bumping PyMax: the wheel name and sha256 in `install.sh` (and the
-APKBUILD's `_whl`). Bumping the version: `pkgver` and the metainfo `<release>`.
+APKBUILD's `_whl`).
+
+Releases (ADR 0002 in lenovo-b8000h-linux): SemVer, always `vX.Y.Z` — X incompatible (commands,
+file formats, `X-B8K-…` keys), Y features, Z fixes and packaging-only changes. The tag must equal
+`pkgver` in `packaging/alpine/APKBUILD` (`pkgrel=0`) and the newest `<release version>` in
+`data/*.metainfo.xml`; CI fails otherwise. Pushing the tag runs `.github/workflows/release.yml`
+(trudenboy/b8k-ci's `apk.yml`): a signed noarch Alpine 3.24 package (`abuild`, `options="net"`
+for the PyMax wheel in `source=`) in the GitHub release. Push the commit first and the tag in a
+push of its own — a tag pushed with the commit that adds the workflow did not start it. The
+tablet's image installs that apk by a lock file; packages install under PREFIX `/usr`, so other
+programs are found on `PATH` (`b8k-vplay`: `shutil.which`), never at `/usr/local/bin`.
 
 ## Architecture
 
@@ -132,7 +142,7 @@ APKBUILD's `_whl`). Bumping the version: `pkgver` and the metainfo `<release>`.
   (`PhotoRedirect`). It caches photos (`photo(url, done)`, touched when shown, `prune()` after
   `PHOTO_DAYS` unshown), plays voice through libmpv (`voice`/`toggle`/`stop`, `on_time`/`on_end`;
   an `end-file` with reason ABORTED is a stop or a switch, not an end), starts a video in
-  `b8k-vplay`/`mpv --fs` with `ytdl=no` and `load-unsafe-playlists=no` (`video(url, title)`), and
+  `b8k-vplay` (on `PATH`, Видео's package) or `mpv --fs` with `ytdl=no` and `load-unsafe-playlists=no` (`video(url, title)`), and
   gives a file to the browser (`file(url)`). What fails goes to `~/.cache/b8k-max/player.log`
   (600, host and path only; the players' own output too). Its hands come in at creation —
   `spawn`, `open_uri`, `fetch`, `player` — real by default, `tests/fake_hands.py` in tests.

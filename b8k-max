@@ -175,7 +175,7 @@ EMOJI = (
     ("Разное", "🔥 ⭐ 🌟 ✨ 🎉 🎁 🎂 🌹 🌸 💐 ☀️ 🌧️ ❄️ ☕ 🍰 🍎 🏠 🚗 ⚽ 🎵 📷 📞 ✅ ❌ ❓ ❗ 💯"),
 )
 RECENT = 16  # recent emoji kept
-PLAYER = "/usr/local/bin/b8k-vplay"  # the shell's video player; mpv if missing
+PLAYER = "b8k-vplay"  # Видео's video player, looked up on PATH; mpv if missing
 PLAYER_LOG = os.path.join(PHOTOS, "player.log")  # what the players said, for when one fails
 MONTHS = "янв фев мар апр мая июн июл авг сен окт ноя дек".split()
 COLOURS = ((0.21, 0.52, 0.89), (0.15, 0.64, 0.41), (0.90, 0.38, 0.0), (0.57, 0.25, 0.67),
@@ -1642,9 +1642,10 @@ class Media:
         self.stop()
         # No youtube-dl and no playlists: the link is played as it is.
         opts = {"ytdl": "no", "load-unsafe-playlists": "no", "user-agent": self.agent}
-        if os.access(PLAYER, os.X_OK):
+        player = shutil.which(PLAYER)  # a package puts it in /usr/bin (ADR 0002)
+        if player:
             opts.update({"terminal": "yes", "msg-level": "all=warn"})  # libmpv: to the log
-            cmd = [PLAYER, "--title", title, url] + ["%s=%s" % kv for kv in opts.items()]
+            cmd = [player, "--title", title, url] + ["%s=%s" % kv for kv in opts.items()]
         else:
             cmd = ["mpv", "--fs"] + ["--%s=%s" % kv for kv in opts.items()] + ["--", url]
         log_line("video %s via %s" % (where(url), os.path.basename(cmd[0])))

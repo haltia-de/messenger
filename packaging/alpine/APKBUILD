@@ -1,6 +1,6 @@
 # Maintainer: Mikhail Nevskiy <rensomail@gmail.com>
 pkgname=b8k-max
-pkgver=1.18
+pkgver=1.18.1
 pkgrel=0
 pkgdesc="MAX: An unofficial client for the MAX messenger in large type (GTK 3)"
 url="https://github.com/trudenboy/b8k-max"
@@ -16,7 +16,8 @@ source="$pkgname-$pkgver.tar.gz::https://github.com/trudenboy/b8k-max/archive/v$
 	$_whl::https://files.pythonhosted.org/packages/py3/m/maxapi-python/$_whl"
 noextract="$_whl"
 
-options="!check"
+# install.sh checks the PyMax wheel given in source= (net: abuild fetches it).
+options="net !check"
 
 package() {
 	B8K_CACHE="$srcdir" sh ./install.sh "$pkgdir" /usr
