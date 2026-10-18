@@ -4,10 +4,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-`b8k-max` is a native GTK 3 client for the MAX messenger, written for the tablet shell of
+`b8k-max` is a native GTK 3 client for the MAX messenger, a desktop program of its own:
+`io.github.trudenboy.Max` (the GApplication id, the `.desktop` file, the Wayland app id via
+`GLib.set_prgname` before GTK is imported). Made for the tablet of
 [lenovo-b8000h-linux](https://github.com/trudenboy/lenovo-b8000h-linux) (Lenovo YOGA Tablet 10
-B8000-H, Alpine). The whole program is one Python 3 script, `b8k-max` (no `.py` extension). It
-was split out of the lenovo-b8000h-linux repo; that repo's image build installs it from here by tag.
+B8000-H, Alpine), whose image installs it from here by tag, but it depends on no shell: per that
+repo's ADR 0001 it meets the shell only through freedesktop standards, and its shared code is
+`b8k-compat`. The whole program is one Python 3 script, `b8k-max` (no `.py` extension).
 
 There is no build step or linter config; the tests are in `tests/` (see Tests). GPL-2.0; every
 source file starts with an `SPDX-License-Identifier: GPL-2.0` line.
@@ -15,23 +18,27 @@ source file starts with an `SPDX-License-Identifier: GPL-2.0` line.
 ## Commands
 
 ```sh
-sh install.sh            # install into / (root needed)
-sh install.sh /mnt/root  # install into another root, e.g. while building an image
-b8k-max                  # run with a window
-b8k-max --background     # start hidden (what b8k-launcher does at session start)
+sh install.sh                # install into / under /usr/local (root needed)
+sh install.sh /mnt/root /usr # into another root and prefix (packaging/alpine/APKBUILD does this)
+b8k-max                      # run with a window
+b8k-max --background         # start hidden (the XDG autostart file does this)
 python3 -m py_compile b8k-max   # quick syntax check
 sh tests/run.sh                 # all tests (needs broadwayd and network once, for the venv)
 sh tests/run.sh test_backend.py # one of them
 .cache/venv/bin/python tests/demo.py   # the window on made-up chats, no account
 ```
 
-Runtime deps (Alpine): `apk add python3 py3-gobject3 gtk+3.0` (optional: `py3-mpv mpv-libs` for voice
-messages, `font-noto-emoji` for reactions; the tablet image has them), plus `wget`/`unzip`/`sha256sum`
-for `install.sh`. `install.sh` downloads the pinned PyMax wheel (`maxapi_python-2.4.1`), checks
-its sha256 and unpacks it into `/usr/local/lib/b8k-max`; the download is cached in `$B8K_CACHE`
-(default `.cache/` here, git-ignored). Bumping PyMax means changing both the wheel name and the
-sha256 in `install.sh`. The script does `sys.path.insert(0, "/usr/local/lib/b8k-max")`, so running
-it from the checkout still needs PyMax installed there.
+Runtime deps: Python 3, PyGObject/GTK 3, `b8k-compat` (github.com/trudenboy/b8k-compat, 1.1.2; Alpine
+`py3-b8k-compat`), PyMax's own packages (the list is `depends` in `packaging/alpine/APKBUILD`),
+optionally `py3-mpv mpv-libs` (voice) and `font-noto-emoji`; `wget`/`unzip`/`sha256sum` for
+`install.sh`. `install.sh [ROOT] [PREFIX]` installs the script to `PREFIX/bin`, `data/` (the
+`.desktop` file with `X-B8K-Home`/`X-B8K-Replaces=max`, the hicolor SVG icon, AppStream metainfo)
+to `PREFIX/share`, the XDG autostart file (`--background`, `X-B8K-Autostart`) to
+`ROOT/etc/xdg/autostart`, downloads the pinned PyMax wheel (`maxapi_python-2.4.1`, sha256 checked;
+cached in `$B8K_CACHE`, default `.cache/`) into `PREFIX/lib/b8k-max`, and removes the shell's old
+`apps.d/max.conf` and icon. The script looks for PyMax in `/usr/local/lib/b8k-max`, `/usr/lib/b8k-max`
+and `../lib/b8k-max` from itself. Bumping PyMax: the wheel name and sha256 in `install.sh` (and the
+APKBUILD's `_whl`). Bumping the version: `pkgver` and the metainfo `<release>`.
 
 ## Architecture
 
@@ -57,8 +64,8 @@ it from the checkout still needs PyMax installed there.
   after each login, `PERF open_chat_to_render` with measured times. Event shapes and fixed values
   copy PyMax 2.4.1's `pymax/telemetry/payloads.py`; sent in batches via `Opcode.LOG` through
   `Backend.log` and the link. On by default, switched in the settings page (gear), stored in
-  `~/.config/b8k/max.conf` (`[max] telemetry`; `buzz` there switches the buzz on new messages,
-  not on button taps; `contacts_only`, see below). Re-check the shapes when bumping PyMax.
+  `~/.config/b8k/max.conf` (`[max] telemetry`; `buzz` there switches the desktop
+  notifications of new messages; `contacts_only`, see below). Re-check the shapes when bumping PyMax.
 - **Search, join, delete.** The `find` page (magnifier on the list) reads its entry with
   `phone_of` (a person: `users.search_by_phone`, then write or `users.add_contact`), `link_of`
   (a channel or group: `LINK_INFO` invoked directly so public `max.ru/name` links work too, then
@@ -163,14 +170,18 @@ it from the checkout still needs PyMax installed there.
 - **Photo fetch is a security boundary.** Photo URLs arrive inside messages (sender-controlled), so
   `photo_ok` allows only `https` on `oneme.ru`/`max.ru` hosts, and `PhotoRedirect` refuses
   redirects off those hosts. Preserve both checks when touching photo loading.
-- **Optional shell module.** If `/usr/local/share/b8k/python/b8k_ui.py` exists, the program uses
-  `b8k_ui.Buzz` (haptic buzz on every `Gtk.Button` "pressed"), `b8k_ui.HEADER_CSS` and
-  `b8k_ui.badge("max", n)` (unread count of dialogs and groups, channels excluded, on the panel
-  button). Without it (`b8k_ui = None`) the program must still run on any GTK 3 desktop — guard
-  every `b8k_ui` use.
-- **Shell integration files.** `max.conf` is installed to `/usr/local/share/b8k/apps.d/max.conf`
-  and registers the panel button (`signal = 7`, `app_ids` must match the application id);
-  `max.png` is its icon.
+- **No shell.** Nothing of the b8k shell is used (ADR 0001 in lenovo-b8000h-linux): no
+  `b8k_ui`, no `apps.d`, no buzzing (the shell's `b8k-touchguard` buzzes every touch), no header
+  CSS (the desktop's GTK theme, `b8k` on the tablet, gives the header and the large buttons; `CSS`
+  styles only the program's own content). The desktop is met through standards: the unread count
+  (loud chats) as `com.canonical.Unity.LauncherEntry` `Update` on the session bus (`Max.badge`);
+  a new message in a loud chat as a desktop notification (`Max.notify`, `Gio.Notification`, its
+  tap the `app.open-chat` action; the desktop buzzes or sounds for it — the `buzz` setting
+  switches these); the start with the session as XDG autostart (`--background`; with no
+  graphical session the program exits at once and quietly). Shared code is `b8k-compat`:
+  `Settings("max")` (same ini, yes/no), `awake.Awake` while a voice plays, `photos.pixbuf_of`
+  (size checked before decoding) for photos. Voice keeps its own libmpv (`Libmpv`): b8k-compat's
+  `Player` takes no user agent, which MAX's CDN wants.
 
 ## Conventions
 
@@ -190,7 +201,7 @@ it from the checkout still needs PyMax installed there.
 ## Tests
 
 `sh tests/run.sh` makes `.cache/venv` once (system PyGObject plus the PyMax wheel `install.sh`
-pins), starts a `broadwayd` of its own and runs four plain scripts with `assert`s, each printing
+pins, and b8k-compat 1.1.2 from GitHub, or `B8K_COMPAT=path/to/checkout`), starts a `broadwayd` of its own and runs four plain scripts with `assert`s, each printing
 «… ok» per part: `tests/test_chatlist.py` (the chat list's rules: no MAX, no window),
 `tests/test_media.py` (Media with fake hands: hosts, the header, redirects, cache, players),
 `tests/test_backend.py` (Backend on the fake link, no window) and `tests/test_window.py` (the real

@@ -3,7 +3,8 @@
 # Copyright (C) 2026 Mikhail Nevskiy
 # Run the tests: sh tests/run.sh [test_backend.py test_window.py ...]
 # The first run makes .cache/venv (the system's PyGObject, plus the PyMax
-# wheel install.sh pins, by the same name and sha256); the window tests get
+# wheel install.sh pins, by the same name and sha256, and b8k-compat 1.1.2,
+# or B8K_COMPAT=path/to/a/checkout); the window tests get
 # a display of their own from broadwayd, stopped again at the end.
 # B8K_SHOTS=dir keeps screenshots of the window there.
 set -eu
@@ -25,6 +26,16 @@ if [ ! -x "$venv/bin/python" ]; then
 	else
 		/usr/bin/python3 -m venv --system-site-packages "$venv"
 		"$venv/bin/pip" install -q "$cache/$whl"
+	fi
+fi
+
+# b8k-compat, the b8k programs' shared library (a dependency of this one).
+if ! "$venv/bin/python" -c "import b8k_compat" 2>/dev/null; then
+	compat=${B8K_COMPAT:-git+https://github.com/trudenboy/b8k-compat@v1.1.2}
+	if command -v uv >/dev/null; then
+		VIRTUAL_ENV=$venv uv pip install -q "$compat"
+	else
+		"$venv/bin/pip" install -q "$compat"
 	fi
 fi
 

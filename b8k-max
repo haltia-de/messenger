@@ -3,7 +3,13 @@
 # Copyright (C) 2026 Mikhail Nevskiy
 """An unofficial client for the MAX messenger: large type, no web browser.
 
-PyMax (MIT, vendored in /usr/local/lib/b8k-max) speaks MAX's web protocol
+io.github.trudenboy.Max: a desktop program of its own, on any GTK 3
+desktop; the b8k tablet shell meets it only through freedesktop standards
+(its .desktop file, the Unity LauncherEntry count, notifications, XDG
+autostart) and gives the look through its GTK theme. Shared code is
+b8k-compat's (settings, keeping awake, photos).
+
+PyMax (MIT, unpacked in PREFIX/lib/b8k-max) speaks MAX's web protocol
 over a WebSocket, as web.max.ru does, so no web engine is loaded: about
 55 MB in all instead of a second browser. The first start shows a QR code
 to scan in MAX on a phone; the session is then kept in
@@ -16,11 +22,12 @@ screens a person really goes through (to the list, into a chat, the
 window hidden) and how long a chat took to show, in the event shapes of
 PyMax 2.4.1. No texts, no names. It is on until switched off in the
 settings (the gear in the header), kept in ~/.config/b8k/max.conf with
-the buzz on new messages.
+the notifications of new messages.
 
 Pages: the chat list (initials, name, last message, time, unread count)
 and a chat (bubbles, photos, a large entry and a send button). New
-messages arrive live and buzz (unless switched off in the settings).
+messages arrive live; a new one in a loud chat is a desktop notification
+(the desktop buzzes or sounds for it), unless switched off in the settings.
 The search (the magnifier over the list) finds a person by phone number,
 to write to or add to the contacts, a channel or group by its max.ru link,
 to join, or one of the own chats by name. The edit button in a chat's
@@ -35,7 +42,7 @@ to save what it carries into a folder (Загрузки/MAX unless set otherwise
 
 MAX has no setting for who may write to an account, so by default the
 dialogs of people outside the contacts are kept off the list, the badge
-and the buzz here (the settings switch them back). Known are the contacts
+and the notifications here (the settings switch them back). Known are the contacts
 MAX sends at login, those added here, those written to here, and, the
 first time, everyone already in a dialog; the ids are kept in
 ~/.local/share/b8k-max/known.json (mode 600), since after the first login
@@ -45,12 +52,11 @@ MAX's own app (it refuses web clients that, "safe mode").
 PyMax runs in its own thread with an asyncio loop; every call from the
 window goes through run(), every answer comes back with GLib.idle_add.
 
-It lives in the background: b8k-launcher starts it with --background at
-session start, closing the window only hides it, and the panel's MAX
-button brings the same process back (one instance through D-Bus). The
-unread count of dialogs and groups (channels left out) goes to
-$XDG_RUNTIME_DIR/b8k-badge/max, which b8k-launch shows on the button, and
-the panel is told at once (b8k_ui.badge, with the button's own signal). Chats open from a cache: the last
+It lives in the background: XDG autostart starts it with --background
+with the session (with no graphical session it exits at once), closing
+the window only hides it, and starting it again brings the same process
+back (one instance through D-Bus). The unread count of loud chats goes to
+its launcher button as Unity's LauncherEntry. Chats open from a cache: the last
 messages of each chat on disk (~/.cache/b8k-max/chats, mode 600) and the
 last six chats kept built in memory; a chat with nothing new since its
 cache opens without asking MAX at all. The list keeps its rows and redraws
@@ -58,7 +64,7 @@ only a chat that changed. Photos are cached on disk and pruned when not
 shown for a month (daily, as the program runs for weeks).
 
 The list has two tabs, chats and channels. A long press on a chat pins it
-to the top or switches its notifications (buzz and the panel's count);
+to the top or switches its notifications (and its part of the count);
 channels are quiet unless switched on. Both are kept here
 (~/.local/share/b8k-max/chats.json): PyMax has no pinning or muting.
 
@@ -83,7 +89,6 @@ The person of a dialog can be renamed (the edit menu): here only, kept in
 offers no renaming of contacts.
 """
 import asyncio
-import configparser
 import hashlib
 import json
 import os
@@ -97,28 +102,29 @@ import urllib.parse
 import urllib.request
 from datetime import date, datetime
 
-sys.path.insert(0, "/usr/local/lib/b8k-max")
+APP_ID = "io.github.trudenboy.Max"  # the GApplication, the .desktop file, the window
+# PyMax (its pinned wheel) is unpacked by install.sh into PREFIX/lib/b8k-max,
+# next to the bin directory this program is in.
+_here = os.path.dirname(os.path.realpath(os.path.abspath(sys.argv[0] or __file__)))
+for _lib in ("/usr/local/lib/b8k-max", "/usr/lib/b8k-max",
+             os.path.join(os.path.dirname(_here), "lib", "b8k-max")):
+    if os.path.isdir(_lib) and _lib not in sys.path:
+        sys.path.insert(0, _lib)
 
 import gi  # noqa: E402
 
+from gi.repository import GLib  # noqa: E402
+
+GLib.set_prgname(APP_ID)  # before GTK: under Wayland the window is named by it
 gi.require_version("Gtk", "3.0")
 gi.require_version("Gdk", "3.0")
 gi.require_version("GdkPixbuf", "2.0")
 gi.require_version("Pango", "1.0")
-from gi.repository import Gdk, GdkPixbuf, GLib, GObject, Gtk, Pango  # noqa: E402
+from gi.repository import Gdk, GdkPixbuf, Gio, Gtk, Pango  # noqa: E402
 
-# The shell's shared pieces (haptics, header, panel badge, questions):
-# optional, so the program runs on any GTK desktop too.
-sys.path.insert(0, "/usr/local/share/b8k/python")
-try:
-    import b8k_ui
-except ImportError:
-    b8k_ui = None
-
-
-def buzzer():
-    """The vibration motor of the tablet, or nothing elsewhere."""
-    return b8k_ui.Buzz() if b8k_ui else (lambda *_args: True)
+from b8k_compat import photos  # noqa: E402
+from b8k_compat.awake import Awake  # noqa: E402
+from b8k_compat.settings import Settings  # noqa: E402
 
 
 DATA = os.path.expanduser("~/.local/share/b8k-max")
@@ -140,7 +146,7 @@ PHOTO_DAYS = 30  # cached photos older than this are removed
 CHATS = os.path.join(PHOTOS, "chats")  # message cache, one file per chat
 KEEP = 80  # messages kept per chat on disk
 VIEWS = 6  # chats kept built in memory
-CONFIG = os.path.expanduser("~/.config/b8k/max.conf")
+SETTINGS = Settings("max")  # ~/.config/b8k/max.conf, [max]: yes/no as before
 KNOWN = os.path.join(DATA, "known.json")  # people whose messages are shown (contacts_only)
 ALIASES = os.path.join(DATA, "names.json")  # user id -> the name given here
 PREFS = os.path.join(DATA, "chats.json")  # pinned chats, notifications switched per chat
@@ -1151,42 +1157,18 @@ def save_json(path, data):
         pass
 
 
-def set_badge(count):
-    """The number on the panel's MAX button (b8k_ui redraws it)."""
-    if b8k_ui:
-        b8k_ui.badge("max", count)
-
-
 def load_setting(key):
-    """A yes/no setting of [max] in CONFIG (telemetry, buzz); yes until set."""
-    conf = configparser.ConfigParser(interpolation=None)
-    conf.read(CONFIG, encoding="utf-8")
-    try:
-        return conf.getboolean("max", key, fallback=True)
-    except ValueError:
-        return True
+    """A yes/no setting of [max] (telemetry, buzz…); yes until set."""
+    return SETTINGS.get_bool(key, True)
 
 
 def load_text(key, default):
-    """A text setting of [max] in CONFIG (the folder for files)."""
-    conf = configparser.ConfigParser(interpolation=None)
-    conf.read(CONFIG, encoding="utf-8")
-    return conf.get("max", key, fallback=default) or default
+    """A text setting of [max] (the folder for files)."""
+    return SETTINGS.get(key, default) or default
 
 
-def save_setting(key, on):
-    conf = configparser.ConfigParser(interpolation=None)
-    conf.read(CONFIG, encoding="utf-8")
-    if not conf.has_section("max"):
-        conf.add_section("max")
-    conf["max"][key] = on if isinstance(on, str) else "yes" if on else "no"
-    try:
-        os.makedirs(os.path.dirname(CONFIG), exist_ok=True)
-        with open(CONFIG + ".new", "w", encoding="utf-8") as fh:
-            conf.write(fh)
-        os.replace(CONFIG + ".new", CONFIG)
-    except OSError:
-        pass
+def save_setting(key, value):
+    SETTINGS.set(key, value)
 
 
 def now_ms():
@@ -1348,6 +1330,8 @@ class Libmpv:
     def __init__(self, on_time, on_end):
         import mpv
 
+        self.awake = Awake("MAX", "plays a voice message")
+
         self.mpv = mpv.MPV(video=False, ytdl=False, load_unsafe_playlists=False,
                            input_default_bindings=False, input_vo_keyboard=False,
                            log_handler=lambda level, prefix, text: log_line(
@@ -1362,19 +1346,23 @@ class Libmpv:
         def _end(event):
             # A file stopped or replaced by the next one ends too (ABORTED).
             if getattr(getattr(event, "data", None), "reason", None) != 2:
-                GLib.idle_add(on_end)
+                GLib.idle_add(lambda: (self.awake.release(), on_end(), False)[2])
 
     def play(self, url, agent):
+        # b8k-compat's Player takes no user agent, which MAX's CDN wants.
         self.mpv["user-agent"] = agent
         self.mpv.play(url)
         self.mpv.pause = False
+        self.awake.hold()
 
     def toggle(self):
         self.mpv.pause = not self.mpv.pause
+        (self.awake.release if self.mpv.pause else self.awake.hold)()
         return not self.mpv.pause
 
     def stop(self):
         self.mpv.command("stop")
+        self.awake.release()
 
 
 def spawn_player(cmd):
@@ -1389,9 +1377,7 @@ def spawn_player(cmd):
 
 
 def open_in_browser(url):
-    """A link in the shell's browser, else the desktop's; False if neither."""
-    if b8k_ui and b8k_ui.open_url(url):
-        return True
+    """A link in the desktop's browser; False if there is none."""
     try:
         return Gtk.show_uri_on_window(None, url, Gdk.CURRENT_TIME)
     except GLib.Error:
@@ -1418,6 +1404,16 @@ def default_folder():
     down = GLib.get_user_special_dir(GLib.UserDirectory.DIRECTORY_DOWNLOAD) or \
         os.path.expanduser("~/Downloads")
     return os.path.join(down, "MAX")
+
+
+def fitted(path, size):
+    """A picture file within size × size, turned upright; b8k-compat's
+    pixbuf_of refuses one too large or of unknown size before decoding (a
+    sender chooses these files)."""
+    _fmt, w, h = GdkPixbuf.Pixbuf.get_file_info(path)
+    if w <= 0 or h <= 0:
+        raise ValueError("not a picture: %s" % path)
+    return photos.pixbuf_of(path, max(1, int(size * min(w, h) / max(w, h))))
 
 
 def fetch_photo(url, headers):
@@ -1480,7 +1476,7 @@ class Media:
                     with open(path + ".new", "wb") as out:
                         out.write(data)
                     os.replace(path + ".new", path)
-                pix = GdkPixbuf.Pixbuf.new_from_file_at_scale(path, size, size, True)
+                pix = fitted(path, size)
             except Exception as exc:
                 log_line("photo %s: %r" % (where(url), exc))
                 pix = None
@@ -2268,13 +2264,12 @@ class ChatView:
 # --- the window -------------------------------------------------------------
 class Max(Gtk.Application):
     def __init__(self, link=None, media=None):
-        super().__init__(application_id="b8k.Max")
+        super().__init__(application_id=APP_ID)
         self.win = None
-        self.buzz = buzzer()
         self.backend = Backend(self, link)  # link: PyMaxLink unless given (tests, demo)
         self.telemetry = Telemetry(self.backend)
         self.came_from = "chats"  # the page the settings go back to
-        self.buzz_new = load_setting("buzz")  # buzz on a new message
+        self.buzz_new = load_setting("buzz")  # a desktop notification of a new message
         # The list's rules and state; pins and notifications are kept here
         # only: MAX's own pinning and muting are not in PyMax.
         self.chatlist = ChatList(LIST, PREFS, contacts_only=load_setting("contacts_only"))
@@ -2288,16 +2283,20 @@ class Max(Gtk.Application):
         self.view = None  # the one on the chat page
         self.background = "--background" in sys.argv[1:]
 
+    def do_startup(self):
+        Gtk.Application.do_startup(self)
+        act = Gio.SimpleAction.new("open-chat", GLib.VariantType("x"))
+        act.connect("activate", lambda _a, v: (self.do_activate(), self.open(v.unpack())))
+        self.add_action(act)
+
     def do_activate(self):
         if self.win:
             self.win.present()
             return
         provider = Gtk.CssProvider()
-        provider.load_from_data((b8k_ui.HEADER_CSS if b8k_ui else b"") + CSS)
+        provider.load_from_data(CSS)  # the header and the buttons' size are the theme's
         Gtk.StyleContext.add_provider_for_screen(
             Gdk.Screen.get_default(), provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
-        Gtk.Button()  # the "pressed" signal exists once the class is set up
-        GObject.add_emission_hook(Gtk.Button, "pressed", self.buzz)
 
         self.win = Gtk.ApplicationWindow(application=self, title="MAX")
         self.win.set_default_size(1160, 800)
@@ -2559,9 +2558,9 @@ class Max(Gtk.Application):
                         False, False, 0)
         settings.pack_start(card, False, False, 0)
         settings.pack_start(self.setting(
-            "Вибрация при новом сообщении", self.buzz_new, self.on_buzz,
-            "Планшет вздрагивает, когда приходит сообщение. Касания кнопок "
-            "вибрируют как прежде."), False, False, 0)
+            "Оповещение о новом сообщении", self.buzz_new, self.on_buzz,
+            "Уведомление рабочего стола: на планшете оно вздрагивает или звучит, "
+            "как настроено в системе. Для отдельных чатов — в их меню."), False, False, 0)
         settings.pack_start(self.setting(
             "Отправлять телеметрию в MAX", self.telemetry.on, self.on_telemetry,
             "Приложение MAX само сообщает серверу, какие экраны открыты и как быстро "
@@ -2646,12 +2645,40 @@ class Max(Gtk.Application):
         if here and not msg["mine"] and self.win.is_active():
             self.backend.run(self.backend.read(msg["chat"], msg["id"]))
             self.chatlist.read(msg["chat"])
-        if not msg["mine"] and self.buzz_new and self.chatlist.loud(msg["chat"]):
-            self.buzz()
-            if not here:
-                GLib.timeout_add(180, lambda: self.buzz() and False)
+        if not msg["mine"] and self.buzz_new and self.chatlist.loud(msg["chat"]) and not (
+                here and self.win.is_active()):
+            self.notify(msg)
         self.fill_list()
         return False
+
+    # what the desktop is told: the count on the program's button, new messages
+    def badge(self, count):
+        """The unread count on the program's button, as a desktop (and the
+        b8k shell) reads it: Unity's LauncherEntry on the session bus. It
+        goes by itself when the program leaves the bus."""
+        bus = self.get_dbus_connection()
+        if bus is None:
+            return
+        try:
+            bus.emit_signal(None, "/io/github/trudenboy/Max", "com.canonical.Unity.LauncherEntry",
+                            "Update", GLib.Variant("(sa{sv})", (
+                                "application://%s.desktop" % APP_ID,
+                                {"count": GLib.Variant("x", count),
+                                 "count-visible": GLib.Variant("b", count > 0)})))
+        except GLib.Error:
+            pass
+
+    def notify(self, msg):
+        """A desktop notification of a new message (the desktop buzzes or
+        sounds for it, as set there); a tap opens the chat."""
+        s = self.chatlist.get(msg["chat"]) or {}
+        note = Gio.Notification.new(s.get("title") or "MAX")
+        body = msg["text"] or ("фото" if msg["photos"] else "вложение")
+        if s.get("type") in ("CHAT", "CHANNEL") and msg.get("who"):
+            body = "%s: %s" % (msg["who"], body)
+        note.set_body(body[:200])
+        note.set_default_action_and_target("app.open-chat", GLib.Variant("x", msg["chat"]))
+        self.send_notification("chat-%d" % msg["chat"], note)
 
     # the list
     def fill_list(self):
@@ -2682,7 +2709,7 @@ class Max(Gtk.Application):
         if self.open_chat is None and self.stack.get_visible_child_name() == "chats":
             self.sub.set_text("непрочитанных: %d" % counts["loud"] if counts["loud"] else "")
         # The button counts what may buzz: quiet chats (channels by default) are left out.
-        set_badge(counts["loud"])
+        self.badge(counts["loud"])
 
     def chat_row(self, entry):
         """One chat of a list (an entry of ChatList's): initials, name, last
@@ -2720,7 +2747,6 @@ class Max(Gtk.Application):
     def on_row(self, _list, row):
         if time.monotonic() - self.held < 1.0:
             return  # the release of a long press: the menu is open
-        self.buzz()
         self.open(row.chat_id)
 
     # tabs, pinning, notifications
@@ -2743,7 +2769,6 @@ class Max(Gtk.Application):
         if row is None:
             return
         self.held = time.monotonic()
-        self.buzz()
         s = row.summary
         pinned, muted = self.chatlist.is_pinned(s["id"]), self.chatlist.quiet(s["id"])
         self.popup_menu(row, [
@@ -2904,7 +2929,6 @@ class Max(Gtk.Application):
 
     # a photo full screen
     def show_photo(self, url):
-        self.buzz()
         self.viewer_pix = None
         self.viewer_image.set_from_icon_name("image-x-generic", Gtk.IconSize.DIALOG)
         self.stack.set_visible_child_name("photo")
@@ -2964,7 +2988,6 @@ class Max(Gtk.Application):
     def forward_to(self, target):
         if not self.forwarding:
             return
-        self.buzz()
         source, msg_id = self.forwarding
         title = (self.chatlist.get(target) or {}).get("title", "")
         self.end_forward()
@@ -3100,7 +3123,6 @@ class Max(Gtk.Application):
         s = self.chatlist.get(chat_id) if self.chatlist.listed(chat_id) else None
         if not s:
             return
-        self.buzz()
         quiet = self.chatlist.quiet(chat_id)
         leave = {"CHANNEL": "🚪 Отписаться от канала", "CHAT": "🚪 Выйти из группы"}.get(
             s["type"], "🗑 Удалить переписку")
@@ -3196,7 +3218,7 @@ class Max(Gtk.Application):
         switch = Gtk.Switch(active=active, valign=Gtk.Align.CENTER)
         if changed:
             switch.connect("notify::active",
-                           lambda sw, _p: (self.buzz(), changed(sw.get_active())))
+                           lambda sw, _p: changed(sw.get_active()))
         else:
             switch.set_sensitive(False)
             self.invites_switch = switch
@@ -3286,6 +3308,7 @@ class Max(Gtk.Application):
 
     def open(self, chat_id):
         start = time.monotonic()
+        self.withdraw_notification("chat-%d" % chat_id)
         s = self.about(chat_id)
         self.open_chat = chat_id
         self.confirm.hide()
@@ -3416,7 +3439,6 @@ class Max(Gtk.Application):
         m = view.message(msg_id) if view else None
         if m is None:
             return
-        self.buzz()
         yours = m.get("yours")
         pop = Gtk.Popover.new(bubble)
         row = Gtk.Box(spacing=4)
@@ -3559,4 +3581,7 @@ class Max(Gtk.Application):
 
 
 if __name__ == "__main__":
+    # Started by XDG autostart with no graphical session: nothing to do.
+    if not Gtk.init_check(sys.argv)[0]:
+        sys.exit(0)
     Max().run(None)

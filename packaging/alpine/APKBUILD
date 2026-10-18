@@ -1,0 +1,26 @@
+# Maintainer: Mikhail Nevskiy <rensomail@gmail.com>
+pkgname=b8k-max
+pkgver=1.16
+pkgrel=0
+pkgdesc="MAX: An unofficial client for the MAX messenger in large type (GTK 3)"
+url="https://github.com/trudenboy/b8k-max"
+arch="noarch"
+license="GPL-2.0-only"
+# PyMax's own needs, then voice messages (libmpv) and emoji.
+depends="python3 py3-gobject3 gtk+3.0 py3-b8k-compat
+	py3-aiohttp py3-pydantic py3-aiofiles py3-aiosqlite py3-msgpack
+	py3-python-socks py3-qrcode py3-websockets py3-zstandard
+	py3-mpv mpv-libs font-noto-emoji"
+_whl=maxapi_python-2.4.1-py3-none-any.whl
+source="$pkgname-$pkgver.tar.gz::https://github.com/trudenboy/b8k-max/archive/v$pkgver.tar.gz
+	$_whl::https://files.pythonhosted.org/packages/py3/m/maxapi-python/$_whl"
+noextract="$_whl"
+
+options="!check"
+
+package() {
+	B8K_CACHE="$srcdir" sh ./install.sh "$pkgdir" /usr
+}
+
+# `abuild checksum` fills this in for a release.
+sha512sums="SKIP"

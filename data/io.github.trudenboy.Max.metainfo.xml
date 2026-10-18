@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.trudenboy.Max</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-2.0-only</project_license>
+  <name>MAX client</name>
+  <name xml:lang="ru">MAX</name>
+  <summary>An unofficial client for the MAX messenger in large type</summary>
+  <summary xml:lang="ru">Неофициальный клиент для мессенджера MAX крупным шрифтом</summary>
+  <description>
+    <p xml:lang="ru">Переписка в MAX крупно и без браузера: чаты и каналы, фото, голосовые, видео и файлы, реакции, пересылка, поиск людей по номеру и каналов по ссылке. Это неофициальный клиент: MAX может ограничить доступ к аккаунту, вошедшему через него.</p>
+    <p>Large, touch-first and simple, made for an older person's tablet; at home on any GTK desktop.</p>
+  </description>
+  <launchable type="desktop-id">io.github.trudenboy.Max.desktop</launchable>
+  <url type="homepage">https://github.com/trudenboy/b8k-max</url>
+  <developer id="io.github.trudenboy"><name>Mikhail Nevskiy</name></developer>
+  <content_rating type="oars-1.1">
+    <content_attribute id="social-chat">intense</content_attribute>
+  </content_rating>
+  <requires><control>touch</control></requires>
+  <releases>
+    <release version="1.16" date="2026-10-18"/>
+  </releases>
+</component>

@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Name=MAX client
+Name[ru]=MAX
+Comment=An unofficial client for the MAX messenger in large type
+Comment[ru]=Неофициальный клиент для мессенджера MAX крупным шрифтом
+Exec=b8k-max
+Icon=io.github.trudenboy.Max
+Terminal=false
+Categories=GTK;Network;InstantMessaging;Chat;
+Keywords=max;messenger;chat;мессенджер;чат;макс;
+StartupNotify=true
+X-B8K-Home=true
+X-B8K-Replaces=max

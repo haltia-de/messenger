@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=MAX client
+Exec=b8k-max --background
+Icon=io.github.trudenboy.Max
+NoDisplay=true
+X-GNOME-Autostart-enabled=true
+X-B8K-Autostart=true

@@ -122,8 +122,11 @@ bm.save_json(bm.KNOWN, [MAMA, PETYA])  # not the first run: the stranger is not 
 hands = FakeHands()
 app = bm.Max(link=fake, media=bm.Media(hands.spawn, hands.open_uri, hands.fetch, hands.player,
                                        hands.download))
-buzzes = []
-app.buzz = lambda *a: buzzes.append(1) or True
+buzzes = []  # new messages the desktop was told of (notifications)
+app.notify = lambda msg: buzzes.append(msg)
+badges = []  # the counts sent as Unity's LauncherEntry
+_badge = app.badge
+app.badge = lambda n: (badges.append(n), _badge(n))
 app.register(None)
 app.do_activate()
 wait(lambda: app.chatlist.chats and app.backend.me, what="login")
@@ -142,7 +145,7 @@ assert "официальном приложении" in app.invites_card.get_chi
 shot("list.png")
 ok("list")
 
-# --- incoming: buzz from a contact, nothing from a stranger or a channel --------------------
+# --- incoming: a notification from a contact, none from a stranger or a channel ---------------
 row_before = app.rows[mama]
 buzzes.clear()
 fake.incoming(spam, "Купите", SPAM)
@@ -152,7 +155,9 @@ fake.incoming(news, "Срочно", 50)
 spin(0.3)
 assert not buzzes
 fake.incoming(mama, "Позвони вечером", MAMA)
-wait(lambda: buzzes, what="buzz")
+wait(lambda: buzzes, what="notification")
+assert buzzes[-1]["text"] == "Позвони вечером" and buzzes[-1]["chat"] == mama
+assert badges and badges[-1] == app.chatlist.counts()["loud"] > 0
 assert rows()[0] == mama and app.rows[mama] is row_before  # the row is kept, redrawn
 app.on_contacts_only(False)
 spin(0.1)
