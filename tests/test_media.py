@@ -89,9 +89,10 @@ assert media.toggle() is False and media.toggle() is True
 media.stop()
 assert first.did[-1] == ("stop",)
 times = []
-media.on_time = times.append
+media.on_time = lambda sec, total: times.append((sec, total))
 first.on_time(2.0)
-assert times == [2.0]
+first.on_time(3.0, 200.0)  # a file's length comes from the player
+assert times == [(2.0, None), (3.0, 200.0)]
 
 
 def no_libmpv(on_time, on_end):

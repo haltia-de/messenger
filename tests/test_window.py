@@ -77,8 +77,20 @@ def chips(v, msg_id):
     return [b for b in walk(hold) if isinstance(b, Gtk.Button) and b.get_style_context().has_class("react")]
 
 
+def adj_of(v):
+    """The chat's scrolling, as its ScrolledWindow has it."""
+    return [w for w in walk(v.widget) if isinstance(w, Gtk.ScrolledWindow)][0].get_vadjustment()
+
+
+def down_of(v):
+    """The chat's down button, if shown."""
+    found = [b for b in walk(v.widget) if isinstance(b, Gtk.Button)
+             and b.get_style_context().has_class("down") and b.get_visible()]
+    return found[0] if found else None
+
+
 def at_bottom(v):
-    adj = v.widget.get_vadjustment()
+    adj = adj_of(v)
     return adj.get_value() + adj.get_page_size() >= adj.get_upper() - 60
 
 
@@ -190,6 +202,39 @@ wait(lambda: app.title.get_text() == "Мамочка", what="rename")
 assert app.chatlist.get(mama)["title"] == "Мамочка"
 ok("reactions, rename")
 
+# --- emoji into the message ---------------------------------------------------------------------
+app.entry.set_text("Привет ")
+app.entry.set_position(-1)
+app.smile.set_active(True)
+spin(0.1)
+assert app.emoji_pop is not None and not app.emoji_pop.get_modal()  # the entry keeps the focus
+panel = [b for b in walk(app.emoji_pop) if isinstance(b, Gtk.Button)]
+names = [w.get_text() for w in walk(app.emoji_pop) if isinstance(w, Gtk.Label)
+         and w.get_style_context().has_class("emoji-group")]
+assert names == ["Лица", "Жесты", "Сердца", "Разное"]  # nothing recent yet
+smiley = [b for b in panel if b.get_label() == "😀"][0]
+heart = [b for b in panel if b.get_label() == "❤️"][0]
+smiley.clicked()
+heart.clicked()
+assert app.entry.get_text() == "Привет 😀❤️" and app.emoji_pop is not None  # stays open for more
+app.entry.set_position(0)
+smiley.clicked()
+assert app.entry.get_text() == "😀Привет 😀❤️"
+assert bm.load_json(bm.EMOJI_RECENT, []) == ["😀", "❤️"]
+shot("emoji.png")
+app.smile.set_active(False)
+spin(0.1)
+assert app.emoji_pop is None
+app.smile.set_active(True)
+spin(0.1)
+assert [w.get_text() for w in walk(app.emoji_pop) if isinstance(w, Gtk.Label)
+        and w.get_style_context().has_class("emoji-group")][0] == "Недавние"
+app.send()
+wait(lambda: app.entry.get_text() == "", what="sent with emoji")
+assert fake.asked("send")[-1] == {"chat_id": mama, "text": "😀Привет 😀❤️"}
+assert not app.smile.get_active() and app.emoji_pop is None
+ok("emoji")
+
 # --- search: a person by phone, then a channel by link -----------------------------------------
 app.show_list()
 app.show_find()
@@ -240,7 +285,7 @@ v = app.view
 assert at_bottom(v)
 spinner_seen = False
 for _ in range(15):
-    v.widget.get_vadjustment().set_value(0)
+    adj_of(v).set_value(0)
     for _ in range(25):  # a page comes and is built once scrolling rests
         spin(0.1)
         spinner_seen = spinner_seen or any(isinstance(w, Gtk.Spinner) and w.get_mapped()
@@ -263,7 +308,10 @@ ok("pages, spinner, cut")
 # --- the place: kept when coming back; another's message stays put, the own goes down ---------
 app.open(big)
 spin(0.5)
-adj = v.widget.get_vadjustment()
+adj = adj_of(v)
+assert down_of(v)  # back where it was left, up among older ones
+down_of(v).clicked()
+wait(lambda: at_bottom(v) and down_of(v) is None, what="down button gone at the bottom")
 adj.set_value(adj.get_upper() / 3)
 spin(0.2)
 place = adj.get_value()
@@ -271,9 +319,16 @@ app.show_list()
 app.open(big)
 spin(0.5)
 assert abs(adj.get_value() - place) < 5, (adj.get_value(), place)
+assert down_of(v) and down_of(v).get_label() == "↓"
 fake.incoming(big, "чужое", PETYA)
 spin(0.5)
 assert abs(adj.get_value() - place) < 5
+assert down_of(v).get_label() == "↓ 1"  # one came while reading up there
+shot("down.png")
+down_of(v).clicked()
+wait(lambda: at_bottom(v) and down_of(v) is None, what="down to the newest")
+adj.set_value(adj.get_upper() / 3)
+spin(0.3)
 app.entry.set_text("своё")
 app.send()
 wait(lambda: at_bottom(v), what="own message at the bottom")
@@ -306,6 +361,27 @@ assert play.get_label() == "▶"
 doc.clicked()
 wait(lambda: hands.opened, what="file")
 assert hands.opened == ["https://fd.oneme.ru/f.pdf"]
+# an audio file plays in the bubble too: its link is asked of MAX first
+song = fake.incoming(mama, "", MAMA, attaches=[file(7, "Песня про лето.mp3", 3_200_000)])
+fake.media[(mama, song.id, "file")] = "https://fd.oneme.ru/song.mp3"
+wait(lambda: any(w.msg_id == song.id for w in holds_of(app.view)), what="audio file message")
+shold = [w for w in holds_of(app.view) if w.msg_id == song.id][0]
+texts = [w.get_text() for w in walk(shold) if isinstance(w, Gtk.Label)]
+assert "🎵  Песня про лето.mp3" in texts and "3.1 МБ" in texts, texts
+splay = buttons(shold)[0]
+assert splay.get_label() == "▶" and not any(b.get_label().startswith("📄") for b in buttons(shold))
+splay.clicked()
+wait(lambda: hands.sound.did[-1][:2] == ("play", "https://fd.oneme.ru/song.mp3"), what="audio file plays")
+assert fake.asked("media_url")[-1] == {"chat_id": mama, "msg_id": song.id, "kind": "file"}
+assert splay.get_label() == "⏸"
+hands.sound.on_time(5.0, 200.0)
+spin(0.1)
+texts = [w.get_text() for w in walk(shold) if isinstance(w, Gtk.Label)]
+bar = [w for w in walk(shold) if isinstance(w, Gtk.ProgressBar)][0]
+assert "0:05" in texts and 0 < bar.get_fraction() < 0.1
+shot("audio-file.png")
+splay.clicked()  # pause: no new link asked
+assert splay.get_label() == "▶" and hands.sound.did[-1] == ("toggle",)
 play.clicked()
 app.views.pop(mama).destroy()  # the bubble goes (the chat cut or deleted): so does the sound
 app.view = None

@@ -139,12 +139,22 @@ KNOWN = os.path.join(DATA, "known.json")  # people whose messages are shown (con
 ALIASES = os.path.join(DATA, "names.json")  # user id -> the name given here
 PREFS = os.path.join(DATA, "chats.json")  # pinned chats, notifications switched per chat
 LIST = os.path.join(CHATS, "list.json")  # the last chat list, shown at once on the next start
+EMOJI_RECENT = os.path.join(DATA, "emoji.json")  # the emoji used last, first in the panel
 SENT = os.path.join(DATA, "invites.json")  # account id -> chat-invites privacy set from here
 # MAX's screen numbers in its telemetry (pymax.telemetry.navigation).
 SCREEN_BACKGROUND, SCREEN_CHATS, SCREEN_SEARCH, SCREEN_CHAT, SCREEN_SETTINGS = 1, 150, 151, 350, 450
 MAIN_TAB = {"source_type": 5, "source_id": 1, "tab_config": 2}  # going to the chat list
 FLUSH_SEC = 3  # events go out in small batches, as the app sends them
 REACTIONS = ("👍", "❤️", "😂", "😮", "😢", "🔥")  # offered on a long press of a message
+# The emoji panel of the message entry, by group; the recent ones come first.
+EMOJI = (
+    ("Лица", "😀 😃 😄 😁 😆 😅 😂 🤣 😊 😇 🙂 😉 😌 😍 🥰 😘 😗 😋 😛 😜 🤪 🤗 🤔 🤨 "
+             "😐 😑 😶 🙄 😏 😮 😯 😲 😳 🥺 😢 😭 😤 😠 😡 🤯 😱 😴 🤒 🤕 😎 🥳"),
+    ("Жесты", "👍 👎 👌 ✌️ 🤞 🤝 👏 🙌 🙏 💪 👋 🤙 ✋ 👀"),
+    ("Сердца", "❤️ 🧡 💛 💚 💙 💜 🖤 🤍 💔 💕 💖 💗"),
+    ("Разное", "🔥 ⭐ 🌟 ✨ 🎉 🎁 🎂 🌹 🌸 💐 ☀️ 🌧️ ❄️ ☕ 🍰 🍎 🏠 🚗 ⚽ 🎵 📷 📞 ✅ ❌ ❓ ❗ 💯"),
+)
+RECENT = 16  # recent emoji kept
 PLAYER = "/usr/local/bin/b8k-vplay"  # the shell's video player; mpv if missing
 PLAYER_LOG = os.path.join(PHOTOS, "player.log")  # what the players said, for when one fails
 MONTHS = "янв фев мар апр мая июн июл авг сен окт ноя дек".split()
@@ -265,6 +275,18 @@ button.emoji {
   font-size: 44px;
 }
 button.emoji.yours { background-color: #c4dcf7; }
+button.smile {
+  background-image: none;
+  background-color: #f2f2f0;
+  border: 1px solid #c0bfbc;
+  box-shadow: none;
+  border-radius: 16px;
+  min-width: 72px;
+  min-height: 72px;
+  font-size: 34px;
+}
+button.smile:checked { background-color: #c4dcf7; }
+label.emoji-group { font-size: 18px; color: #77767b; }
 .tabs { background-color: #dcdcda; padding: 8px 12px; }
 .tabs radiobutton, .tabs button {
   background-image: none;
@@ -300,6 +322,18 @@ button.media {
   font-size: 22px;
 }
 button.media label { color: #ffffff; }
+button.down {
+  background-image: none;
+  background-color: #3584e4;
+  border: none;
+  border-radius: 36px;
+  min-width: 72px;
+  min-height: 72px;
+  padding: 0 12px;
+  font-size: 30px;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.35);
+}
+button.down label { color: #ffffff; }
 button.file {
   background-image: none;
   background-color: #e6e6e4;
@@ -415,11 +449,20 @@ def user_name(user):
     return "Пользователь %s" % getattr(user, "id", "")
 
 
+# Files played in the bubble like voice messages, by their name.
+AUDIO_FILES = (".mp3", ".m4a", ".aac", ".ogg", ".oga", ".opus", ".wav", ".flac")
+
+
 def media_of(a):
-    """What can be played or opened of an attachment, or None."""
+    """What can be played or opened of an attachment, or None. An audio file
+    is played in the bubble too: its link (url None here) is asked of MAX
+    when played, as for any file."""
     t = kind(getattr(a, "type", ""))
     if t == "AUDIO" and getattr(a, "url", None):
         return {"kind": "audio", "url": a.url, "duration": a.duration or 0}
+    if t == "FILE" and (a.name or "").lower().endswith(AUDIO_FILES):
+        return {"kind": "audio", "url": None, "file": a.file_id, "name": a.name,
+                "size": a.size, "duration": 0}
     if t == "VIDEO":
         return {"kind": "video", "id": a.video_id, "thumb": a.thumbnail,
                 "duration": a.duration or 0}
@@ -1252,8 +1295,10 @@ class Libmpv:
                            log_handler=lambda level, prefix, text: log_line(
                                "voice %s %s: %s" % (level, prefix, text.strip())),
                            loglevel="warn")
+        self.duration = None  # of what plays, once libmpv knows it (files carry none)
+        self.mpv.observe_property("duration", lambda _n, v: setattr(self, "duration", v))
         self.mpv.observe_property(
-            "time-pos", lambda _n, v: v is not None and GLib.idle_add(on_time, v))
+            "time-pos", lambda _n, v: v is not None and GLib.idle_add(on_time, v, self.duration))
 
         @self.mpv.event_callback("end-file")
         def _end(event):
@@ -1309,7 +1354,8 @@ class Media:
     PyMax presents (agent, set at login) and no Referer or Origin: MAX's
     video CDN answers 400 to those. Photos are cached on disk by URL and
     pruned when unshown for PHOTO_DAYS; voice messages play through libmpv,
-    one at a time (on_time(sec), on_end() come back on the GTK side); a
+    one at a time (on_time(sec, total or None), on_end() come back on the
+    GTK side), audio files too; a
     video opens full screen in b8k-vplay (mpv elsewhere) without
     youtube-dl or playlists; a file in the browser. What fails, and what
     the players say, goes to PLAYER_LOG (600, host and path only).
@@ -1384,7 +1430,7 @@ class Media:
             return False
         if self._sound is None and not self._no_sound:
             try:
-                self._sound = self.player(lambda sec: self.on_time(sec),
+                self._sound = self.player(lambda sec, total=None: self.on_time(sec, total),
                                           lambda: self.on_end())
             except Exception as exc:
                 log_line("voice: no libmpv (%r)" % exc)
@@ -1653,12 +1699,25 @@ class ChatView:
         viewport = Gtk.Viewport()
         viewport.set_shadow_type(Gtk.ShadowType.NONE)
         viewport.add(column)
-        self.widget = Gtk.ScrolledWindow()
-        self.widget.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
-        self.widget.set_kinetic_scrolling(True)
-        self.widget.add(viewport)
+        self.scroll = Gtk.ScrolledWindow()
+        self.scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        self.scroll.set_kinetic_scrolling(True)
+        self.scroll.add(viewport)
+        # Down to the newest message, while the reader is up among older
+        # ones; it counts the messages come meanwhile.
+        self.unseen = 0
+        self.down = Gtk.Button(label="↓", halign=Gtk.Align.END, valign=Gtk.Align.END)
+        self.down.get_style_context().add_class("down")
+        self.down.set_margin_end(24)
+        self.down.set_margin_bottom(24)
+        self.down.set_can_focus(False)
+        self.down.set_no_show_all(True)
+        self.down.connect("clicked", lambda _b: self._to_bottom())
+        self.widget = Gtk.Overlay()
+        self.widget.add(self.scroll)
+        self.widget.add_overlay(self.down)
         self.widget.show_all()
-        adj = self.widget.get_vadjustment()
+        adj = self.scroll.get_vadjustment()
         adj.connect("changed", self._keep_place)
         adj.connect("value-changed", self._moved)
 
@@ -1711,6 +1770,9 @@ class ChatView:
             self._append(msg)
         if msg["mine"]:
             self._to_bottom()
+        elif not self.at_bottom:
+            self.unseen += 1
+            self._show_down()
 
     def reacted(self, msg_id, reactions, yours=...):
         """New reactions of a message (yours: ... when not known to change)."""
@@ -1840,13 +1902,22 @@ class ChatView:
             play.set_can_focus(False)
             bar = Gtk.ProgressBar(valign=Gtk.Align.CENTER)
             bar.set_size_request(260, -1)
-            length = label(mmss(secs(item["duration"])), "when")
+            length = label(mmss(secs(item["duration"])) if item["duration"] else
+                           size_text(item.get("size") or 0), "when")
             controls = {"button": play, "bar": bar, "length": length}
             play.connect("clicked", lambda _b: self.on_media(m, item, controls))
             box.pack_start(play, False, False, 0)
             box.pack_start(bar, True, True, 0)
             box.pack_start(length, False, False, 0)
-            return box
+            if not item.get("name"):
+                return box
+            named = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+            name = label("🎵  " + item["name"], "chat-last", ellipsize=True)
+            name.set_ellipsize(Pango.EllipsizeMode.MIDDLE)
+            name.set_max_width_chars(32)
+            named.pack_start(name, False, False, 0)
+            named.pack_start(box, False, False, 0)
+            return named
         if item["kind"] == "video":
             box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
             if item["thumb"]:
@@ -1916,7 +1987,7 @@ class ChatView:
         else:
             chunk = self.pending_old[-STEP:]
             del self.pending_old[-STEP:]
-            adj = self.widget.get_vadjustment()
+            adj = self.scroll.get_vadjustment()
             if not self.at_bottom:  # keep the place being read
                 self.anchor = adj.get_upper() - adj.get_value()
             self._prepend(chunk)
@@ -1962,7 +2033,7 @@ class ChatView:
     def _show_busy(self):
         """The spinner, while an older page comes or waits to be built and
         the reader is up at the top for it."""
-        adj = self.widget.get_vadjustment()
+        adj = self.scroll.get_vadjustment()
         near_top = adj.get_value() < adj.get_page_size() * 0.5
         on = self.active and near_top and (self.loading or bool(self.pending_old))
         if on != self.busy.get_visible():
@@ -1983,6 +2054,7 @@ class ChatView:
         if not self.moving:
             self.scrolled_at = time.monotonic()
         self.at_bottom = adj.get_value() + adj.get_page_size() >= adj.get_upper() - 60
+        self._show_down()
         if self.active and adj.get_value() < adj.get_page_size() * 0.5:
             self._load_older()
         self._show_busy()
@@ -1990,10 +2062,18 @@ class ChatView:
 
     def _to_bottom(self):
         self.at_bottom = True
-        adj = self.widget.get_vadjustment()
+        adj = self.scroll.get_vadjustment()
         self.moving = True
         adj.set_value(adj.get_upper() - adj.get_page_size())
         self.moving = False
+        self._show_down()
+
+    def _show_down(self):
+        """The down button: only away from the newest message."""
+        if self.at_bottom:
+            self.unseen = 0
+        self.down.set_label("↓ %d" % self.unseen if self.unseen else "↓")
+        self.down.set_visible(not self.at_bottom and bool(self.shown))
 
     def _drop_anchor(self):
         self.anchor = None
@@ -2003,7 +2083,7 @@ class ChatView:
         """Fetch the photos within a screen of what is shown."""
         if not self.photos:
             return False
-        adj = self.widget.get_vadjustment()
+        adj = self.scroll.get_vadjustment()
         top, page = adj.get_value(), adj.get_page_size()
         keep = []
         for img, url in self.photos:
@@ -2240,6 +2320,15 @@ class Max(Gtk.Application):
         self.sendb.set_can_focus(False)
         self.sendb.set_focus_on_click(False)
         self.sendb.connect("clicked", lambda _b: self.send())
+        # Emoji into the message: a panel that leaves the focus in the entry,
+        # so the on-screen keyboard stays, and stays open for several.
+        self.smile = Gtk.ToggleButton(label="😊")
+        self.smile.get_style_context().add_class("smile")
+        self.smile.set_can_focus(False)
+        self.smile.set_focus_on_click(False)
+        self.smile.connect("toggled", lambda b: self.emoji_panel(b.get_active()))
+        self.emoji_pop = None
+        self.inputbar.pack_start(self.smile, False, False, 0)
         self.inputbar.pack_start(self.entry, True, True, 0)
         self.inputbar.pack_start(self.sendb, False, False, 0)
         chat.pack_start(self.inputbar, False, False, 0)
@@ -2781,6 +2870,7 @@ class Max(Gtk.Application):
         self.trash.set_visible(page == "chat" and self.chatlist.listed(self.open_chat))
         self.pencil.set_visible(page == "chat" and self.can_rename(self.open_chat))
         if page != "chat":
+            self.smile.set_active(False)
             self.confirm.hide()
             self.naming.hide()
             if self.view is not None:
@@ -2877,41 +2967,59 @@ class Max(Gtk.Application):
     def media_tapped(self, chat_id, m, item, controls):
         """A media control of a chat tapped (ChatView's on_media)."""
         if item["kind"] == "audio":
-            self.play_sound(item, controls["button"], controls["bar"], controls["length"])
+            play = controls["button"]
+            if item["url"] or (self.playing and self.playing[1] is play):
+                self.play_sound(item, play, controls["bar"], controls["length"], item["url"])
+                return
+            play.set_sensitive(False)  # an audio file: its link first
+
+            def done(url, err):
+                play.set_sensitive(True)
+                if err or not url:
+                    log_line("audio file no link: %r" % (err,))
+                    self.sub.set_text("не удалось открыть")
+                    return
+                self.play_sound(item, play, controls["bar"], controls["length"], url)
+
+            self.backend.run(self.backend.media_url(
+                chat_id, m["id"], {"kind": "file", "id": item["file"]}), done)
         else:
             self.open_media(chat_id, m["id"], item, controls["button"])
 
-    def play_sound(self, item, play, bar, length):
+    def play_sound(self, item, play, bar, length, url):
         """What plays and where its button is are the window's; the playing
         is Media's."""
         if self.playing and self.playing[1] is play:
             play.set_label("⏸" if self.media.toggle() else "▶")
             return
         self.sound_end()
-        if not self.media.voice(item["url"]):
+        if not self.media.voice(url):
             play.set_label("✕")  # no libmpv here, or a link not to be opened
             return
-        self.playing = (bar, play, length, item["duration"])
+        self.playing = [bar, play, length, secs(item["duration"]), item]
         # Its bubble gone (the chat cut or deleted): the sound stops too.
         play.connect("destroy", lambda b: self.playing and self.playing[1] is b and (
             self.media.stop(), setattr(self, "playing", None)))
         play.set_label("⏸")
 
-    def sound_time(self, pos):
+    def sound_time(self, pos, total=None):
+        """How far it played; the length is the message's, else the player's
+        (an audio file carries none)."""
         if self.playing:
-            bar, _play, length, total = self.playing
-            total = secs(total)
-            if total:
-                bar.set_fraction(min(1.0, pos / total))
+            bar, _play, length, known, _item = self.playing
+            if not known and total:
+                self.playing[3] = known = total
+            if known:
+                bar.set_fraction(min(1.0, pos / known))
             length.set_text(mmss(pos))
         return False
 
     def sound_end(self):
         if self.playing:
-            bar, play, length, total = self.playing
+            bar, play, length, known, item = self.playing
             bar.set_fraction(0)
             play.set_label("▶")
-            length.set_text(mmss(secs(total)))
+            length.set_text(mmss(known) if known else size_text(item.get("size") or 0))
             self.playing = None
         return False
 
@@ -2993,6 +3101,58 @@ class Max(Gtk.Application):
             view.reacted(msg_id, reactions, yours)
         return False
 
+    # emoji in the message
+    def emoji_panel(self, show):
+        if not show:
+            if self.emoji_pop:
+                self.emoji_pop.popdown()
+            return
+        pop = Gtk.Popover.new(self.smile)
+        pop.set_modal(False)  # the entry keeps the focus, the keyboard stays
+        pop.set_position(Gtk.PositionType.TOP)
+        column = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        for margin in ("start", "end", "top", "bottom"):
+            getattr(column, "set_margin_" + margin)(8)
+        recent = [e for e in load_json(EMOJI_RECENT, []) if isinstance(e, str)]
+        groups = ([("Недавние", recent)] if recent else []) + \
+            [(name, line.split()) for name, line in EMOJI]
+        for name, emoji in groups:
+            column.pack_start(label(name, "emoji-group"), False, False, 4)
+            grid = Gtk.FlowBox(selection_mode=Gtk.SelectionMode.NONE, homogeneous=True,
+                               max_children_per_line=10, min_children_per_line=6)
+            grid.set_can_focus(False)
+            for e in emoji:
+                b = Gtk.Button(label=e)
+                b.get_style_context().add_class("emoji")
+                b.set_can_focus(False)
+                b.set_focus_on_click(False)
+                b.connect("clicked", lambda _b, e=e: self.put_emoji(e))
+                grid.add(b)
+            column.pack_start(grid, False, False, 0)
+        scroll = Gtk.ScrolledWindow()
+        scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        scroll.set_kinetic_scrolling(True)
+        scroll.set_size_request(760, 360)
+        scroll.add(column)
+        pop.add(scroll)
+        pop.connect("closed", self.emoji_closed)
+        scroll.show_all()
+        self.emoji_pop = pop
+        pop.popup()
+
+    def emoji_closed(self, pop):
+        if self.emoji_pop is pop:
+            self.emoji_pop = None
+            self.smile.set_active(False)
+        GLib.idle_add(pop.destroy)
+
+    def put_emoji(self, emoji):
+        """An emoji where the cursor is; it goes first among the recent ones."""
+        pos = self.entry.insert_text(emoji, self.entry.get_position())
+        self.entry.set_position(pos)
+        recent = [emoji] + [e for e in load_json(EMOJI_RECENT, []) if e != emoji]
+        save_json(EMOJI_RECENT, recent[:RECENT])
+
     def send(self):
         text = self.entry.get_text().strip()
         chat_id = self.open_chat
@@ -3007,6 +3167,7 @@ class Max(Gtk.Application):
                 return
             self.entry.set_text("")
             self.sub.set_text("")
+            self.smile.set_active(False)
             view = self.views.get(chat_id)
             if msg and view:
                 view.add(msg)

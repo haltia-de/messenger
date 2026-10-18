@@ -100,7 +100,8 @@ it from the checkout still needs PyMax installed there.
   `entries(Max.tab)`. A long press on the list (`row_menu`, one gesture on the ListBox,
   `get_row_at_y`) opens the pin/notification menu; `held` stops the release from opening the chat.
 - **Chat view** (`ChatView`, see `CONTEXT.md`). One chat on screen is one deep module: its own
-  ScrolledWindow (`.widget`), the bubbles, day labels, reactions and media controls, the build
+  scroll area (`.widget`, an Overlay over the ScrolledWindow with the round «↓» button that shows
+  away from the newest message and counts those come meanwhile), the bubbles, day labels, reactions and media controls, the build
   queue (`FIRST` at once, then `STEP` per idle, nothing above while the reader scrolled within
   `SETTLE`), older pages (`fetch_older` as the reader nears the top, `PREFETCH` in the background,
   a spinner while one comes), the place (`anchor`; the first `enter()` goes to the bottom, later
@@ -125,7 +126,10 @@ it from the checkout still needs PyMax installed there.
   gives a file to the browser (`file(url)`). What fails goes to `~/.cache/b8k-max/player.log`
   (600, host and path only; the players' own output too). Its hands come in at creation —
   `spawn`, `open_uri`, `fetch`, `player` — real by default, `tests/fake_hands.py` in tests.
-  `media_of` turns AUDIO/VIDEO/FILE attachments into `media` items; the link for a video or a
+  `media_of` turns AUDIO/VIDEO/FILE attachments into `media` items; a FILE named like audio
+  (`AUDIO_FILES`: .mp3, .m4a, .ogg…) becomes an `audio` item with `url` None and its `file` id:
+  `Max.media_tapped` asks its link of MAX on ▶, then plays it like a voice message (its length
+  comes from libmpv: `on_time(sec, total)`); the link for a video or a
   file comes from `Backend.media_url` (never an `external` one). This is a security boundary:
   links come inside messages; keep the host list tight. What plays and where its button is stays
   with `Max` (`playing`); a voice message stops when its button is destroyed.
@@ -134,6 +138,10 @@ it from the checkout still needs PyMax installed there.
   `Backend.react` uses `messages.add_reaction`/`remove_reaction`; when MAX answers without counts
   the window counts itself. `on_reaction_update` events carry no own reaction, so `reacted(..., ...)`
   (Ellipsis) leaves `yours` alone. Emoji need `font-noto-emoji` (in the tablet image).
+- **Emoji in messages.** The «😊» toggle left of the entry opens a non-modal popover (`EMOJI`
+  groups, the recent ones first from `EMOJI_RECENT`, `emoji.json`); a tap inserts at the cursor
+  (`put_emoji`). Non-modal on purpose: the entry keeps the focus, so the on-screen keyboard
+  stays; every button in it is `can_focus=False`. It closes on send and when the chat is left.
 - **Renaming** a dialog's person is local (`ALIASES`, `names.json`): PyMax's contact actions are only
   ADD/REMOVE. `Backend.name()` prefers the alias; don't invent a server request for it.
 - **Photo fetch is a security boundary.** Photo URLs arrive inside messages (sender-controlled), so
