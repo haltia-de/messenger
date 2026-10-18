@@ -171,3 +171,40 @@ assert [s["title"] for s in renamed] == ["Аня"] and bm.load_json(bm.ALIASES, 
 back(B.rename(ANNA, ""))
 assert B.title(fake.rooms[anna]) == "Анна Петрова"
 ok("search, join, remove, rename, invites")
+
+# --- the real link up to PyMax's start, and the settings of the login answer ---------------
+import pymax  # noqa: E402
+from pymax.api.auth import service as auth  # noqa: E402
+from pymax.types.domain.login import LoginResponse  # noqa: E402
+
+
+class Started(Exception):
+    pass
+
+
+async def stop_at_start(_self):
+    raise Started  # all set up before PyMax's runtime exists
+
+
+real_start = pymax.WebClient.start
+pymax.WebClient.start = stop_at_start
+link = bm.PyMaxLink(bm.DATA)
+try:
+    run(link.run(UI()))
+    raise AssertionError("start() not reached")
+except Started:
+    pass
+finally:
+    pymax.WebClient.start = real_start
+assert link.invites() is None  # nothing said yet
+
+
+class Answer:
+    payload = {"config": {"hash": "h", "user": {"CHATS_INVITE": "ALL", "SAFE_MODE": True}}}
+
+
+assert isinstance(auth.require_payload_model(Answer(), LoginResponse), LoginResponse)
+assert link.invites() == "ALL"
+link._watch_login()  # a second run does not wrap twice
+assert auth.require_payload_model.b8k_real.__module__ == "pymax.api.response"
+ok("the link's start and login settings")

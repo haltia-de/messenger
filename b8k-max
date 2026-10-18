@@ -540,21 +540,22 @@ class PyMaxLink:
     def _watch_login(self):
         """Keep the account's own settings from each login answer: PyMax
         reads only the hash of its "config", the settings are in its
-        "user" part (CHATS_INVITE and the like)."""
-        from pymax.protocol import Opcode
+        "user" part (CHATS_INVITE and the like). The answer is caught where
+        PyMax's auth turns it into a LoginResponse, as PyMax's runtime (and
+        its invoke) exists only once start() runs."""
+        from pymax.api.auth import service as auth
 
-        app = self.client._app
-        invoke = app.invoke
+        real = getattr(auth.require_payload_model, "b8k_real", auth.require_payload_model)
 
-        async def watched(opcode, *args, **kwargs):
-            response = await invoke(opcode, *args, **kwargs)
-            if opcode == Opcode.LOGIN:
+        def keep(response, model, *args, **kwargs):
+            if getattr(model, "__name__", "") == "LoginResponse":
                 config = (getattr(response, "payload", None) or {}).get("config") or {}
                 if isinstance(config.get("user"), dict):
                     self.settings = config["user"]
-            return response
+            return real(response, model, *args, **kwargs)
 
-        app.invoke = watched
+        keep.b8k_real = real
+        auth.require_payload_model = keep
 
     def invites(self):
         """Who may add the account to chats, as MAX said at the last login:
