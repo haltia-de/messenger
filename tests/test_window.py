@@ -135,6 +135,11 @@ bm.save_json(bm.KNOWN, [MAMA, PETYA])  # not the first run: the stranger is not 
 hands = FakeHands()
 app = bm.Max(link=fake, media=bm.Media(hands.spawn, hands.open_uri, hands.fetch, hands.player,
                                        hands.download))
+def no_dialog(*_a):  # a real save dialog would wait for a person: never in a test
+    raise AssertionError("an unexpected save dialog")
+
+
+app.ask_save_path = no_dialog
 buzzes = []  # new messages the desktop was told of (notifications)
 _notify = app.notify
 app.notify = lambda msg: buzzes.append(msg)
@@ -521,7 +526,11 @@ assert bm.load_text("folder", "") == folder and app.folder_label.get_text() == f
 vsave, video_save, file_save = saves_of(hold)
 for b in (vsave, video_save, file_save):
     b.clicked()
+    # busy till saved: not to be pressed again, a spinner in the icon's place
+    assert not b.get_sensitive() and isinstance(b.get_image(), Gtk.Spinner)
 wait(lambda: len(os.listdir(folder)) == 3, what="three saved")
+wait(lambda: all(b.get_sensitive() for b in (vsave, video_save, file_save)), what="buttons back")
+assert all(isinstance(b.get_image(), Gtk.Image) for b in (vsave, video_save, file_save))
 assert sorted(os.listdir(folder)) == sorted(["голосовое-%s.ogg" % m.id, "видео-%s.mp4" % m.id,
                                              "Документ с очень длинным названием.pdf"])
 assert {u for u, _h in hands.downloaded} >= {"https://vd.okcdn.ru/a.ogg", "https://vd.okcdn.ru/v.mp4",
@@ -532,12 +541,28 @@ saves_of(shold)[0].clicked()  # the audio file, by its name
 wait(lambda: "Песня про лето.mp3" in os.listdir(folder), what="audio file saved")
 hands.fail_download = True
 app.sub.set_text("")
+app.ask_save_path = lambda where, name: os.path.join(where, name)  # taken: chosen to replace
 file_save.clicked()
 wait(lambda: app.sub.get_text().startswith("не удалось"), what="save failed")
 assert app.sub.get_text() == "не удалось сохранить: 1 из 1" and len(os.listdir(folder)) == 4
 hands.fail_download = False
-file_save.clicked()  # again: numbered, nothing overwritten
-wait(lambda: "Документ с очень длинным названием (2).pdf" in os.listdir(folder), what="saved again")
+# the name taken: the save dialog, with the folder and the name set
+asked = []
+app.ask_save_path = lambda where, name: asked.append((where, name)) and None
+app.sub.set_text("")
+file_save.clicked()  # cancelled: nothing saved, the button free
+spin(0.2)
+assert asked == [(folder, "Документ с очень длинным названием.pdf")]
+assert app.sub.get_text() == "не сохранено" and len(os.listdir(folder)) == 4 and file_save.get_sensitive()
+app.ask_save_path = lambda where, name: os.path.join(where, "Копия.pdf")  # another name
+file_save.clicked()
+wait(lambda: "Копия.pdf" in os.listdir(folder), what="saved under another name")
+doc_path = os.path.join(folder, "Документ с очень длинным названием.pdf")
+open(doc_path, "w").write("old")
+app.ask_save_path = lambda where, name: os.path.join(where, name)  # the same: replaced
+file_save.clicked()
+wait(lambda: open(doc_path, "rb").read().startswith(b"file from"), what="replaced")
+assert len(os.listdir(folder)) == 5 and not [n for n in os.listdir(folder) if "(2)" in n]
 # the sound plays only while its chat is in front
 def playing_again():
     play.clicked()

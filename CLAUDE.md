@@ -166,7 +166,11 @@ APKBUILD's `_whl`). Bumping the version: `pkgver` and the metainfo `<release>`.
   attachments go with it. Saving is per item: every photo
   (in its corner, and in the viewer's), voice, audio file, video and file has its own
   `document-save-symbolic` button (`ChatView._save_button`, `on_save(msg, item)` →
-  `save_message(chat_id, m, [item])`; a photo is the item `{"kind": "photo", "url", "n"}`); the
+  `save_message(chat_id, m, [item], button)`; a photo is the item `{"kind": "photo", "url",
+  "n"}`); the button is busy till saved (`set_busy`: insensitive, a spinner for its icon); a name
+  taken in the folder opens the save dialog (`target` → `ask_save_path`: another name or folder,
+  or replace, GTK asking first; cancel saves nothing; `Media.save(…, replace=True)` then writes
+  over it, and keeps the old one if the download fails); tests stub `ask_save_path`; the
   long-press menu has only the reactions, and a tap on a file opens it (`save_message`: links of videos and
   files asked of MAX first; `Media.save` into `load_text("folder", default_folder())`, set in the
   settings, under `safe_name`, numbered when taken, via `.part`). A forwarded message's text and

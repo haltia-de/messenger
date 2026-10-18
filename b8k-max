@@ -1564,9 +1564,10 @@ class Media:
                 continue
 
     # --- saving -----------------------------------------------------------------
-    def save(self, url, folder, name, done):
+    def save(self, url, folder, name, done, replace=False):
         """A file into folder, in a thread; done(path or None) on the GTK side.
-        The name is made harmless and, if taken, numbered: «песня (2).mp3»."""
+        The name is made harmless and, if taken, numbered: «песня (2).mp3»,
+        unless replace (the person chose to write over it)."""
         if not media_ok(url):
             log_line("save refused: %s" % where(url))
             GLib.idle_add(lambda: done(None) and False)
@@ -1578,6 +1579,9 @@ class Media:
                 os.makedirs(folder, exist_ok=True)
                 stem, ext = os.path.splitext(safe_name(name))
                 for n in range(1, 1000):
+                    if replace:
+                        path = os.path.join(folder, stem + ext)
+                        break
                     path = os.path.join(folder, stem + (" (%d)" % n if n > 1 else "") + ext)
                     try:  # the name is taken here at once: two saves never meet
                         os.close(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644))
@@ -1589,7 +1593,8 @@ class Media:
                 log_line("saved %s as %s" % (where(url), path))
             except Exception as exc:
                 log_line("save %s: %r" % (where(url), exc))
-                for junk in (path, path and path + ".part"):
+                for junk in ((path + ".part",) if replace and path else
+                             (path, path and path + ".part")):
                     try:
                         if junk:
                             os.remove(junk)
@@ -1843,7 +1848,7 @@ class ChatView:
         self.photo = photo  # photo(url, done(pixbuf)): Media.photo
         self.on_photo = on_photo  # a photo tapped: shown full screen
         self.on_forward = on_forward  # the ↪ beside a bubble: on_forward(msg_id)
-        self.on_save = on_save  # the save button of a photo or a file: on_save(msg, item)
+        self.on_save = on_save  # a photo's or a file's save button: on_save(msg, item, button)
         self.held_at = 0.0  # a long press just now: its release is no tap
         self.shown = set()  # ids of the messages built
         self.msgs = {}  # message id -> (its dict, the box of its reactions)
@@ -2123,7 +2128,7 @@ class ChatView:
         b.set_can_focus(False)
         b.set_valign(Gtk.Align.CENTER)
         b.set_tooltip_text("Сохранить на планшет")
-        b.connect("clicked", lambda _b: self.on_save(m, item))
+        b.connect("clicked", lambda _b: self.on_save(m, item, b))
         return b
 
     def _with_save(self, widget, m, item):
@@ -3134,12 +3139,21 @@ class Max(Gtk.Application):
         url = self.viewer_url
         if not url:
             return
+        name = "фото-%s.jpg" % hashlib.sha1(url.encode()).hexdigest()[:10]
+        where_to = self.target(load_text("folder", default_folder()), name)
+        if where_to is None:
+            return
+        into, name, replace = where_to
         self.viewer_note.set_text("сохраняю…")
         self.viewer_note.show()
-        name = "фото-%s.jpg" % hashlib.sha1(url.encode()).hexdigest()[:10]
-        self.media.save(url, load_text("folder", default_folder()), name, lambda path: (
+        self.set_busy(self.viewer_save, True)
+
+        def done(path):
+            self.set_busy(self.viewer_save, False)
             self.viewer_note.set_text("сохранено: %s" % os.path.basename(path) if path
-                                      else "не удалось сохранить")))
+                                      else "не удалось сохранить")
+
+        self.media.save(url, into, name, done, replace)
 
     def close_photo(self):
         if self.stack.get_visible_child_name() != "photo":
@@ -3204,10 +3218,53 @@ class Max(Gtk.Application):
         self.stack.set_visible_child_name("chat" if self.open_chat is not None else "chats")
 
     # saving what a message carries
-    def save_message(self, chat_id, m, items=None):
+    @staticmethod
+    def set_busy(button, busy):
+        """A button that cannot be pressed again, a spinner in its icon's
+        place, until what it started is done."""
+        if button is None:
+            return
+        if busy:
+            button.icon = button.get_image()
+            spin = Gtk.Spinner()
+            spin.start()
+            button.set_image(spin)
+            spin.show()
+        elif getattr(button, "icon", None) is not None:
+            button.set_image(button.icon)
+            button.icon = None
+        button.set_sensitive(not busy)
+
+    def ask_save_path(self, folder, name):
+        """The save dialog, when the name is taken already: the folder and
+        the name set, another of either chosen; replacing asks first (GTK).
+        The path, or None if cancelled."""
+        dialog = Gtk.FileChooserDialog(title="Сохранить как", parent=self.win,
+                                       action=Gtk.FileChooserAction.SAVE)
+        dialog.add_buttons("Отмена", Gtk.ResponseType.CANCEL, "Сохранить", Gtk.ResponseType.OK)
+        dialog.set_do_overwrite_confirmation(True)
+        dialog.set_current_folder(folder)
+        dialog.set_current_name(name)
+        path = dialog.get_filename() if dialog.run() == Gtk.ResponseType.OK else None
+        dialog.destroy()
+        return path
+
+    def target(self, folder, name):
+        """Where a file goes: (folder, name, replace), or None if the person
+        cancelled. A free name goes as it is; a taken one opens the dialog."""
+        name = safe_name(name)
+        if not os.path.exists(os.path.join(folder, name)):
+            return folder, name, False
+        path = self.ask_save_path(folder, name)
+        if not path:
+            return None
+        return os.path.dirname(path), os.path.basename(path), os.path.exists(path)
+
+    def save_message(self, chat_id, m, items=None, button=None):
         """Every photo and file of a message (or only the items given) into
         the folder set in the settings; any kind of file, not only media.
-        The link of a video or a file is asked of MAX first."""
+        A name taken there opens the save dialog. The link of a video or a
+        file is asked of MAX first; the button stays busy till it is all done."""
         folder = load_text("folder", default_folder())
         jobs = [] if items else \
             [(url, "фото-%s-%d.jpg" % (m["id"], n + 1)) for n, url in enumerate(m["photos"])]
@@ -3223,10 +3280,19 @@ class Max(Gtk.Application):
                 jobs.append((item, "видео-%s.mp4" % m["id"]))
             else:
                 jobs.append((item, item["name"]))
-        if not jobs:
+        chosen = []
+        for what, name in jobs:
+            where_to = self.target(folder, name)
+            if where_to is not None:
+                chosen.append((what,) + where_to)
+        if not chosen:
+            if jobs:
+                self.sub.set_text("не сохранено")
             return
+        jobs = chosen
         state = {"left": len(jobs), "saved": [], "failed": 0}
         self.sub.set_text("сохраняю…")
+        self.set_busy(button, True)
 
         def one(path):
             state["left"] -= 1
@@ -3236,6 +3302,7 @@ class Max(Gtk.Application):
                 state["failed"] += 1
             if state["left"]:
                 return
+            self.set_busy(button, False)
             if state["failed"]:
                 self.sub.set_text("не удалось сохранить: %d из %d" % (state["failed"], len(jobs)))
             elif len(state["saved"]) == 1:
@@ -3243,15 +3310,15 @@ class Max(Gtk.Application):
             else:
                 self.sub.set_text("сохранено файлов: %d" % len(state["saved"]))
 
-        for what, name in jobs:
+        for what, into, name, replace in jobs:
             if isinstance(what, str):
-                self.media.save(what, folder, name, one)
+                self.media.save(what, into, name, one, replace)
             else:
-                def linked(url, err, name=name):
+                def linked(url, err, into=into, name=name, replace=replace):
                     if err or not url:
                         one(None)
                     else:
-                        self.media.save(url, folder, name, one)
+                        self.media.save(url, into, name, one, replace)
                 self.backend.run(self.backend.media_url(chat_id, m["id"], what), linked)
 
     def choose_folder(self):
@@ -3493,7 +3560,7 @@ class Max(Gtk.Application):
                 on_react=lambda msg_id, emoji: self.react(chat_id, msg_id, emoji),
                 photo=self.media.photo, on_photo=self.show_photo,
                 on_forward=lambda msg_id: self.show_forward(chat_id, msg_id),
-                on_save=lambda m, item: self.save_message(chat_id, m, [item]))
+                on_save=lambda m, item, b: self.save_message(chat_id, m, [item], b))
         self.views[chat_id] = view  # most recently used last
         while len(self.views) > VIEWS:
             old_id = next(iter(self.views))

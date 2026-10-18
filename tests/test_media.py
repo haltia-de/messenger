@@ -159,7 +159,14 @@ drain()
 assert sorted(os.listdir(folder)) == ["Отчёт (2).pdf", "Отчёт.pdf"], os.listdir(folder)
 assert hands.downloaded[-1] == ("https://fd.oneme.ru/f.pdf?sig=SECRET", {"User-Agent": "Agent/1"})
 assert open(os.path.join(folder, "Отчёт.pdf"), "rb").read().startswith(b"file from")
+saver.save("https://fd.oneme.ru/new.pdf", folder, "Отчёт.pdf", paths.append, replace=True)
+drain()
+assert sorted(os.listdir(folder)) == ["Отчёт (2).pdf", "Отчёт.pdf"]  # written over, not numbered
+assert open(os.path.join(folder, "Отчёт.pdf"), "rb").read() == b"file from https://fd.oneme.ru/new.pdf"
 hands.fail_download = True
+saver.save("https://fd.oneme.ru/x.pdf", folder, "Отчёт.pdf", paths.append, replace=True)
+drain()
+assert paths[-1] is None and os.path.exists(os.path.join(folder, "Отчёт.pdf"))  # a failure keeps the old
 saver.save("https://fd.oneme.ru/g.pdf", folder, "g.pdf", paths.append)
 drain()
 assert paths[-1] is None and "g.pdf" not in os.listdir(folder) and "g.pdf.part" not in os.listdir(folder)
