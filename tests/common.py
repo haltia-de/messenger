@@ -14,7 +14,11 @@ sys.path.insert(0, HERE)
 
 
 def load():
-    os.environ["HOME"] = tempfile.mkdtemp(prefix="haltia-messenger-test-")
+    home = os.environ["HOME"] = tempfile.mkdtemp(prefix="haltia-messenger-test-")
+    # the program finds its folders by GLib's XDG dirs: these go in there too
+    for var, sub in (("XDG_CONFIG_HOME", ".config"), ("XDG_DATA_HOME", ".local/share"),
+                     ("XDG_CACHE_HOME", ".cache")):
+        os.environ[var] = os.path.join(home, sub)
     loader = importlib.machinery.SourceFileLoader("haltia_messenger", SCRIPT)
     spec = importlib.util.spec_from_loader("haltia_messenger", loader)
     module = importlib.util.module_from_spec(spec)

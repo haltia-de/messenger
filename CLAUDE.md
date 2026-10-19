@@ -243,7 +243,9 @@ programs are found on `PATH` (`haltia-vplay`, `b8k-vplay` before 2.0: `shutil.wh
   graphical session the program exits at once and quietly), inside Flatpak (`FLATPAK`:
   `/.flatpak-info`) the Background portal instead (`ask_background` at every start:
   `RequestBackground` with `autostart` and that command line; the portal asks once). No path
-  of the shell or of a distribution is needed: PyMax's folders are looked in only if there,
+  of the shell or of a distribution is needed: `DATA`, `PHOTOS`, `CONFIG` and `BASES` come
+  from GLib's XDG dirs, never `~` (inside Flatpak they are `~/.var/app/APP_ID/…`; tests set
+  `XDG_*_HOME` in their temporary home), PyMax's folders are looked in only if there,
   else site-packages (`requirements.txt`, exact versions, for a Flatpak), and the video
   player is `haltia-vplay` if on `PATH`, else `mpv`. Shared code is `haltia-kit`:
   `Settings("messenger", CONFIG)` (an ini, yes/no), `awake.Awake` while a voice plays, `photos.pixbuf_of`

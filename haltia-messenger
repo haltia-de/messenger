@@ -134,13 +134,16 @@ from haltia_kit.awake import Awake  # noqa: E402
 from haltia_kit.settings import Settings  # noqa: E402
 
 
-DATA = os.path.expanduser("~/.local/share/haltia-messenger")
-PHOTOS = os.path.expanduser("~/.cache/haltia-messenger")
-CONFIG = os.path.expanduser("~/.config/haltia")  # messenger.conf, [messenger]
+# The XDG folders by GLib, not by ~: inside Flatpak they are the sandbox's
+# ~/.var/app/APP_ID/…, and the real home is out of reach; elsewhere the same
+# ~/.local/share, ~/.cache and ~/.config.
+DATA = os.path.join(GLib.get_user_data_dir(), "haltia-messenger")
+PHOTOS = os.path.join(GLib.get_user_cache_dir(), "haltia-messenger")
+CONFIG = os.path.join(GLib.get_user_config_dir(), "haltia")  # messenger.conf, [messenger]
 # Where b8k-max (before 2.0) kept them: its folders by that name under these.
-BASES = [os.path.expanduser(b) for b in ("~/.config", "~/.local/share", "~/.cache")]
+BASES = [GLib.get_user_config_dir(), GLib.get_user_data_dir(), GLib.get_user_cache_dir()]
 OLD_NAME = "b8k-max"
-OLD_CONF = os.path.expanduser("~/.config/b8k/max.conf")
+OLD_CONF = os.path.join(GLib.get_user_config_dir(), "b8k", "max.conf")
 # The same file, already moved by haltia-kit 2's Settings("max") (another
 # program reading MAX's settings, the shell) before this one ran.
 KIT_CONF = os.path.join(CONFIG, "max.conf")
