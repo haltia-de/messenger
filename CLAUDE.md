@@ -55,10 +55,30 @@ PyMax in `/usr/local/lib/haltia-messenger`, `/usr/lib/haltia-messenger` and
 `../lib/haltia-messenger` from itself. Bumping PyMax: the wheel name and sha256 in `install.sh` (and the
 APKBUILD's `_whl`).
 
+Other packages (device repo's `docs/plan-desktop-packages.md`), published only in Haltia's own
+repositories, never on Flathub (an unofficial client):
+- **Flatpak**, `packaging/flatpak/io.github.haltia_de.Messenger.yml` on `org.gnome.Platform` 51:
+  `haltia-kit.yml` (a copy of the kit's module), libass, libplacebo and mpv (libmpv for voice and
+  the `mpv` that opens videos; flathub/shared-modules has no libmpv), then PyMax and its packages
+  as PyPI wheels by sha256: pure ones where PyPI has them, cp314 for x86_64 and aarch64
+  (`only-arches`) otherwise; their versions are `requirements.txt`'s. Build from the checkout
+  (Flatpak's builder cannot see `/tmp`): `flatpak run org.flatpak.Builder --user --install
+  --force-clean build packaging/flatpak/io.github.haltia_de.Messenger.yml`. A `flatpak run` left
+  over keeps the single instance: `flatpak kill io.github.haltia_de.Messenger` before another.
+- **deb**, `debian/` (native), built in `ubuntu:noble` and `debian:trixie`: `install.sh` into
+  the package without the old names, `Architecture: any` because noble's pydantic is 1 —
+  `debian/vendor.list` puts pydantic 2 (with pydantic-core's wheel for the architecture),
+  websockets and their packages next to PyMax in `/usr/lib/haltia-messenger` there; trixie's
+  own are new enough (`haltia:Depends`). The build fetches the wheels (network, sha256). The
+  tests run on an installed package's Python with `HALTIA_PYTHON=/usr/bin/python3
+  dbus-run-session -- sh tests/run.sh`.
+- The login's QR code is drawn by `qr_png` from qrcode's matrix: qrcode's images need Pillow,
+  which neither has.
+
 Releases (ADR 0002 in device-lenovo-b8000h): SemVer, always `vX.Y.Z` — X incompatible (commands,
 file formats, `X-B8K-…` keys), Y features, Z fixes and packaging-only changes. The tag must equal
-`pkgver` in `packaging/alpine/APKBUILD` (`pkgrel=0`) and the newest `<release version>` in
-`data/*.metainfo.xml`; CI fails otherwise. From 2.1.2 on every `<release>` has a short Russian
+`pkgver` in `packaging/alpine/APKBUILD` (`pkgrel=0`), the newest `<release version>` in
+`data/*.metainfo.xml` and the version in `debian/changelog`; CI fails otherwise. From 2.1.2 on every `<release>` has a short Russian
 `<description>` (`<p>` or `<ul><li>`) of what the person will notice: the shell's updater shows it
 as «Что нового» before installing. Pushing the tag runs `.github/workflows/release.yml`
 (haltia-de/ci's `apk.yml`; the APKBUILD's `builddir` is GitHub's tarball folder, named

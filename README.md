@@ -141,6 +141,12 @@ sh install.sh /mnt/root /usr # в другой корень и префикс (�
 `/etc/xdg/autostart`, и убирает файлы `b8k-max` под тем же префиксом. Пакет для Alpine —
 `packaging/alpine/APKBUILD`.
 
+Flatpak и пакеты для Debian 13 и Ubuntu 24.04 — только в репозиториях Haltia,
+не на Flathub: это неофициальный клиент. Манифест Flatpak —
+`packaging/flatpak/io.github.haltia_de.Messenger.yml` (в нём и mpv для видео),
+пакет deb — `debian/`. Во Flatpak сеанс, настройки и кэш лежат в
+`~/.var/app/io.github.haltia_de.Messenger/`.
+
 ## Проверка
 
 `sh tests/run.sh` — тесты: Backend и окно на подменном MAX в памяти

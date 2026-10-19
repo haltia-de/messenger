@@ -6,7 +6,9 @@
 # wheel install.sh pins, by the same name and sha256, and haltia-kit 2.1.0,
 # or HALTIA_KIT=path/to/a/checkout); the window tests get
 # a display of their own from broadwayd, stopped again at the end.
-# HALTIA_SHOTS=dir keeps screenshots of the window there.
+# HALTIA_SHOTS=dir keeps screenshots of the window there. HALTIA_PYTHON=python3
+# runs them on that Python as it is, with no venv (an installed package's
+# dependencies: the deb's check).
 set -eu
 here=$(cd "$(dirname "$0")" && pwd)
 top=$(dirname "$here")
@@ -15,7 +17,10 @@ venv=$cache/venv
 whl=$(sed -n 's/^whl=//p' "$top/install.sh")
 sum=$(sed -n 's/^echo "\([0-9a-f]\{64\}\) .*/\1/p' "$top/install.sh")
 
-if [ ! -x "$venv/bin/python" ]; then
+python=${HALTIA_PYTHON:-$venv/bin/python}
+if [ -n "${HALTIA_PYTHON:-}" ]; then
+	:
+elif [ ! -x "$venv/bin/python" ]; then
 	mkdir -p "$cache"
 	[ -f "$cache/$whl" ] || wget -q -O "$cache/$whl" \
 		"https://files.pythonhosted.org/packages/py3/m/maxapi-python/$whl"
@@ -30,7 +35,7 @@ if [ ! -x "$venv/bin/python" ]; then
 fi
 
 # The kit, Haltia's shared library (a dependency of this one).
-if ! "$venv/bin/python" -c "import haltia_kit.paths" 2>/dev/null; then
+if [ -z "${HALTIA_PYTHON:-}" ] && ! "$venv/bin/python" -c "import haltia_kit.paths" 2>/dev/null; then
 	compat=${HALTIA_KIT:-git+https://github.com/haltia-de/kit@v2.1.0}
 	if command -v uv >/dev/null; then
 		VIRTUAL_ENV=$venv uv pip install -q "$compat"
@@ -56,7 +61,7 @@ trap 'kill $bw 2>/dev/null; rm -f "$log"' EXIT INT TERM
 for t in "$@"; do
 	echo "== $t"
 	status=0
-	GDK_BACKEND=broadway BROADWAY_DISPLAY=":$n" "$venv/bin/python" "$t" >"$log" 2>&1 || status=$?
+	GDK_BACKEND=broadway BROADWAY_DISPLAY=":$n" "$python" "$t" >"$log" 2>&1 || status=$?
 	grep -v -e 'Gtk-WARNING' -e 'Gtk-CRITICAL' -e '^$' "$log" || true  # GTK's noise
 	[ $status -eq 0 ] || { echo "FAILED: $t"; exit $status; }
 done

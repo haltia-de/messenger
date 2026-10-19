@@ -76,6 +76,20 @@ run(B2.on_login(fake.me, list(fake.rooms.values()), [], fake.agent, 7))
 assert B2.summary(fake.rooms[spam])["stranger"] and not B2.summary(fake.rooms[anna])["stranger"]
 B2.remember(SPAM)
 assert not B2.summary(fake.rooms[spam])["stranger"] and SPAM in bm.load_json(bm.KNOWN, [])
+# the login's QR code, drawn without Pillow: a quiet border, then a finder's dark corner
+qr = os.path.join(os.environ["HOME"], "qr.png")
+bm.qr_png("https://max.ru/:login/abc", qr)
+pix = bm.GdkPixbuf.Pixbuf.new_from_file(qr)
+px = pix.get_pixels()
+side, stride = pix.get_width(), pix.get_rowstride()
+assert side == pix.get_height() and side % 12 == 0 and side >= 25 * 12, side
+
+
+def dark(x, y):
+    return px[y * stride + x * pix.get_n_channels()] == 0
+
+
+assert not dark(5, 5) and dark(2 * 12 + 5, 2 * 12 + 5) and not dark(side - 5, side - 5)
 ok("login")
 
 # --- history: no request when nothing is new, gaps, older pages ---------------------

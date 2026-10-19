@@ -917,10 +917,8 @@ class Backend:
 
     # --- the link's events ------------------------------------------------------
     async def on_qr(self, qr_url):
-        import qrcode
-
         path = os.path.join(DATA, "qr.png")
-        qrcode.make(qr_url, box_size=12, border=2).save(path)
+        qr_png(qr_url, path)
         GLib.idle_add(self.ui.show_qr, path)
 
     async def on_login(self, me, chats, contacts, agent, session_id):
@@ -1611,6 +1609,26 @@ def default_folder():
     down = GLib.get_user_special_dir(GLib.UserDirectory.DIRECTORY_DOWNLOAD) or \
         os.path.expanduser("~/Downloads")
     return os.path.join(down, "MAX")
+
+
+def qr_png(text, path, box=12, border=2):
+    """The QR code of text as a black and white PNG: qrcode's matrix drawn
+    here, so no Pillow (qrcode's own images need it; Flatpak and Debian's
+    python3-qrcode come without)."""
+    import qrcode
+
+    qr = qrcode.QRCode(box_size=box, border=border)
+    qr.add_data(text)
+    qr.make(fit=True)
+    rows = qr.get_matrix()  # the border included
+    side = len(rows) * box
+    data = bytearray()
+    for row in rows:
+        line = b"".join(b"\x00\x00\x00" * box if dark else b"\xff\xff\xff" * box for dark in row)
+        data += line * box
+    pixbuf = GdkPixbuf.Pixbuf.new_from_bytes(GLib.Bytes.new(bytes(data)), GdkPixbuf.Colorspace.RGB,
+                                             False, 8, side, side, side * 3)
+    pixbuf.savev(path, "png", [], [])
 
 
 def focus_accept(parent, tries=20):

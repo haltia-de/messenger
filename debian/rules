@@ -1,0 +1,35 @@
+#!/usr/bin/make -f
+# PyMax's wheel (install.sh) and debian/vendor.list's are fetched from PyPI
+# at build and checked by sha256: the build needs the network.
+include /usr/share/dpkg/architecture.mk
+CODENAME := $(shell . /etc/os-release && echo $$VERSION_CODENAME)
+PKG := debian/haltia-messenger
+LIB := $(PKG)/usr/lib/haltia-messenger
+ifeq ($(CODENAME),noble)
+HALTIA_DEPENDS :=
+else
+HALTIA_DEPENDS := python3-pydantic (>= 2.10), python3-websockets (>= 13)
+endif
+
+%:
+	dh $@
+
+override_dh_auto_install:
+	HALTIA_CACHE=$(CURDIR)/debian/cache sh install.sh $(CURDIR)/$(PKG) /usr
+	# The names from before ADR 0004 are for the Haltia tablet only.
+	rm -f $(PKG)/usr/bin/b8k-max \
+		$(PKG)/usr/share/applications/io.github.trudenboy.Max.desktop
+	grep -v '^#' debian/vendor.list | while read -r codename arch sum url; do \
+		[ "$$codename" = "$(CODENAME)" ] || continue; \
+		[ "$$arch" = all ] || [ "$$arch" = "$(DEB_HOST_ARCH)" ] || continue; \
+		whl=debian/cache/$${url##*/}; \
+		[ -f "$$whl" ] || wget -q -O "$$whl" "$$url"; \
+		echo "$$sum  $$whl" | sha256sum -c - || exit 1; \
+		unzip -q -o "$$whl" -d $(LIB); \
+	done
+
+override_dh_gencontrol:
+	dh_gencontrol -- "-Vhaltia:Depends=$(HALTIA_DEPENDS)"
+
+override_dh_clean:
+	dh_clean debian/cache
