@@ -110,7 +110,8 @@ from datetime import date, datetime
 APP_ID = "io.github.haltia_de.Messenger"
 NAME = "Сообщения"  # on the screen: what it is, not the service (MAX is a trademark)
 # PyMax (its pinned wheel) is unpacked by install.sh into
-# PREFIX/lib/haltia-messenger, next to the bin directory this program is in.
+# PREFIX/lib/haltia-messenger, next to the bin directory this program is in;
+# where none of these is, it comes from site-packages (requirements.txt).
 _here = os.path.dirname(os.path.realpath(os.path.abspath(sys.argv[0] or __file__)))
 for _lib in ("/usr/local/lib/haltia-messenger", "/usr/lib/haltia-messenger",
              os.path.join(os.path.dirname(_here), "lib", "haltia-messenger")):
@@ -1609,6 +1610,45 @@ def default_folder():
     return os.path.join(down, "MAX")
 
 
+def focus_accept(parent, tries=20):
+    """Focus the accept button of GTK's file dialog shown for parent (what a
+    FileChooserNative shows outside a portal); a portal's dialog is another
+    program's, so after some idle turns without one this gives up."""
+    for w in Gtk.Window.list_toplevels():
+        if isinstance(w, Gtk.FileChooserDialog) and w.get_visible() \
+                and w.get_transient_for() is parent:
+            accept = w.get_widget_for_response(Gtk.ResponseType.ACCEPT)
+            if accept is not None:
+                accept.set_can_default(True)
+                w.set_default_response(Gtk.ResponseType.ACCEPT)
+                accept.grab_focus()
+            return False
+    if tries > 1:
+        GLib.idle_add(focus_accept, parent, tries - 1)
+    return False
+
+
+FLATPAK = os.path.exists("/.flatpak-info")
+
+
+def ask_background(bus):
+    """Inside Flatpak, where no XDG autostart file reaches the session: ask
+    the Background portal to start the program hidden with the session and
+    to let it live without a window. The portal asks the person once and
+    remembers; outside Flatpak the autostart file does it."""
+    if bus is None:
+        return
+    options = {
+        "reason": GLib.Variant("s", "Чтобы сообщения приходили, когда окно закрыто"),
+        "autostart": GLib.Variant("b", True),
+        "commandline": GLib.Variant("as", ["haltia-messenger", "--background"]),
+    }
+    bus.call("org.freedesktop.portal.Desktop", "/org/freedesktop/portal/desktop",
+             "org.freedesktop.portal.Background", "RequestBackground",
+             GLib.Variant("(sa{sv})", ("", options)), None, Gio.DBusCallFlags.NONE,
+             -1, None, None)
+
+
 def fitted(path, size):
     """A picture file within size × size, turned upright; the kit's
     pixbuf_of refuses one too large or of unknown size before decoding (a
@@ -2764,6 +2804,8 @@ class Max(Gtk.Application):
         act = Gio.SimpleAction.new("open-chat", GLib.VariantType("x"))
         act.connect("activate", lambda _a, v: (self.do_activate(), self.open(v.unpack())))
         self.add_action(act)
+        if FLATPAK:
+            ask_background(self.get_dbus_connection())
 
     def do_activate(self):
         if self.win:
@@ -3598,23 +3640,20 @@ class Max(Gtk.Application):
 
     def ask_save_path(self, folder, name):
         """The save dialog, when the name is taken already: the folder and
-        the name set, another of either chosen; replacing asks first (GTK).
-        The path, or None if cancelled."""
-        dialog = Gtk.FileChooserDialog(title="Сохранить как", parent=self.win,
-                                       action=Gtk.FileChooserAction.SAVE)
-        dialog.add_buttons("Отмена", Gtk.ResponseType.CANCEL, "Сохранить", Gtk.ResponseType.OK)
+        the name set, another of either chosen; replacing asks first. The
+        path, or None if cancelled. FileChooserNative: the file chooser
+        portal inside Flatpak and under KDE, GTK's own dialog elsewhere."""
+        dialog = Gtk.FileChooserNative.new("Сохранить как", self.win,
+                                           Gtk.FileChooserAction.SAVE, "Сохранить", "Отмена")
         dialog.set_do_overwrite_confirmation(True)
         dialog.set_current_folder(folder)
         dialog.set_current_name(name)
-        # GTK focuses the name on show, which brings up the on-screen keyboard
-        # over the file list; the name is usually fine (it is only taken), so
-        # Сохранить has the focus, and the keyboard comes when the name is tapped.
-        save = dialog.get_widget_for_response(Gtk.ResponseType.OK)
-        save.set_can_default(True)
-        dialog.set_default_response(Gtk.ResponseType.OK)
-        dialog.show()
-        GLib.idle_add(lambda: save.grab_focus() and False)
-        path = dialog.get_filename() if dialog.run() == Gtk.ResponseType.OK else None
+        # GTK's dialog focuses the name on show, which brings up the on-screen
+        # keyboard over the file list; the name is usually fine (it is only
+        # taken), so Сохранить has the focus, and the keyboard comes when the
+        # name is tapped. A portal's dialog is the desktop's own: left alone.
+        GLib.idle_add(focus_accept, self.win)
+        path = dialog.get_filename() if dialog.run() == Gtk.ResponseType.ACCEPT else None
         dialog.destroy()
         return path
 
@@ -3694,14 +3733,13 @@ class Max(Gtk.Application):
                 self.backend.run(self.backend.media_url(chat_id, m["id"], what), linked)
 
     def choose_folder(self):
-        """Another folder for saved files."""
-        dialog = Gtk.FileChooserDialog(title="Папка для файлов", parent=self.win,
-                                       action=Gtk.FileChooserAction.SELECT_FOLDER)
-        dialog.add_buttons("Отмена", Gtk.ResponseType.CANCEL, "Выбрать", Gtk.ResponseType.OK)
+        """Another folder for saved files (FileChooserNative, as above)."""
+        dialog = Gtk.FileChooserNative.new("Папка для файлов", self.win,
+                                           Gtk.FileChooserAction.SELECT_FOLDER, "Выбрать", "Отмена")
         current = load_text("folder", default_folder())
         os.makedirs(current, exist_ok=True)
         dialog.set_current_folder(current)
-        if dialog.run() == Gtk.ResponseType.OK and dialog.get_filename():
+        if dialog.run() == Gtk.ResponseType.ACCEPT and dialog.get_filename():
             self.set_folder(dialog.get_filename())
         dialog.destroy()
 

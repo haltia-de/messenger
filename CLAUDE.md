@@ -214,7 +214,9 @@ programs are found on `PATH` (`haltia-vplay`, `b8k-vplay` before 2.0: `shutil.wh
   `save_message(chat_id, m, [item], button)`; a photo is the item `{"kind": "photo", "url",
   "n"}`); the button is busy till saved (`set_busy`: insensitive, a spinner for its icon); a name
   taken in the folder opens the save dialog (`target` → `ask_save_path`: another name or folder,
-  or replace, GTK asking first; the focus starts on Сохранить, not the name entry, so the
+  or replace, the dialog asking first; `Gtk.FileChooserNative`, as is «Папка для файлов»
+  (`choose_folder`): the portal's dialog inside Flatpak and under KDE, GTK's own elsewhere,
+  where `focus_accept` finds it; the focus starts on Сохранить, not the name entry, so the
   on-screen keyboard stays down over the file list till the name is tapped; cancel saves nothing; `Media.save(…, replace=True)` then writes
   over it, and keeps the old one if the download fails); tests stub `ask_save_path`; the
   long-press menu has only the reactions, and a tap on a file opens it (`save_message`: links of videos and
@@ -238,7 +240,12 @@ programs are found on `PATH` (`haltia-vplay`, `b8k-vplay` before 2.0: `shutil.wh
   a new message in a loud chat as a desktop notification (`Max.notify`, `Gio.Notification`, its
   tap the `app.open-chat` action; the desktop buzzes or sounds for it — the `buzz` setting
   switches these); the start with the session as XDG autostart (`--background`; with no
-  graphical session the program exits at once and quietly). Shared code is `haltia-kit`:
+  graphical session the program exits at once and quietly), inside Flatpak (`FLATPAK`:
+  `/.flatpak-info`) the Background portal instead (`ask_background` at every start:
+  `RequestBackground` with `autostart` and that command line; the portal asks once). No path
+  of the shell or of a distribution is needed: PyMax's folders are looked in only if there,
+  else site-packages (`requirements.txt`, exact versions, for a Flatpak), and the video
+  player is `haltia-vplay` if on `PATH`, else `mpv`. Shared code is `haltia-kit`:
   `Settings("messenger", CONFIG)` (an ini, yes/no), `awake.Awake` while a voice plays, `photos.pixbuf_of`
   (size checked before decoding) for photos. Voice keeps its own libmpv (`Libmpv`): the kit's
   `Player` takes no user agent, which MAX's CDN wants.

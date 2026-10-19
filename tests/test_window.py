@@ -513,7 +513,7 @@ def look_and_cancel():
     if dlg is None:
         return True
     focus = dlg.get_focus()
-    focused.append(focus is dlg.get_widget_for_response(Gtk.ResponseType.OK))
+    focused.append(focus is dlg.get_widget_for_response(Gtk.ResponseType.ACCEPT))
     dlg.response(Gtk.ResponseType.CANCEL)
     return False
 
@@ -521,6 +521,19 @@ def look_and_cancel():
 GLib.timeout_add(500, look_and_cancel)
 assert real_ask_save_path(pics, "занято.jpg") is None
 assert focused == [True], focused
+
+
+class Bus:
+    def call(self, *args):
+        self.args = args
+
+
+bus = Bus()
+bm.ask_background(bus)
+assert bus.args[2:4] == ("org.freedesktop.portal.Background", "RequestBackground"), bus.args
+_parent, opts = bus.args[4].unpack()
+assert opts["autostart"] and opts["commandline"] == ["haltia-messenger", "--background"], opts
+bm.ask_background(None)  # no session bus: nothing
 ok("photo in the window")
 
 # --- media: voice in the bubble, video in the player, a file in the browser -------------------

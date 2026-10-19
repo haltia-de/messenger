@@ -20,6 +20,14 @@
   </content_rating>
   <requires><control>touch</control></requires>
   <releases>
+    <release version="2.2.0" date="2026-10-19">
+      <description>
+        <ul>
+          <li>Окна «Сохранить как» и «Папка для файлов» — системные: в KDE и во Flatpak открывается выбор файлов рабочего стола.</li>
+          <li>Во Flatpak программа сама просит разрешения запускаться с сеансом и работать в фоне.</li>
+        </ul>
+      </description>
+    </release>
     <release version="2.1.1" date="2026-10-19"/>
     <release version="2.1.0" date="2026-10-19"/>
     <release version="2.0.0" date="2026-10-19"/>
