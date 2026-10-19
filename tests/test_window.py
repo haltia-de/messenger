@@ -166,6 +166,14 @@ spin(0.1)
 assert app.invites_switch.get_active() and not app.invites_switch.get_sensitive()
 assert "официальном приложении" in app.invites_card.get_children()[1].get_text()
 shot("list.png")
+# the window's own close button off the Haltia shell (whose ✕ closes it there); it hides
+assert app.win.get_titlebar().get_show_close_button() == (not bm.ON_HALTIA)
+app.win.close()
+spin(0.2)
+assert not app.win.get_visible() and app.backend.me
+app.activate()
+spin(0.2)
+assert app.win.get_visible()
 ok("list")
 
 # --- incoming: a notification from a contact, none from a stranger or a channel ---------------

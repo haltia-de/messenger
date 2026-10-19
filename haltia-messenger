@@ -109,6 +109,9 @@ from datetime import date, datetime
 # GApplication, the .desktop file, the window, the icon, AppStream, MPRIS.
 APP_ID = "io.github.haltia_de.Messenger"
 NAME = "Сообщения"  # on the screen: what it is, not the service (MAX is a trademark)
+# The Haltia shell closes windows with a ✕ of its own; elsewhere the header
+# has the desktop's window buttons, or nothing would close the window.
+ON_HALTIA = "Haltia" in os.environ.get("XDG_CURRENT_DESKTOP", "").split(":")
 # PyMax (its pinned wheel) is unpacked by install.sh into
 # PREFIX/lib/haltia-messenger, next to the bin directory this program is in;
 # where none of these is, it comes from site-packages (requirements.txt).
@@ -2842,6 +2845,7 @@ class Max(Gtk.Application):
         # Closing only hides the window: messages keep coming in.
         self.win.connect("delete-event", lambda w, _e: w.hide() or True)
         bar = Gtk.HeaderBar()
+        bar.set_show_close_button(not ON_HALTIA)  # the desktop's decoration-layout
         heading = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         self.title = label(NAME, "title", xalign=0.5)
         self.sub = label("", "sub", xalign=0.5)

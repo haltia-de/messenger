@@ -1,3 +1,9 @@
+haltia-messenger (2.3.2) unstable; urgency=medium
+
+  * The window buttons of the desktop off the Haltia shell.
+
+ -- Haltia <rensomail@gmail.com>  Mon, 19 Oct 2026 23:10:00 +0300
+
 haltia-messenger (2.3.1) unstable; urgency=medium
 
   * The Debian packages, which 2.3.0's changelog date kept back.

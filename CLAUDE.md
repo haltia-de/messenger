@@ -141,7 +141,9 @@ programs are found on `PATH` (`haltia-vplay`, `b8k-vplay` before 2.0: `shutil.wh
   `Opcode.LOGIN` answer; `link.invites()` gives `CHATS_INVITE`, and the settings card shows it on a
   greyed switch with a hint that only MAX's official app changes it.
 - **Single instance, background life.** `Max` is a `Gtk.Application` with id `APP_ID`; a second
-  launch just activates the first process over D-Bus. Closing the window hides it. With
+  launch just activates the first process over D-Bus. Closing the window hides it. The header
+  has the desktop's window buttons (`set_show_close_button`) except under the Haltia shell
+  (`ON_HALTIA`: `Haltia` in `XDG_CURRENT_DESKTOP`), whose own ✕ closes windows. With
   `--background` the window is not shown at start.
 - **Caches.** `~/.cache/haltia-messenger/chats/<id>.json` keeps the last `KEEP` messages per chat and
   `list.json` the chat list (all mode 600, written atomically via `.new` + `os.replace`). A chat whose
