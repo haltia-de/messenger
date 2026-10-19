@@ -15,4 +15,4 @@ websockets==17.2
 zstandard==0.25.0
 # voice messages (also needs libmpv)
 python-mpv==1.0.8
-haltia-kit @ git+https://github.com/haltia-de/kit@v2.0.0
+haltia-kit @ git+https://github.com/haltia-de/kit@v2.1.0

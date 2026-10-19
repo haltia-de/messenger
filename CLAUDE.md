@@ -268,7 +268,7 @@ programs are found on `PATH` (`haltia-vplay`, `b8k-vplay` before 2.0: `shutil.wh
 ## Tests
 
 `sh tests/run.sh` makes `.cache/venv` once (system PyGObject plus the PyMax wheel `install.sh`
-pins, and haltia-kit 2.0.0 from GitHub, or `HALTIA_KIT=path/to/checkout`), starts a `broadwayd` of its own and runs four plain scripts with `assert`s, each printing
+pins, and haltia-kit 2.1.0 from GitHub, or `HALTIA_KIT=path/to/checkout`), starts a `broadwayd` of its own and runs four plain scripts with `assert`s, each printing
 «… ok» per part: `tests/test_chatlist.py` (the chat list's rules: no MAX, no window),
 `tests/test_media.py` (Media with fake hands: hosts, the header, redirects, cache, players),
 `tests/test_backend.py` (Backend on the fake link, no window) and `tests/test_window.py` (the real
