@@ -657,7 +657,7 @@ assert bm.SETTINGS.get_bool("keep_sound", False)
 app.open(mama)
 spin(0.2)
 playing_again()
-assert not app.nowplay.get_visible()  # its chat in front: no bar
+assert app.nowplay.get_visible()  # at once, in its chat too: it will play on
 app.show_list()
 spin(0.2)
 assert app.playing is not None and app.nowplay.get_visible()
@@ -673,7 +673,7 @@ assert app.playing is not None and app.nowplay.get_visible()
 back = [w for w in walk(app.nowplay) if isinstance(w, Gtk.Button)][0]
 back.clicked()  # a tap on the bar goes back to its chat, at the message playing
 spin(0.3)
-assert app.open_chat == mama and not app.nowplay.get_visible()
+assert app.open_chat == mama and app.nowplay.get_visible()
 lit = [w for w in holds_of(app.view) if w.get_style_context().has_class("found")]
 assert [w.msg_id for w in lit] == [m.id], [w.msg_id for w in lit]
 

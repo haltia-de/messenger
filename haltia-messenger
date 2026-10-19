@@ -140,6 +140,9 @@ CONFIG = os.path.expanduser("~/.config/haltia")  # messenger.conf, [messenger]
 BASES = [os.path.expanduser(b) for b in ("~/.config", "~/.local/share", "~/.cache")]
 OLD_NAME = "b8k-max"
 OLD_CONF = os.path.expanduser("~/.config/b8k/max.conf")
+# The same file, already moved by haltia-kit 2's Settings("max") (another
+# program reading MAX's settings, the shell) before this one ran.
+KIT_CONF = os.path.join(CONFIG, "max.conf")
 PAGE = 30  # messages per history request: the newest when a chat opens, then older ones
 PREFETCH = 2  # older pages fetched in the background for the open chat
 FIRST = 12  # messages built at once when a chat opens: a screen of them
@@ -167,17 +170,19 @@ def move_old_home():
     settings here, as their name changes too ([max] → [messenger])."""
     paths.migrate_dirs(OLD_NAME, "haltia-messenger", bases=BASES)
     new_conf = os.path.join(CONFIG, "messenger.conf")
-    if os.path.isfile(OLD_CONF) and not os.path.lexists(new_conf):
+    source = next((p for p in (OLD_CONF, KIT_CONF) if os.path.isfile(p)), None)
+    if source and not os.path.lexists(new_conf):
         try:
             old = configparser.ConfigParser(interpolation=None)
-            old.read(OLD_CONF, encoding="utf-8")
+            old.read(source, encoding="utf-8")
             conf = configparser.ConfigParser(interpolation=None)
             conf["messenger"] = dict(old["max"]) if old.has_section("max") else {}
             os.makedirs(CONFIG, exist_ok=True)
             with open(new_conf + ".new", "w", encoding="utf-8") as fh:
                 conf.write(fh)
             os.replace(new_conf + ".new", new_conf)
-            os.remove(OLD_CONF)
+            if source == OLD_CONF:  # the kit's copy may be another program's to read: kept
+                os.remove(OLD_CONF)
         except (OSError, configparser.Error, UnicodeDecodeError) as exc:
             print("haltia-messenger: settings not moved: %s" % exc, file=sys.stderr)
 
@@ -2821,7 +2826,7 @@ class Max(Gtk.Application):
         # the window covered the keyboard's top row.
         self.stack.set_vhomogeneous(False)
         self.stack.set_hhomogeneous(False)
-        # What plays elsewhere, while its chat is not in front (keep_sound on):
+        # What plays, from its start, with keep_sound on (it plays on outside its chat):
         # its chat (a tap goes back to it), the time, pause and stop.
         self.nowplay = Gtk.Box(spacing=12)
         self.nowplay.get_style_context().add_class("nowplay")
@@ -3876,6 +3881,7 @@ class Max(Gtk.Application):
     def on_keep_sound(self, on):
         self.keep_sound = on
         save_setting("keep_sound", on)
+        self.show_nowplay()
 
     def on_buzz(self, on):
         self.buzz_new = on
@@ -4038,6 +4044,7 @@ class Max(Gtk.Application):
         play.connect("destroy", lambda b: self.playing and self.playing[1] is b and (
             self.media.stop(), setattr(self, "playing", None), self.mpris and self.mpris.changed()))
         set_play(play, "pause")
+        self.show_nowplay()
         if self.mpris:
             self.mpris.changed()
 
@@ -4065,10 +4072,10 @@ class Max(Gtk.Application):
                 self.mpris.changed()
 
     def show_nowplay(self):
-        """The bar of what plays elsewhere: only while its chat is not in front."""
-        here = self.stack.get_visible_child_name() in ("chat", "photo", "forward") and \
-            self.open_chat == self.playing_chat
-        show = bool(self.playing) and not here
+        """The bar of what plays, with «Звук играет и вне чата»: from the
+        moment it starts, in its chat too, so it is plain that it plays on
+        when the chat is left (without the setting it stops there: no bar)."""
+        show = bool(self.playing) and self.keep_sound
         if show:
             title = (self.chatlist.get(self.playing_chat) or {}).get("title", "")
             self.nowplay_label.set_text("🎵  %s  ·  %s" % (title, self.playing[2].get_text()))

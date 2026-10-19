@@ -19,8 +19,10 @@ Until 2.0 it was `b8k-max`, `io.github.trudenboy.Max` (the rename: ADR 0004 and
 `b8k-max` command as a link, the old `.desktop` file with `NoDisplay=true`, `provides`/`replaces`
 of `b8k-max` in the APKBUILD, `X-Flatpak-RenamedFrom` and AppStream `<replaces>`, and
 `move_old_home()` at the first start: the kit's `paths.migrate_dirs("b8k-max", …)` moves the
-folders (leaving links), and `~/.config/haltia/messenger.conf` `[max]` becomes
-`~/.config/haltia/messenger.conf` `[messenger]`. The name on the screen is by what it is, not the
+folders (leaving links), and `~/.config/b8k/max.conf` `[max]` (`OLD_CONF`) becomes
+`~/.config/haltia/messenger.conf` `[messenger]`; so does `~/.config/haltia/max.conf` (`KIT_CONF`),
+where the kit's `Settings("max")` in another program (the shell) may have moved it first — that
+one is left in place. The name on the screen is by what it is, not the
 service: MAX is a trademark (ADR 0004, rule 7); «MAX» stays in `GenericName`/`Keywords`.
 
 There is no build step or linter config; the tests are in `tests/` (see Tests). GPL-2.0; every
@@ -174,8 +176,8 @@ programs are found on `PATH` (`haltia-vplay`, `b8k-vplay` before 2.0: `shutil.wh
   with `Max` (`playing`, `playing_chat`); a voice message stops when its button is destroyed.
   By default it plays only while its chat is in front (`chat`, `photo`, `forward` pages):
   `stop_sound` on leaving it, opening another chat or the window's unmap. With `keep_sound`
-  (setting, off by default) it plays on, and `show_nowplay` shows the bar above the stack while
-  its chat is not in front: the chat (a tap, `go_to_playing`, opens it at the message playing:
+  (setting, off by default) it plays on, and `show_nowplay` shows the bar above the stack from the
+  moment it starts, in its chat too (so it is plain it plays on): the chat (a tap, `go_to_playing`, opens it at the message playing:
   `ChatView.show_message` scrolls there and lights the bubble, class `found`), the time, pause
   (`toggle_sound`), stop. What plays is told to the desktop by MPRIS (`Mpris`:
   `org.mpris.MediaPlayer2.` + `APP_ID` at `/org/mpris/MediaPlayer2`, `DesktopEntry`

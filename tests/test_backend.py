@@ -184,7 +184,20 @@ bm.move_old_home()  # once moved, nothing more happens
 assert open(os.path.join(bm.DATA, "web.db")).read() == "session"
 os.remove(OLD_DATA)
 os.remove(OLD_CACHE)
+# max.conf moved to ~/.config/haltia by the kit (another program's Settings("max")) first
+os.remove(os.path.join(bm.CONFIG, "messenger.conf"))
+with open(bm.KIT_CONF, "w") as fh:
+    fh.write("[max]\ntelemetry = no\nconfirm = no\n")
+bm.move_old_home()
+assert bm.SETTINGS.get_bool("telemetry", True) is False and bm.SETTINGS.get_bool("confirm", True) is False
+assert os.path.exists(bm.KIT_CONF)  # left for whoever moved it
+with open(bm.KIT_CONF, "w") as fh:  # once converted, never again
+    fh.write("[max]\ntelemetry = yes\n")
+bm.move_old_home()
+assert bm.SETTINGS.get_bool("telemetry", True) is False
+os.remove(bm.KIT_CONF)
 bm.SETTINGS.set("telemetry", True)
+bm.SETTINGS.set("confirm", True)
 ok("the old home moved")
 
 # --- deletions: MAX's frames read by the link, then the cache and the list ---------------------
