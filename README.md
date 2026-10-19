@@ -121,16 +121,47 @@ MAX блокирует доступ через сторонние клиенты
 
 ## Установка
 
-Нужны Python 3, GTK 3, PyGObject, [haltia-kit](https://github.com/haltia-de/kit) 2,
-пакеты, которые нужны PyMax (список — `depends` в `packaging/alpine/APKBUILD`),
-`wget` и `unzip`. PyMax `install.sh` скачивает сам: закреплённый wheel 2.4.1 с
-проверкой sha256, кэш загрузки — в `$HALTIA_CACHE` (по умолчанию `.cache/` здесь).
-Для голосовых и смайлов по желанию `py3-mpv mpv-libs font-noto-emoji`.
+Это неофициальный клиент MAX (см. выше): его пакеты есть только в
+репозиториях Haltia, не на Flathub и не в дистрибутивах.
 
-Поставить в систему (нужен root):
+**Ubuntu 24.04, Debian 13** (и elementary OS 8, Linux Mint 22) — из
+репозитория apt Haltia:
 
 ```
-sh install.sh                # в /, под /usr/local
+sudo curl -fsSLo /usr/share/keyrings/haltia-archive-keyring.gpg https://haltia-de.github.io/packages/apt/haltia-archive-keyring.gpg
+echo "deb [signed-by=/usr/share/keyrings/haltia-archive-keyring.gpg] https://haltia-de.github.io/packages/apt $(. /etc/os-release; echo $VERSION_CODENAME) main" | sudo tee /etc/apt/sources.list.d/haltia.list
+sudo apt update && sudo apt install haltia-messenger
+```
+
+Пакет ставит и файл автозапуска: программа стартует с сеансом скрытой,
+чтобы сообщения приходили.
+
+**Flatpak** (любой дистрибутив; среда GNOME — с Flathub):
+
+```
+flatpak remote-add --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+flatpak remote-add --if-not-exists haltia https://haltia-de.github.io/packages/flatpak/haltia.flatpakrepo
+flatpak install haltia io.github.haltia_de.Messenger
+```
+
+В Flatpak всё своё лежит в `~/.var/app/io.github.haltia_de.Messenger/`: сеанс
+и данные — в `data/haltia-messenger/`, настройки — в
+`config/haltia/messenger.conf`, кэш — в `cache/haltia-messenger/`. Запускаться
+с сеансом программа просит через портал рабочего стола при первом запуске;
+mpv для видео входит в пакет.
+
+**Alpine и postmarketOS** — пакет `haltia-messenger` из
+[репозитория apk Haltia](https://github.com/haltia-de/packages).
+
+**Из исходников:** нужны Python 3, GTK 3, PyGObject,
+[haltia-kit](https://github.com/haltia-de/kit) 2, пакеты, которые нужны PyMax
+(список — `depends` в `packaging/alpine/APKBUILD` или `requirements.txt`),
+`wget` и `unzip`. PyMax `install.sh` скачивает сам: закреплённый wheel 2.4.1 с
+проверкой sha256, кэш загрузки — в `$HALTIA_CACHE` (по умолчанию `.cache/` здесь).
+Для голосовых и смайлов по желанию libmpv с python-mpv и шрифт Noto Color Emoji.
+
+```
+sh install.sh                # в /, под /usr/local (нужен root)
 sh install.sh /mnt/root /usr # в другой корень и префикс (так делает пакет)
 ```
 
@@ -138,14 +169,9 @@ sh install.sh /mnt/root /usr # в другой корень и префикс (�
 `b8k-max` на неё), PyMax — в `PREFIX/lib/haltia-messenger`, `.desktop`-файл, значок и описание AppStream — в
 `PREFIX/share` (и старый `.desktop`-файл `io.github.trudenboy.Max`, скрытый,
 чтобы прежние закрепления открывали программу), файл автозапуска — в
-`/etc/xdg/autostart`, и убирает файлы `b8k-max` под тем же префиксом. Пакет для Alpine —
-`packaging/alpine/APKBUILD`.
-
-Flatpak и пакеты для Debian 13 и Ubuntu 24.04 — только в репозиториях Haltia,
-не на Flathub: это неофициальный клиент. Манифест Flatpak —
-`packaging/flatpak/io.github.haltia_de.Messenger.yml` (в нём и mpv для видео),
-пакет deb — `debian/`. Во Flatpak сеанс, настройки и кэш лежат в
-`~/.var/app/io.github.haltia_de.Messenger/`.
+`/etc/xdg/autostart`, и убирает файлы `b8k-max` под тем же префиксом. Сборка
+пакетов: `packaging/alpine/APKBUILD`, `debian/` и `packaging/flatpak/`, выпуск по
+тегу — `haltia-de/ci`.
 
 ## Проверка
 
@@ -164,7 +190,8 @@ Flatpak и пакеты для Debian 13 и Ubuntu 24.04 — только в р�
 читает, другие столы пропускают), значок на панели по стандарту Unity
 LauncherEntry, что играет — по MPRIS, уведомления, автозапуск XDG; вид
 задаёт тема GTK (на планшете — тема оболочки Haltia), вибрацию на касания даёт сама оболочка. Работает на
-любом рабочем столе с GTK 3.
+любом рабочем столе с GTK 3: вне оболочки у окна обычные кнопки, в том числе
+«Закрыть» — закрытое окно прячется, а сообщения продолжают приходить.
 
 ## Лицензия
 
