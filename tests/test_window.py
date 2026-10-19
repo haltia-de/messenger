@@ -139,6 +139,7 @@ def no_dialog(*_a):  # a real save dialog would wait for a person: never in a te
     raise AssertionError("an unexpected save dialog")
 
 
+real_ask_save_path = app.ask_save_path
 app.ask_save_path = no_dialog
 questions = []  # b8k-compat's ask, answered here: yes unless `answer` says otherwise
 answer = [True]
@@ -502,6 +503,24 @@ psave[0].clicked()
 wait(lambda: "фото-%s-1.jpg" % pic.id in os.listdir(pics), what="saved without asking")
 assert questions == []
 app.on_confirm(True)
+# the real save dialog: the focus on Сохранить, not the name (no keyboard over the list)
+focused = []
+
+
+def look_and_cancel():
+    dlg = next((w for w in Gtk.Window.list_toplevels()
+                if isinstance(w, Gtk.FileChooserDialog) and w.get_visible()), None)
+    if dlg is None:
+        return True
+    focus = dlg.get_focus()
+    focused.append(focus is dlg.get_widget_for_response(Gtk.ResponseType.OK))
+    dlg.response(Gtk.ResponseType.CANCEL)
+    return False
+
+
+GLib.timeout_add(500, look_and_cancel)
+assert real_ask_save_path(pics, "занято.jpg") is None
+assert focused == [True], focused
 ok("photo in the window")
 
 # --- media: voice in the bubble, video in the player, a file in the browser -------------------

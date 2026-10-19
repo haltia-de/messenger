@@ -3564,6 +3564,14 @@ class Max(Gtk.Application):
         dialog.set_do_overwrite_confirmation(True)
         dialog.set_current_folder(folder)
         dialog.set_current_name(name)
+        # GTK focuses the name on show, which brings up the on-screen keyboard
+        # over the file list; the name is usually fine (it is only taken), so
+        # Сохранить has the focus, and the keyboard comes when the name is tapped.
+        save = dialog.get_widget_for_response(Gtk.ResponseType.OK)
+        save.set_can_default(True)
+        dialog.set_default_response(Gtk.ResponseType.OK)
+        dialog.show()
+        GLib.idle_add(lambda: save.grab_focus() and False)
         path = dialog.get_filename() if dialog.run() == Gtk.ResponseType.OK else None
         dialog.destroy()
         return path

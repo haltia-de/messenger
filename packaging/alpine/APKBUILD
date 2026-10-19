@@ -1,6 +1,6 @@
 # Maintainer: Mikhail Nevskiy <rensomail@gmail.com>
 pkgname=b8k-max
-pkgver=1.19.0
+pkgver=1.19.1
 pkgrel=0
 pkgdesc="MAX: An unofficial client for the MAX messenger in large type (GTK 3)"
 url="https://github.com/trudenboy/b8k-max"
