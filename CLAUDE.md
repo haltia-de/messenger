@@ -161,19 +161,30 @@ programs are found on `PATH` (`b8k-vplay`: `shutil.which`), never at `/usr/local
   By default it plays only while its chat is in front (`chat`, `photo`, `forward` pages):
   `stop_sound` on leaving it, opening another chat or the window's unmap. With `keep_sound`
   (setting, off by default) it plays on, and `show_nowplay` shows the bar above the stack while
-  its chat is not in front: the chat (a tap returns to it), the time, pause (`toggle_sound`),
-  stop. Play buttons use theme icons through `set_play(button, "play"|"pause"|"fail")`, whose
+  its chat is not in front: the chat (a tap, `go_to_playing`, opens it at the message playing:
+  `ChatView.show_message` scrolls there and lights the bubble, class `found`), the time, pause
+  (`toggle_sound`), stop. What plays is told to the desktop by MPRIS (`Mpris`:
+  `org.mpris.MediaPlayer2.io.github.trudenboy.Max` at `/org/mpris/MediaPlayer2`, `DesktopEntry`
+  the app id; status, metadata — title, the chat as artist, length — position; PlayPause, Play,
+  Pause, Stop, Raise → `go_to_playing`); `mpris.changed()` after every change of what plays. The
+  shell shows it on the program's button; the LauncherEntry count has no "playing". Play buttons use theme icons through `set_play(button, "play"|"pause"|"fail")`, whose
   `state` the tests read (⏸ is tiny in most fonts).
 - **Reactions.** Message dicts carry `reactions` ([[emoji, count]]) and `yours`; a long press on a
   bubble (`ChatView`'s `on_hold`) opens `Max.pick_reaction`, a popover of `REACTIONS`.
   `Backend.react` uses `messages.add_reaction`/`remove_reaction`; when MAX answers without counts
   the window counts itself. `on_reaction_update` events carry no own reaction, so `reacted(..., ...)`
   (Ellipsis) leaves `yours` alone. Emoji need `font-noto-emoji` (in the tablet image).
-- **A photo full screen.** A tap on a photo in a bubble (`GestureMultiPress` on its frame; a
+- **A photo, large.** A tap on a photo in a bubble (`GestureMultiPress` on its frame; a
   scroll cancels it, and a release within a second of a long press is ignored, `held_at`) calls
-  `ChatView`'s `on_photo(url)` → `Max.show_photo`: the `photo` page, black, the titlebar hidden
-  and the window fullscreen; `Media.photo(url, done, size=2048)` loads it, `fit_photo` scales it
-  to the page on every size. A tap, back or Esc (`close_photo`) returns to the chat.
+  `ChatView`'s `on_photo(url)` → `Max.show_photo`: the `photo` page, black, within the window —
+  not full screen, where the shell's ✕ covered the corner; the header stays with back, «Фото»
+  and the save button (`viewer_save`, shown on that page only). `Media.photo(url, done,
+  size=2048)` loads it, `fit_photo` scales it to the page on every size. A tap, back or Esc
+  (`close_photo`) returns to the chat.
+- **Confirmations.** `Max.ask(question, yes)` is b8k-compat's `dialogs.ask` while the setting
+  `confirm` (default on, the settings page) is on, else True: saving to a free name (`target`;
+  a taken one has the save dialog) and forwarding, after the chat is chosen (a «no» stays on
+  the `forward` page). Tests answer it by replacing `bm.dialogs.ask`.
 - **Forwarding and saving.** Beside every bubble, at its foot on the side with room (right of
   another's, left of the own, as Telegram has it), a round `mail-forward-symbolic` button
   (`ChatView`'s `on_forward(msg_id)`) opens the `forward` page: chats but no channels,

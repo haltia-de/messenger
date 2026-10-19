@@ -11,7 +11,7 @@ from common import load, ok
 bm = load()
 from fake_hands import FakeHands  # noqa: E402
 from fake_link import FakeLink, audio, file, now_ms, photo, video  # noqa: E402
-from gi.repository import GLib, Gtk  # noqa: E402
+from gi.repository import Gdk, GLib, Gtk  # noqa: E402
 
 SHOTS = os.environ.get("B8K_SHOTS")  # a directory to save screenshots in, if set
 
@@ -140,6 +140,9 @@ def no_dialog(*_a):  # a real save dialog would wait for a person: never in a te
 
 
 app.ask_save_path = no_dialog
+questions = []  # b8k-compat's ask, answered here: yes unless `answer` says otherwise
+answer = [True]
+bm.dialogs.ask = lambda parent, question, yes, *a: questions.append((question, yes)) or answer[0]
 buzzes = []  # new messages the desktop was told of (notifications)
 _notify = app.notify
 app.notify = lambda msg: buzzes.append(msg)
@@ -280,6 +283,12 @@ assert dacha in targets and mama in targets and news not in targets  # no channe
 app.fwd_entry.set_text("дач")
 wait(lambda: [r.chat_id for r in app.fwd_list.get_children()] == [dacha], what="forward search")
 shot("forward.png")
+answer[0] = False  # asked first: «no» keeps choosing
+app.fwd_list.emit("row-activated", app.fwd_list.get_children()[0])
+spin(0.1)
+assert questions[-1] == ("Переслать сообщение в «Дача»?", "Переслать")
+assert app.stack.get_visible_child_name() == "forward" and not fake.asked("forward")
+answer[0] = True
 app.fwd_list.emit("row-activated", app.fwd_list.get_children()[0])
 wait(lambda: app.open_chat == dacha, what="forwarded, and in that chat")
 assert app.stack.get_visible_child_name() == "chat"
@@ -455,7 +464,11 @@ assert app.stack.get_visible_child_name() == "chat"
 app.view.held_at = 0
 frame.tap.emit("released", 1, 5.0, 5.0)
 wait(lambda: app.viewer_image.get_pixbuf() is not None, what="photo full screen")
-assert app.stack.get_visible_child_name() == "photo" and not app.win.get_titlebar().get_visible()
+assert app.stack.get_visible_child_name() == "photo"
+# within the window: its header stays (back, «Фото», save), no full screen
+assert app.win.get_titlebar().get_visible() and app.title.get_text() == "Фото"
+assert app.back.get_visible() and app.viewer_save.get_visible()
+assert not app.win.get_window().get_state() & Gdk.WindowState.FULLSCREEN
 alloc = app.viewer.get_allocation()
 shown = app.viewer_image.get_pixbuf()
 assert abs(shown.get_width() / shown.get_height() - 4 / 3) < 0.02  # its shape kept
@@ -463,12 +476,15 @@ assert shown.get_width() == alloc.width or shown.get_height() == alloc.height  #
 shot("photo-full.png")
 pics = os.path.join(os.environ["HOME"], "Фото")
 app.set_folder(pics)
+questions.clear()
 app.viewer_save.clicked()  # saved from the viewer, which stays open
+assert questions and questions[-1][0].startswith("Сохранить «фото-") and questions[-1][1] == "Сохранить"
 wait(lambda: app.viewer_note.get_text().startswith("сохранено"), what="saved from the viewer")
 assert app.stack.get_visible_child_name() == "photo" and len(os.listdir(pics)) == 1
 app.viewer.tap.emit("released", 1, 5.0, 5.0)
 spin(0.2)
-assert app.stack.get_visible_child_name() == "chat" and app.win.get_titlebar().get_visible()
+assert app.stack.get_visible_child_name() == "chat" and app.title.get_text() == "Мамочка"
+assert not app.viewer_save.get_visible()
 frame.tap.emit("released", 1, 5.0, 5.0)
 spin(0.1)
 app.go_back()  # the back way closes it too
@@ -477,7 +493,16 @@ psave = saves_of([w for w in holds_of(app.view) if w.msg_id == pic.id][0])
 assert len(psave) == 1  # in the photo's corner
 psave[0].clicked()
 wait(lambda: "фото-%s-1.jpg" % pic.id in os.listdir(pics), what="photo saved from the bubble")
-ok("photo full screen")
+app.on_confirm(False)
+assert not bm.load_setting("confirm")
+questions.clear()
+psave = saves_of([w for w in holds_of(app.view) if w.msg_id == pic.id][0])
+os.remove(os.path.join(pics, "фото-%s-1.jpg" % pic.id))
+psave[0].clicked()
+wait(lambda: "фото-%s-1.jpg" % pic.id in os.listdir(pics), what="saved without asking")
+assert questions == []
+app.on_confirm(True)
+ok("photo in the window")
 
 # --- media: voice in the bubble, video in the player, a file in the browser -------------------
 # (what Media does with them is test_media's; here, that the window hands them over)
@@ -627,9 +652,57 @@ app.open(dacha)  # another chat: still playing, the bar there too
 spin(0.2)
 assert app.playing is not None and app.nowplay.get_visible()
 back = [w for w in walk(app.nowplay) if isinstance(w, Gtk.Button)][0]
-back.clicked()  # a tap on the bar goes back to its chat
-spin(0.2)
+back.clicked()  # a tap on the bar goes back to its chat, at the message playing
+spin(0.3)
 assert app.open_chat == mama and not app.nowplay.get_visible()
+lit = [w for w in holds_of(app.view) if w.get_style_context().has_class("found")]
+assert [w.msg_id for w in lit] == [m.id], [w.msg_id for w in lit]
+
+
+# what plays, as the desktop sees it (MPRIS), from another connection to the bus
+from gi.repository import Gio  # noqa: E402
+other = Gio.DBusConnection.new_for_address_sync(
+    Gio.dbus_address_get_for_bus_sync(Gio.BusType.SESSION, None),
+    Gio.DBusConnectionFlags.AUTHENTICATION_CLIENT | Gio.DBusConnectionFlags.MESSAGE_BUS_CONNECTION,
+    None, None)
+
+
+def mpris(method, iface, *args, sig=None):
+    out = []
+    other.call(bm.MPRIS_NAME, bm.MPRIS_PATH, iface, method,
+               GLib.Variant(sig, args) if sig else None, None, Gio.DBusCallFlags.NONE, 3000,
+               None, lambda c, r: out.append(c.call_finish(r)))
+    wait(lambda: out, what="MPRIS " + method)
+    return out[0].unpack() if out[0] is not None else None
+
+
+def prop(name):
+    return mpris("Get", "org.freedesktop.DBus.Properties", "org.mpris.MediaPlayer2.Player", name,
+                 sig="(ss)")[0]
+
+
+assert prop("PlaybackStatus") == "Playing"
+meta = prop("Metadata")
+assert meta["xesam:title"] == "Голосовое сообщение" and meta["xesam:artist"] == ["Мамочка"]
+assert mpris("Get", "org.freedesktop.DBus.Properties", "org.mpris.MediaPlayer2", "DesktopEntry",
+             sig="(ss)")[0] == bm.APP_ID
+mpris("PlayPause", "org.mpris.MediaPlayer2.Player")  # paused from the desktop
+assert prop("PlaybackStatus") == "Paused" and play.state == "play"
+mpris("Play", "org.mpris.MediaPlayer2.Player")
+assert prop("PlaybackStatus") == "Playing" and play.state == "pause"
+app.show_list()
+spin(0.2)
+mpris("Raise", "org.mpris.MediaPlayer2")  # the desktop raises it: at the message
+spin(0.3)
+assert app.open_chat == mama
+app.show_list()
+spin(0.2)
+mpris("Stop", "org.mpris.MediaPlayer2.Player")
+assert prop("PlaybackStatus") == "Stopped" and app.playing is None
+assert prop("Metadata")["mpris:trackid"] == "/org/mpris/MediaPlayer2/TrackList/NoTrack"
+app.open(mama)
+spin(0.2)
+playing_again()
 app.win.hide()  # the window hidden: it plays on
 spin(0.2)
 assert app.playing is not None

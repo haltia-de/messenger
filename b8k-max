@@ -122,7 +122,7 @@ gi.require_version("GdkPixbuf", "2.0")
 gi.require_version("Pango", "1.0")
 from gi.repository import Gdk, GdkPixbuf, Gio, Gtk, Pango  # noqa: E402
 
-from b8k_compat import photos  # noqa: E402
+from b8k_compat import dialogs, photos  # noqa: E402
 from b8k_compat.awake import Awake  # noqa: E402
 from b8k_compat.settings import Settings  # noqa: E402
 
@@ -308,6 +308,7 @@ button.smile {
 button.smile:checked { background-color: #c4dcf7; }
 label.emoji-group { font-size: 18px; color: #77767b; }
 .viewer { background-color: #000000; }
+.found .bubble { background-color: #fff3bf; }
 label.forwarded { font-size: 19px; font-style: italic; color: #1c71d8; }
 .tabs { background-color: #dcdcda; padding: 8px 12px; }
 .tabs radiobutton, .tabs button {
@@ -1946,7 +1947,7 @@ class ChatView:
         self.fetch_older, self.on_hold = fetch_older, on_hold
         self.on_media, self.on_react = on_media, on_react
         self.photo = photo  # photo(url, done(pixbuf)): Media.photo
-        self.on_photo = on_photo  # a photo tapped: shown full screen
+        self.on_photo = on_photo  # a photo tapped: shown large
         self.on_forward = on_forward  # the ↪ beside a bubble: on_forward(msg_id)
         self.on_save = on_save  # a photo's or a file's save button: on_save(msg, item, button)
         self.held_at = 0.0  # a long press just now: its release is no tap
@@ -2117,6 +2118,33 @@ class ChatView:
         """The message as built, or None."""
         return self.msgs[msg_id][0] if msg_id in self.msgs else None
 
+    def show_message(self, msg_id):
+        """Scroll to a message (a third down the screen) and light it up for
+        a moment; False if it is not built here."""
+        hold = next((w for w in self.box.get_children()
+                     if getattr(w, "msg_id", None) == msg_id), None)
+        if hold is None:
+            return False
+
+        def go():
+            pos = hold.translate_coordinates(self.box, 0, 0)
+            if pos is None:
+                return False
+            adj = self.scroll.get_vadjustment()
+            page = adj.get_page_size()
+            self.anchor = None
+            self.moving = True
+            adj.set_value(max(0, min(pos[1] - page / 3, adj.get_upper() - page)))
+            self.moving = False
+            self.at_bottom = adj.get_value() + page >= adj.get_upper() - 60
+            self._show_down()
+            hold.get_style_context().add_class("found")
+            GLib.timeout_add(1500, lambda: hold.get_style_context().remove_class("found") and False)
+            return False
+
+        GLib.idle_add(go)  # once laid out
+        return True
+
     def enter(self):
         """Shown: the first time at the newest message, later where it was."""
         self.active = True
@@ -2222,7 +2250,7 @@ class ChatView:
         for url in m["photos"]:
             img = Gtk.Image.new_from_icon_name("image-x-generic", Gtk.IconSize.DIALOG)
             img.set_size_request(460, 200)
-            # A tap shows it full screen; a scroll or a long press does not
+            # A tap shows it large; a scroll or a long press does not
             # (the gesture is cancelled, or the release follows a long press).
             frame = Gtk.EventBox()
             frame.add(img)
@@ -2522,6 +2550,145 @@ class ChatView:
         self.done = False
 
 
+# --- what plays, told to the desktop ---------------------------------------------
+MPRIS_NAME = "org.mpris.MediaPlayer2.io.github.trudenboy.Max"
+MPRIS_PATH = "/org/mpris/MediaPlayer2"
+MPRIS_XML = """<node>
+  <interface name="org.mpris.MediaPlayer2">
+    <method name="Raise"/>
+    <method name="Quit"/>
+    <property name="CanQuit" type="b" access="read"/>
+    <property name="CanRaise" type="b" access="read"/>
+    <property name="HasTrackList" type="b" access="read"/>
+    <property name="Identity" type="s" access="read"/>
+    <property name="DesktopEntry" type="s" access="read"/>
+    <property name="SupportedUriSchemes" type="as" access="read"/>
+    <property name="SupportedMimeTypes" type="as" access="read"/>
+  </interface>
+  <interface name="org.mpris.MediaPlayer2.Player">
+    <method name="Next"/>
+    <method name="Previous"/>
+    <method name="Pause"/>
+    <method name="PlayPause"/>
+    <method name="Stop"/>
+    <method name="Play"/>
+    <method name="Seek"><arg direction="in" name="Offset" type="x"/></method>
+    <method name="SetPosition">
+      <arg direction="in" name="TrackId" type="o"/>
+      <arg direction="in" name="Position" type="x"/>
+    </method>
+    <method name="OpenUri"><arg direction="in" name="Uri" type="s"/></method>
+    <signal name="Seeked"><arg name="Position" type="x"/></signal>
+    <property name="PlaybackStatus" type="s" access="read"/>
+    <property name="Rate" type="d" access="read"/>
+    <property name="Metadata" type="a{sv}" access="read"/>
+    <property name="Volume" type="d" access="read"/>
+    <property name="Position" type="x" access="read"/>
+    <property name="MinimumRate" type="d" access="read"/>
+    <property name="MaximumRate" type="d" access="read"/>
+    <property name="CanGoNext" type="b" access="read"/>
+    <property name="CanGoPrevious" type="b" access="read"/>
+    <property name="CanPlay" type="b" access="read"/>
+    <property name="CanPause" type="b" access="read"/>
+    <property name="CanSeek" type="b" access="read"/>
+    <property name="CanControl" type="b" access="read"/>
+  </interface>
+</node>"""
+
+
+class Mpris:
+    """What plays (a voice message, an audio file), told to the desktop by
+    MPRIS on the session bus, as players do: the b8k shell shows it on the
+    program's button, GNOME and KDE in their player widgets; they can pause,
+    go on, stop it, or raise the window at its message. Stopped when nothing
+    plays. changed() after every change of what plays."""
+
+    def __init__(self, app):
+        self.app = app
+        self.bus = app.get_dbus_connection()
+        self.ids = []
+        if self.bus is None:
+            return
+        node = Gio.DBusNodeInfo.new_for_xml(MPRIS_XML)
+        for iface in node.interfaces:
+            self.ids.append(self.bus.register_object(
+                MPRIS_PATH, iface, self._call, self._get, None))
+        self.owner = Gio.bus_own_name_on_connection(self.bus, MPRIS_NAME,
+                                                     Gio.BusNameOwnerFlags.NONE, None, None)
+
+    # what it is
+    def status(self):
+        app = self.app
+        if not app.playing:
+            return "Stopped"
+        return "Playing" if getattr(app.playing[1], "state", "") == "pause" else "Paused"
+
+    def metadata(self):
+        app = self.app
+        if not app.playing:
+            return {"mpris:trackid": GLib.Variant("o", "/org/mpris/MediaPlayer2/TrackList/NoTrack")}
+        item = app.playing[4]
+        chat = (app.chatlist.get(app.playing_chat) or {}).get("title", "MAX")
+        meta = {"mpris:trackid": GLib.Variant("o", "/io/github/trudenboy/Max/track/%d"
+                                              % abs(int(app.playing_msg or 0))),
+                "xesam:title": GLib.Variant("s", item.get("name") or "Голосовое сообщение"),
+                "xesam:artist": GLib.Variant("as", [chat]),
+                "xesam:album": GLib.Variant("s", chat)}
+        if app.playing[3]:
+            meta["mpris:length"] = GLib.Variant("x", int(app.playing[3] * 1000000))
+        return meta
+
+    def _get(self, _bus, _sender, _path, iface, name):
+        app = self.app
+        playing = bool(app.playing)
+        values = {
+            "CanQuit": GLib.Variant("b", False), "CanRaise": GLib.Variant("b", True),
+            "HasTrackList": GLib.Variant("b", False), "Identity": GLib.Variant("s", "MAX"),
+            "DesktopEntry": GLib.Variant("s", APP_ID),
+            "SupportedUriSchemes": GLib.Variant("as", []),
+            "SupportedMimeTypes": GLib.Variant("as", []),
+            "PlaybackStatus": GLib.Variant("s", self.status()),
+            "Rate": GLib.Variant("d", 1.0), "MinimumRate": GLib.Variant("d", 1.0),
+            "MaximumRate": GLib.Variant("d", 1.0), "Volume": GLib.Variant("d", 1.0),
+            "Metadata": GLib.Variant("a{sv}", self.metadata()),
+            "Position": GLib.Variant("x", int((app.playing_pos if playing else 0) * 1000000)),
+            "CanGoNext": GLib.Variant("b", False), "CanGoPrevious": GLib.Variant("b", False),
+            "CanPlay": GLib.Variant("b", playing), "CanPause": GLib.Variant("b", playing),
+            "CanSeek": GLib.Variant("b", False), "CanControl": GLib.Variant("b", True)}
+        return values.get(name)
+
+    def _call(self, _bus, _sender, _path, iface, method, _params, invocation):
+        app = self.app
+        status = self.status()
+        if method == "Raise":
+            app.win.present()
+            app.go_to_playing()
+        elif method == "PlayPause" and status != "Stopped":
+            app.toggle_sound()
+        elif method == "Pause" and status == "Playing":
+            app.toggle_sound()
+        elif method == "Play" and status == "Paused":
+            app.toggle_sound()
+        elif method == "Stop":
+            app.stop_sound()
+        invocation.return_value(None)
+
+    def changed(self):
+        """Tell the desktop what plays now."""
+        if self.bus is None:
+            return
+        props = {"PlaybackStatus": GLib.Variant("s", self.status()),
+                 "Metadata": GLib.Variant("a{sv}", self.metadata()),
+                 "CanPlay": GLib.Variant("b", bool(self.app.playing)),
+                 "CanPause": GLib.Variant("b", bool(self.app.playing))}
+        try:
+            self.bus.emit_signal(None, MPRIS_PATH, "org.freedesktop.DBus.Properties",
+                                 "PropertiesChanged", GLib.Variant(
+                                     "(sa{sv}as)", ("org.mpris.MediaPlayer2.Player", props, [])))
+        except GLib.Error:
+            pass
+
+
 # --- the window -------------------------------------------------------------
 class Max(Gtk.Application):
     def __init__(self, link=None, media=None):
@@ -2539,6 +2706,10 @@ class Max(Gtk.Application):
         self.media = media or Media()  # photos, voice, video, files: how MAX's CDNs are reached
         self.playing = None  # (progress bar, button, duration) of what plays
         self.playing_chat = None  # the chat it plays in
+        self.playing_msg = None  # and its message
+        self.confirm_acts = load_setting("confirm")  # ask before saving and forwarding
+        self.playing_pos = 0.0  # s played
+        self.mpris = None  # what plays, told to the desktop (Mpris)
         self.keep_sound = SETTINGS.get_bool("keep_sound", False)  # plays on outside its chat
         self.held = 0.0  # when a row was long-pressed: its release opens nothing
         self.open_chat = None
@@ -2593,6 +2764,14 @@ class Max(Gtk.Application):
         self.edit.connect("clicked", lambda _b: self.chat_menu())
         self.edit.set_no_show_all(True)
         bar.pack_end(self.edit)
+        # The photo shown: saved from the header, where the shell's ✕ leaves room.
+        self.viewer_save = Gtk.Button.new_from_icon_name("document-save-symbolic",
+                                                         Gtk.IconSize.DIALOG)
+        self.viewer_save.get_style_context().add_class("gear")
+        self.viewer_save.set_tooltip_text("Сохранить на планшет")
+        self.viewer_save.connect("clicked", lambda _b: self.save_viewed())
+        self.viewer_save.set_no_show_all(True)
+        bar.pack_end(self.viewer_save)
         self.win.set_titlebar(bar)
         self.win.connect("map", lambda _w: self.moved())
         self.win.connect("unmap", lambda _w: (self.keep_sound or self.stop_sound(),
@@ -2614,8 +2793,7 @@ class Max(Gtk.Application):
         back_to.set_can_focus(False)
         self.nowplay_label = label("", "nowplay", ellipsize=True)
         back_to.add(self.nowplay_label)
-        back_to.connect("clicked", lambda _b: self.playing_chat is not None and
-                        self.open(self.playing_chat))
+        back_to.connect("clicked", lambda _b: self.go_to_playing())
         self.nowplay_toggle = Gtk.Button()
         set_play(self.nowplay_toggle, "pause")
         self.nowplay_stop = Gtk.Button.new_from_icon_name("window-close-symbolic",
@@ -2808,7 +2986,7 @@ class Max(Gtk.Application):
         fwd.pack_start(fwd_scroll, True, True, 0)
         self.stack.add_named(fwd, "forward")
 
-        # A photo full screen: a tap anywhere (or back, or Esc) closes it.
+        # A photo, large: a tap anywhere (or back, or Esc) closes it.
         self.viewer = Gtk.EventBox()
         self.viewer.get_style_context().add_class("viewer")
         self.viewer_image = Gtk.Image()
@@ -2820,17 +2998,6 @@ class Max(Gtk.Application):
         self.viewer_url = None
         viewer_page = Gtk.Overlay()
         viewer_page.add(self.viewer)
-        self.viewer_save = Gtk.Button.new_from_icon_name("document-save-symbolic",
-                                                         Gtk.IconSize.LARGE_TOOLBAR)
-        self.viewer_save.get_style_context().add_class("save")
-        self.viewer_save.get_style_context().add_class("big")
-        self.viewer_save.set_can_focus(False)
-        self.viewer_save.set_halign(Gtk.Align.END)
-        self.viewer_save.set_valign(Gtk.Align.START)
-        self.viewer_save.set_margin_end(24)
-        self.viewer_save.set_margin_top(24)
-        self.viewer_save.connect("clicked", lambda _b: self.save_viewed())
-        viewer_page.add_overlay(self.viewer_save)
         self.viewer_note = label("", "saved", xalign=0.5)
         self.viewer_note.set_halign(Gtk.Align.CENTER)
         self.viewer_note.set_valign(Gtk.Align.END)
@@ -2876,6 +3043,11 @@ class Max(Gtk.Application):
             "Уведомление рабочего стола: на планшете оно вздрагивает или звучит, "
             "как настроено в системе. Для отдельных чатов — в их меню."), False, False, 0)
         settings.pack_start(self.setting(
+            "Спрашивать перед сохранением и пересылкой", self.confirm_acts, self.on_confirm,
+            "Перед тем как сохранить файл на планшет или переслать сообщение в "
+            "выбранный чат, программа переспрашивает. Если выключить, делает сразу."),
+            False, False, 0)
+        settings.pack_start(self.setting(
             "Звук играет и вне чата", self.keep_sound, self.on_keep_sound,
             "Голосовое или аудиофайл продолжают играть в других чатах, в списке и "
             "при закрытом окне; полоса под заголовком возвращает к ним, ставит на "
@@ -2911,6 +3083,10 @@ class Max(Gtk.Application):
         self.stack.set_visible_child_name("chats" if cached else "wait")
         self.page_changed()
         self.media.on_time, self.media.on_end = self.sound_time, self.sound_end
+        try:
+            self.mpris = Mpris(self)
+        except GLib.Error as exc:  # another MAX owns it, or no bus: no MPRIS
+            log_line("mpris: %r" % exc)
         threading.Thread(target=self.media.prune, daemon=True).start()
         # The program lives for weeks in the background: prune daily too.
         GLib.timeout_add_seconds(86400, lambda: threading.Thread(
@@ -3244,15 +3420,17 @@ class Max(Gtk.Application):
             self.action(buttons, "Подписаться" if channel else "Вступить", "act", join)
         self.found.show_all()
 
-    # a photo full screen
+    # a photo, large
     def show_photo(self, url):
         self.viewer_pix = None
         self.viewer_url = url
         self.viewer_note.hide()
         self.viewer_image.set_from_icon_name("image-x-generic", Gtk.IconSize.DIALOG)
+        # Within the window, under its header (back, «Фото», save): not
+        # full screen, where the shell's ✕ would cover the corner.
+        self.title.set_text("Фото")
+        self.back.show()
         self.stack.set_visible_child_name("photo")
-        self.win.get_titlebar().hide()  # no header, no panel: the whole screen
-        self.win.fullscreen()
 
         def loaded(pix):
             if self.stack.get_visible_child_name() == "photo" and pix is not None:
@@ -3262,7 +3440,7 @@ class Max(Gtk.Application):
         self.media.photo(url, loaded, size=2048)
 
     def fit_photo(self):
-        """The photo as large as the screen lets it, its shape kept."""
+        """The photo as large as the window lets it, its shape kept."""
         pix = self.viewer_pix
         alloc = self.viewer.get_allocation()
         if pix is None or alloc.width < 2 or alloc.height < 2:
@@ -3297,10 +3475,9 @@ class Max(Gtk.Application):
     def close_photo(self):
         if self.stack.get_visible_child_name() != "photo":
             return
-        self.win.unfullscreen()
-        self.win.get_titlebar().show()
         self.viewer_pix = None
         self.viewer_image.clear()
+        self.title.set_text((self.chatlist.get(self.open_chat) or {}).get("title", ""))
         self.stack.set_visible_child_name("chat")
 
     # forwarding a message
@@ -3330,6 +3507,8 @@ class Max(Gtk.Application):
             return
         source, msg_id = self.forwarding
         title = (self.chatlist.get(target) or {}).get("title", "")
+        if not self.ask("Переслать сообщение в «%s»?" % title, "Переслать"):
+            return  # still choosing
         self.end_forward()
         self.sub.set_text("пересылаю…")
 
@@ -3391,9 +3570,12 @@ class Max(Gtk.Application):
 
     def target(self, folder, name):
         """Where a file goes: (folder, name, replace), or None if the person
-        cancelled. A free name goes as it is; a taken one opens the dialog."""
+        cancelled. A free name goes as it is (asked first, with confirmations
+        on); a taken one opens the save dialog, which asks enough."""
         name = safe_name(name)
         if not os.path.exists(os.path.join(folder, name)):
+            if not self.ask("Сохранить «%s» в папку «%s»?" % (name, folder), "Сохранить"):
+                return None
             return folder, name, False
         path = self.ask_save_path(folder, name)
         if not path:
@@ -3635,6 +3817,17 @@ class Max(Gtk.Application):
             INVITES_HINT.get(value, INVITES_HINT["unknown"]))
         return False
 
+    def on_confirm(self, on):
+        self.confirm_acts = on
+        save_setting("confirm", on)
+
+    def ask(self, question, yes):
+        """A question in the window (b8k-compat's dialog: Отмена by default),
+        only while confirmations are on; True to go ahead."""
+        if not self.confirm_acts:
+            return True
+        return dialogs.ask(self.win, question, yes)
+
     def on_keep_sound(self, on):
         self.keep_sound = on
         save_setting("keep_sound", on)
@@ -3653,6 +3846,7 @@ class Max(Gtk.Application):
         self.gear.set_visible(page in ("chats", "wait", "qr"))
         self.findb.set_visible(page == "chats")
         self.edit.set_visible(page == "chat" and self.chatlist.listed(self.open_chat))
+        self.viewer_save.set_visible(page == "photo")
         if page not in ("chat", "photo", "forward") and not self.keep_sound:
             self.stop_sound()  # the chat is left: its sound stops
         self.show_nowplay()
@@ -3763,7 +3957,7 @@ class Max(Gtk.Application):
         if item["kind"] == "audio":
             play = controls["button"]
             if item["url"] or (self.playing and self.playing[1] is play):
-                self.play_sound(chat_id, item, play, controls["bar"], controls["length"],
+                self.play_sound(chat_id, m, item, play, controls["bar"], controls["length"],
                                 item["url"])
                 return
             play.set_sensitive(False)  # an audio file: its link first
@@ -3774,14 +3968,14 @@ class Max(Gtk.Application):
                     log_line("audio file no link: %r" % (err,))
                     self.sub.set_text("не удалось открыть")
                     return
-                self.play_sound(chat_id, item, play, controls["bar"], controls["length"], url)
+                self.play_sound(chat_id, m, item, play, controls["bar"], controls["length"], url)
 
             self.backend.run(self.backend.media_url(
                 chat_id, m["id"], {"kind": "file", "id": item["file"]}), done)
         else:
             self.open_media(chat_id, m["id"], item, controls["button"])
 
-    def play_sound(self, chat_id, item, play, bar, length, url):
+    def play_sound(self, chat_id, m, item, play, bar, length, url):
         """What plays and where its button is are the window's; the playing
         is Media's. It plays only while its chat is in front: leaving it (for
         the list, another chat, the search, the settings) or hiding the
@@ -3794,11 +3988,22 @@ class Max(Gtk.Application):
             set_play(play, "fail")  # no libmpv here, or a link not to be opened
             return
         self.playing = [bar, play, length, secs(item["duration"]), item]
-        self.playing_chat = chat_id
+        self.playing_chat, self.playing_msg, self.playing_pos = chat_id, m["id"], 0.0
         # Its bubble gone (the chat cut or deleted): the sound stops too.
         play.connect("destroy", lambda b: self.playing and self.playing[1] is b and (
-            self.media.stop(), setattr(self, "playing", None)))
+            self.media.stop(), setattr(self, "playing", None), self.mpris and self.mpris.changed()))
         set_play(play, "pause")
+        if self.mpris:
+            self.mpris.changed()
+
+    def go_to_playing(self):
+        """The chat of what plays, at its message."""
+        if not self.playing or self.playing_chat is None:
+            return
+        self.open(self.playing_chat)
+        view = self.views.get(self.playing_chat)
+        if view is not None:
+            view.show_message(self.playing_msg)
 
     def stop_sound(self):
         """Whatever plays stops, and its button shows ▶ again."""
@@ -3811,6 +4016,8 @@ class Max(Gtk.Application):
             on = self.media.toggle()
             set_play(self.playing[1], "pause" if on else "play")
             set_play(self.nowplay_toggle, "pause" if on else "play")
+            if self.mpris:
+                self.mpris.changed()
 
     def show_nowplay(self):
         """The bar of what plays elsewhere: only while its chat is not in front."""
@@ -3827,6 +4034,7 @@ class Max(Gtk.Application):
         """How far it played; the length is the message's, else the player's
         (an audio file carries none)."""
         if self.playing:
+            self.playing_pos = pos
             bar, _play, length, known, _item = self.playing
             if not known and total:
                 self.playing[3] = known = total
@@ -3845,6 +4053,8 @@ class Max(Gtk.Application):
             length.set_text(mmss(known) if known else size_text(item.get("size") or 0))
             self.playing = None
             self.show_nowplay()
+            if self.mpris:
+                self.mpris.changed()
         return False
 
     def open_media(self, chat_id, msg_id, item, button):
