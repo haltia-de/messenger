@@ -20,6 +20,14 @@
   </content_rating>
   <requires><control>touch</control></requires>
   <releases>
+    <release version="2.3.0" date="2026-10-19">
+      <description>
+        <ul>
+          <li>Программу можно поставить во Flatpak и пакетом для Debian 13 и Ubuntu 24.04 из репозиториев Haltia.</li>
+          <li>QR-код для входа показывается и там, где нет библиотеки Pillow.</li>
+        </ul>
+      </description>
+    </release>
     <release version="2.2.1" date="2026-10-19">
       <description>
         <ul>
