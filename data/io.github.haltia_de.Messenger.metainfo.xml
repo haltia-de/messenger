@@ -20,6 +20,14 @@
   </content_rating>
   <requires><control>touch</control></requires>
   <releases>
+    <release version="2.2.1" date="2026-10-19">
+      <description>
+        <ul>
+          <li>Пока играет голосовое сообщение, компьютер не засыпает и на обычных рабочих столах, не только на планшете.</li>
+          <li>Во Flatpak сеанс, настройки и кэш хранятся в папке программы.</li>
+        </ul>
+      </description>
+    </release>
     <release version="2.2.0" date="2026-10-19">
       <description>
         <ul>
