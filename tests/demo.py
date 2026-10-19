@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: GPL-2.0
 # Copyright (C) 2026 Mikhail Nevskiy
-"""b8k-max on the fake link, with made-up chats: to look at the window
+"""haltia-messenger on the fake link, with made-up chats: to look at the window
 without an account. Nothing goes anywhere; what is sent, joined or deleted
 stays in this process. Run with the tests' Python:
 

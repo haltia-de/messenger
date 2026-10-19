@@ -4,13 +4,24 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-`b8k-max` is a native GTK 3 client for the MAX messenger, a desktop program of its own:
-`io.github.trudenboy.Max` (the GApplication id, the `.desktop` file, the Wayland app id via
-`GLib.set_prgname` before GTK is imported). Made for the tablet of
-[lenovo-b8000h-linux](https://github.com/trudenboy/lenovo-b8000h-linux) (Lenovo YOGA Tablet 10
-B8000-H, Alpine), whose image installs it from here by tag, but it depends on no shell: per that
-repo's ADR 0001 it meets the shell only through freedesktop standards, and its shared code is
-`b8k-compat`. The whole program is one Python 3 script, `b8k-max` (no `.py` extension).
+`haltia-messenger` («Сообщения» on the screen) is a native GTK 3 client for the MAX messenger,
+a program of the Haltia desktop (github.com/haltia-de), a desktop program of its own:
+`io.github.haltia_de.Messenger` (`APP_ID`: the GApplication id, the `.desktop` file, the Wayland
+app id via `GLib.set_prgname` before GTK is imported, the icon, AppStream, MPRIS, LauncherEntry).
+Made for the tablet of [device-lenovo-b8000h](https://github.com/haltia-de/device-lenovo-b8000h)
+(Lenovo YOGA Tablet 10 B8000-H, Alpine), whose image installs it from here by tag, but it depends
+on no shell: per that repo's ADR 0001 it meets the shell only through freedesktop standards, and
+its shared code is `haltia-kit` 2. The whole program is one Python 3 script, `haltia-messenger`
+(no `.py` extension).
+
+Until 2.0 it was `b8k-max`, `io.github.trudenboy.Max` (the rename: ADR 0004 and
+`docs/migration-haltia.md` «Правила фазы C» in device-lenovo-b8000h). Till 3.0 these stay: the
+`b8k-max` command as a link, the old `.desktop` file with `NoDisplay=true`, `provides`/`replaces`
+of `b8k-max` in the APKBUILD, `X-Flatpak-RenamedFrom` and AppStream `<replaces>`, and
+`move_old_home()` at the first start: the kit's `paths.migrate_dirs("b8k-max", …)` moves the
+folders (leaving links), and `~/.config/haltia/messenger.conf` `[max]` becomes
+`~/.config/haltia/messenger.conf` `[messenger]`. The name on the screen is by what it is, not the
+service: MAX is a trademark (ADR 0004, rule 7); «MAX» stays in `GenericName`/`Keywords`.
 
 There is no build step or linter config; the tests are in `tests/` (see Tests). GPL-2.0; every
 source file starts with an `SPDX-License-Identifier: GPL-2.0` line.
@@ -20,35 +31,38 @@ source file starts with an `SPDX-License-Identifier: GPL-2.0` line.
 ```sh
 sh install.sh                # install into / under /usr/local (root needed)
 sh install.sh /mnt/root /usr # into another root and prefix (packaging/alpine/APKBUILD does this)
-b8k-max                      # run with a window
-b8k-max --background         # start hidden (the XDG autostart file does this)
-python3 -m py_compile b8k-max   # quick syntax check
+haltia-messenger                # run with a window
+haltia-messenger --background   # start hidden (the XDG autostart file does this)
+python3 -m py_compile haltia-messenger   # quick syntax check
 sh tests/run.sh                 # all tests (needs broadwayd and network once, for the venv)
 sh tests/run.sh test_backend.py # one of them
 .cache/venv/bin/python tests/demo.py   # the window on made-up chats, no account
 ```
 
-Runtime deps: Python 3, PyGObject/GTK 3, `b8k-compat` (github.com/trudenboy/b8k-compat, 1.1.2; Alpine
-`py3-b8k-compat`), PyMax's own packages (the list is `depends` in `packaging/alpine/APKBUILD`),
+Runtime deps: Python 3, PyGObject/GTK 3, `haltia-kit` 2 (github.com/haltia-de/kit, module
+`haltia_kit`; Alpine `py3-haltia-kit`), PyMax's own packages (the list is `depends` in `packaging/alpine/APKBUILD`),
 optionally `py3-mpv mpv-libs` (voice) and `font-noto-emoji`; `wget`/`unzip`/`sha256sum` for
-`install.sh`. `install.sh [ROOT] [PREFIX]` installs the script to `PREFIX/bin`, `data/` (the
+`install.sh`. `install.sh [ROOT] [PREFIX]` installs the script to `PREFIX/bin` (and the `b8k-max`
+link), `data/` (the
 `.desktop` file with `X-B8K-Home`/`X-B8K-Replaces=max`, the hicolor SVG icon, AppStream metainfo)
-to `PREFIX/share`, the XDG autostart file (`--background`, `X-B8K-Autostart`) to
+to `PREFIX/share` (and the old id's hidden `.desktop`), the XDG autostart file (`--background`, `X-B8K-Autostart`) to
 `ROOT/etc/xdg/autostart`, downloads the pinned PyMax wheel (`maxapi_python-2.4.1`, sha256 checked;
-cached in `$B8K_CACHE`, default `.cache/`) into `PREFIX/lib/b8k-max`, and removes the shell's old
-`apps.d/max.conf` and icon. The script looks for PyMax in `/usr/local/lib/b8k-max`, `/usr/lib/b8k-max`
-and `../lib/b8k-max` from itself. Bumping PyMax: the wheel name and sha256 in `install.sh` (and the
+cached in `$HALTIA_CACHE`, default `.cache/`) into `PREFIX/lib/haltia-messenger`, and removes
+what `b8k-max` put under that prefix and the shell's old `apps.d/max.conf`. The script looks for
+PyMax in `/usr/local/lib/haltia-messenger`, `/usr/lib/haltia-messenger` and
+`../lib/haltia-messenger` from itself. Bumping PyMax: the wheel name and sha256 in `install.sh` (and the
 APKBUILD's `_whl`).
 
-Releases (ADR 0002 in lenovo-b8000h-linux): SemVer, always `vX.Y.Z` — X incompatible (commands,
+Releases (ADR 0002 in device-lenovo-b8000h): SemVer, always `vX.Y.Z` — X incompatible (commands,
 file formats, `X-B8K-…` keys), Y features, Z fixes and packaging-only changes. The tag must equal
 `pkgver` in `packaging/alpine/APKBUILD` (`pkgrel=0`) and the newest `<release version>` in
 `data/*.metainfo.xml`; CI fails otherwise. Pushing the tag runs `.github/workflows/release.yml`
-(trudenboy/b8k-ci's `apk.yml`): a signed noarch Alpine 3.24 package (`abuild`, `options="net"`
+(haltia-de/ci's `apk.yml`; the APKBUILD's `builddir` is GitHub's tarball folder, named
+after the repository): a signed noarch Alpine 3.24 package (`abuild`, `options="net"`
 for the PyMax wheel in `source=`) in the GitHub release. Push the commit first and the tag in a
 push of its own — a tag pushed with the commit that adds the workflow did not start it. The
 tablet's image installs that apk by a lock file; packages install under PREFIX `/usr`, so other
-programs are found on `PATH` (`b8k-vplay`: `shutil.which`), never at `/usr/local/bin`.
+programs are found on `PATH` (`haltia-vplay`, `b8k-vplay` before 2.0: `shutil.which`), never at `/usr/local/bin`.
 
 ## Architecture
 
@@ -72,14 +86,14 @@ programs are found on `PATH` (`b8k-vplay`: `shutil.which`), never at `/usr/local
   in memory); `Max(link=...)`/`Backend(ui, link)` take one. A PyMax upgrade is checked in
   `PyMaxLink` only. Don't name a fake's attributes after link operations (`chats`, `users`).
 - **Login.** `PyMaxLink` is PyMax's QR provider; `Backend.on_qr` renders the QR code to scan with
-  MAX on a phone. The session lives in `~/.local/share/b8k-max/web.db` (chmod 600).
+  MAX on a phone. The session lives in `~/.local/share/haltia-messenger/web.db` (chmod 600).
 - **Telemetry.** PyMax's own (a random simulation of browsing) stays off in `ExtraConfig`. The
   `Telemetry` class sends MAX-app-style events built from real UI actions instead: `NAV GO` on
   every screen change (`moved()`, driven by the stack page and window map/unmap), `PERF login`
   after each login, `PERF open_chat_to_render` with measured times. Event shapes and fixed values
   copy PyMax 2.4.1's `pymax/telemetry/payloads.py`; sent in batches via `Opcode.LOG` through
   `Backend.log` and the link. On by default, switched in the settings page (gear), stored in
-  `~/.config/b8k/max.conf` (`[max] telemetry`; `buzz` there switches the desktop
+  `~/.config/haltia/messenger.conf` (`[messenger] telemetry`; `buzz` there switches the desktop
   notifications of new messages; `contacts_only`, see below). Re-check the shapes when bumping PyMax.
 - **Search, join, delete.** The `find` page (magnifier on the list) reads its entry with
   `phone_of` (a person: `users.search_by_phone`, then write or `users.add_contact`), `link_of`
@@ -93,7 +107,7 @@ programs are found on `PATH` (`b8k-vplay`: `shutil.which`), never at `/usr/local
 - **Contacts only.** MAX has no "who may write to me" setting, so `contacts_only` (on by default)
   is a filter here: summaries carry `peer` and `stranger`, and `ChatList.hidden()` keeps strangers'
   dialogs off the list, the local search, the badge and the buzz. `Backend.known` (persisted to
-  `~/.local/share/b8k-max/known.json`, 600) holds login contacts, contacts added here, people
+  `~/.local/share/haltia-messenger/known.json`, 600) holds login contacts, contacts added here, people
   written to here (`remember`), and on the very first run every existing dialog's peer — the
   login sends only changed contacts after the first one, and nobody known must go quiet on update.
 - **Chat invites.** MAX's own privacy setting `CHATS_INVITE` is shown, not changed: MAX answers
@@ -102,16 +116,16 @@ programs are found on `PATH` (`b8k-vplay`: `shutil.which`), never at `/usr/local
   `config`, so `PyMaxLink._watch_login` wraps `app.invoke` and keeps `config.user` of each
   `Opcode.LOGIN` answer; `link.invites()` gives `CHATS_INVITE`, and the settings card shows it on a
   greyed switch with a hint that only MAX's official app changes it.
-- **Single instance, background life.** `Max` is a `Gtk.Application` with id `b8k.Max`; a second
+- **Single instance, background life.** `Max` is a `Gtk.Application` with id `APP_ID`; a second
   launch just activates the first process over D-Bus. Closing the window hides it. With
   `--background` the window is not shown at start.
-- **Caches.** `~/.cache/b8k-max/chats/<id>.json` keeps the last `KEEP` messages per chat and
+- **Caches.** `~/.cache/haltia-messenger/chats/<id>.json` keeps the last `KEEP` messages per chat and
   `list.json` the chat list (all mode 600, written atomically via `.new` + `os.replace`). A chat whose
   `last_message` is already cached and has no unread opens with no history request at all; else
   the last `PAGE` are fetched (see Paging). The last `VIEWS` chat views stay built in memory. The chat list
   keeps one row per chat (`Max.rows`, sorted and filtered by GTK) and `fill_list` redraws only rows
   whose look changed — don't go back to rebuilding it (≈30× slower per message). Photos are cached
-  in `~/.cache/b8k-max/` by URL hash, touched when shown, pruned after `PHOTO_DAYS` unshown (at
+  in `~/.cache/haltia-messenger/` by URL hash, touched when shown, pruned after `PHOTO_DAYS` unshown (at
   start and daily). Small state files in `DATA` go through `load_json`/`save_json` (600, atomic).
 - **Chat list** (`ChatList`, CONTEXT.md «Список чатов»; no GTK). Owns the summaries, dialogs from
   the search not written to yet (`start_dialog`/`wrote`), pins and per-chat notifications (`PREFS`,
@@ -147,8 +161,8 @@ programs are found on `PATH` (`b8k-vplay`: `shutil.which`), never at `/usr/local
   (`PhotoRedirect`). It caches photos (`photo(url, done)`, touched when shown, `prune()` after
   `PHOTO_DAYS` unshown), plays voice through libmpv (`voice`/`toggle`/`stop`, `on_time`/`on_end`;
   an `end-file` with reason ABORTED is a stop or a switch, not an end), starts a video in
-  `b8k-vplay` (on `PATH`, Видео's package) or `mpv --fs` with `ytdl=no` and `load-unsafe-playlists=no` (`video(url, title)`), and
-  gives a file to the browser (`file(url)`). What fails goes to `~/.cache/b8k-max/player.log`
+  `haltia-vplay` (`b8k-vplay` before 2.0; on `PATH`, Видео's package) or `mpv --fs` with `ytdl=no` and `load-unsafe-playlists=no` (`video(url, title)`), and
+  gives a file to the browser (`file(url)`). What fails goes to `~/.cache/haltia-messenger/player.log`
   (600, host and path only; the players' own output too). Its hands come in at creation —
   `spawn`, `open_uri`, `fetch`, `player` — real by default, `tests/fake_hands.py` in tests.
   `media_of` turns AUDIO/VIDEO/FILE attachments into `media` items; a FILE named like audio
@@ -164,7 +178,7 @@ programs are found on `PATH` (`b8k-vplay`: `shutil.which`), never at `/usr/local
   its chat is not in front: the chat (a tap, `go_to_playing`, opens it at the message playing:
   `ChatView.show_message` scrolls there and lights the bubble, class `found`), the time, pause
   (`toggle_sound`), stop. What plays is told to the desktop by MPRIS (`Mpris`:
-  `org.mpris.MediaPlayer2.io.github.trudenboy.Max` at `/org/mpris/MediaPlayer2`, `DesktopEntry`
+  `org.mpris.MediaPlayer2.` + `APP_ID` at `/org/mpris/MediaPlayer2`, `DesktopEntry`
   the app id; status, metadata — title, the chat as artist, length — position; PlayPause, Play,
   Pause, Stop, Raise → `go_to_playing`); `mpris.changed()` after every change of what plays. The
   shell shows it on the program's button; the LauncherEntry count has no "playing". Play buttons use theme icons through `set_play(button, "play"|"pause"|"fail")`, whose
@@ -181,7 +195,7 @@ programs are found on `PATH` (`b8k-vplay`: `shutil.which`), never at `/usr/local
   and the save button (`viewer_save`, shown on that page only). `Media.photo(url, done,
   size=2048)` loads it, `fit_photo` scales it to the page on every size. A tap, back or Esc
   (`close_photo`) returns to the chat.
-- **Confirmations.** `Max.ask(question, yes)` is b8k-compat's `dialogs.ask` while the setting
+- **Confirmations.** `Max.ask(question, yes)` is the kit's `dialogs.ask` while the setting
   `confirm` (default on, the settings page) is on, else True: saving to a free name (`target`;
   a taken one has the save dialog) and forwarding, after the chat is chosen (a «no» stays on
   the `forward` page). Tests answer it by replacing `bm.dialogs.ask`.
@@ -212,17 +226,17 @@ programs are found on `PATH` (`b8k-vplay`: `shutil.which`), never at `/usr/local
 - **Photo fetch is a security boundary.** Photo URLs arrive inside messages (sender-controlled), so
   `photo_ok` allows only `https` on `oneme.ru`/`max.ru` hosts, and `PhotoRedirect` refuses
   redirects off those hosts. Preserve both checks when touching photo loading.
-- **No shell.** Nothing of the b8k shell is used (ADR 0001 in lenovo-b8000h-linux): no
-  `b8k_ui`, no `apps.d`, no buzzing (the shell's `b8k-touchguard` buzzes every touch), no header
-  CSS (the desktop's GTK theme, `b8k` on the tablet, gives the header and the large buttons; `CSS`
+- **No shell.** Nothing of the Haltia shell is used (ADR 0001 in device-lenovo-b8000h): no
+  `b8k_ui`, no `apps.d`, no buzzing (the shell's touch guard buzzes every touch), no header
+  CSS (the desktop's GTK theme, the shell's on the tablet, gives the header and the large buttons; `CSS`
   styles only the program's own content). The desktop is met through standards: the unread count
   (loud chats) as `com.canonical.Unity.LauncherEntry` `Update` on the session bus (`Max.badge`);
   a new message in a loud chat as a desktop notification (`Max.notify`, `Gio.Notification`, its
   tap the `app.open-chat` action; the desktop buzzes or sounds for it — the `buzz` setting
   switches these); the start with the session as XDG autostart (`--background`; with no
-  graphical session the program exits at once and quietly). Shared code is `b8k-compat`:
-  `Settings("max")` (same ini, yes/no), `awake.Awake` while a voice plays, `photos.pixbuf_of`
-  (size checked before decoding) for photos. Voice keeps its own libmpv (`Libmpv`): b8k-compat's
+  graphical session the program exits at once and quietly). Shared code is `haltia-kit`:
+  `Settings("messenger", CONFIG)` (an ini, yes/no), `awake.Awake` while a voice plays, `photos.pixbuf_of`
+  (size checked before decoding) for photos. Voice keeps its own libmpv (`Libmpv`): the kit's
   `Player` takes no user agent, which MAX's CDN wants.
 
 ## Conventions
@@ -231,11 +245,11 @@ programs are found on `PATH` (`b8k-vplay`: `shutil.which`), never at `/usr/local
   `CONTEXT.md`; name new modules after them.
 - UI text is Russian; code comments, docstrings and commit messages are English. The README is
   Russian.
-- Large type is the point ("MAX in large type"): font and widget sizes live in the `CSS` block at
-  the top of `b8k-max`.
+- Large, calm type for an older person is the point (no «крупно» in names, ADR 0004): font and
+  widget sizes live in the `CSS` block at the top of `haltia-messenger`.
 - Commit subjects are full sentences ending with a period (older ones carry a `b8k-max:` prefix
   from the monorepo days).
-- `.gitattributes` forces LF for `*.sh`, `*.py` and `b8k-*`.
+- `.gitattributes` forces LF for `*.sh`, `*.py` and `haltia-*`.
 - This is an unofficial client (see the README's disclaimer): call it "a client for MAX", keep the
   icon free of MAX's logo or wordmark, and don't add bulk-sending, scraping or other automation
   features — MAX's terms (legal.max.ru/ps, 4.3.7, 4.3.10) forbid them and it blocks such clients.
@@ -243,12 +257,12 @@ programs are found on `PATH` (`b8k-vplay`: `shutil.which`), never at `/usr/local
 ## Tests
 
 `sh tests/run.sh` makes `.cache/venv` once (system PyGObject plus the PyMax wheel `install.sh`
-pins, and b8k-compat 1.1.2 from GitHub, or `B8K_COMPAT=path/to/checkout`), starts a `broadwayd` of its own and runs four plain scripts with `assert`s, each printing
+pins, and haltia-kit 2.0.0 from GitHub, or `HALTIA_KIT=path/to/checkout`), starts a `broadwayd` of its own and runs four plain scripts with `assert`s, each printing
 «… ok» per part: `tests/test_chatlist.py` (the chat list's rules: no MAX, no window),
 `tests/test_media.py` (Media with fake hands: hosts, the header, redirects, cache, players),
 `tests/test_backend.py` (Backend on the fake link, no window) and `tests/test_window.py` (the real
 window and Backend on the fake link). Tests build MAX's state in `FakeLink` (people, dialogs,
 groups, channels, messages with attachments and reactions), drive the window as a person would,
 and check what it shows (widget trees: rows, `ChatView.widget`) and what was asked of MAX
-(`fake.asked(...)`), not private attributes. `B8K_SHOTS=dir` saves screenshots. `tests/demo.py`
+(`fake.asked(...)`), not private attributes. `HALTIA_SHOTS=dir` saves screenshots. `tests/demo.py`
 opens the window on made-up chats.

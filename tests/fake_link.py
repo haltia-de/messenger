@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: GPL-2.0
 # Copyright (C) 2026 Mikhail Nevskiy
-"""A small MAX in memory, the other link beside b8k-max's PyMaxLink (see
+"""A small MAX in memory, the other link beside haltia-messenger's PyMaxLink (see
 CONTEXT.md: Связь с MAX). Tests and the demo build its state, run the real
 Backend and window on it, and read back what was asked of it in calls.
 

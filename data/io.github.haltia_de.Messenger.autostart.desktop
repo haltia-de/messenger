@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Messages
+Name[ru]=Сообщения
+Exec=haltia-messenger --background
+Icon=io.github.haltia_de.Messenger
+NoDisplay=true
+X-GNOME-Autostart-enabled=true
+X-B8K-Autostart=true

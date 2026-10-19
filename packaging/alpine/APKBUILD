@@ -1,28 +1,31 @@
 # Maintainer: Mikhail Nevskiy <rensomail@gmail.com>
-pkgname=b8k-max
-pkgver=1.19.1
+pkgname=haltia-messenger
+pkgver=2.0.0
 pkgrel=0
-pkgdesc="MAX: An unofficial client for the MAX messenger in large type (GTK 3)"
-url="https://github.com/haltia-de/max"
+pkgdesc="Сообщения: an unofficial client for the MAX messenger (Haltia, GTK 3)"
+url="https://github.com/haltia-de/messenger"
+# b8k-max until 2.0: apk upgrade takes this for it.
+provides="b8k-max=$pkgver-r$pkgrel"
+replaces="b8k-max"
 arch="noarch"
 license="GPL-2.0-only"
 # PyMax's own needs, then voice messages (libmpv) and emoji.
-depends="python3 py3-gobject3 gtk+3.0 py3-b8k-compat
+depends="python3 py3-gobject3 gtk+3.0 py3-haltia-kit>=2
 	py3-aiohttp py3-pydantic py3-aiofiles py3-aiosqlite py3-msgpack
 	py3-python-socks py3-qrcode py3-websockets py3-zstandard
 	py3-mpv mpv-libs font-noto-emoji"
 _whl=maxapi_python-2.4.1-py3-none-any.whl
-source="$pkgname-$pkgver.tar.gz::https://github.com/haltia-de/max/archive/v$pkgver.tar.gz
+source="$pkgname-$pkgver.tar.gz::https://github.com/haltia-de/messenger/archive/v$pkgver.tar.gz
 	$_whl::https://files.pythonhosted.org/packages/py3/m/maxapi-python/$_whl"
 noextract="$_whl"
 # GitHub names the tarball's folder after the repository, not the package.
-builddir="$srcdir/max-$pkgver"
+builddir="$srcdir/messenger-$pkgver"
 
 # install.sh checks the PyMax wheel given in source= (net: abuild fetches it).
 options="net !check"
 
 package() {
-	B8K_CACHE="$srcdir" sh ./install.sh "$pkgdir" /usr
+	HALTIA_CACHE="$srcdir" sh ./install.sh "$pkgdir" /usr
 }
 
 # `abuild checksum` fills this in for a release.

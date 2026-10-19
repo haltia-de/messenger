@@ -13,7 +13,7 @@ from fake_hands import FakeHands  # noqa: E402
 from fake_link import FakeLink, audio, file, now_ms, photo, video  # noqa: E402
 from gi.repository import Gdk, GLib, Gtk  # noqa: E402
 
-SHOTS = os.environ.get("B8K_SHOTS")  # a directory to save screenshots in, if set
+SHOTS = os.environ.get("HALTIA_SHOTS")  # a directory to save screenshots in, if set
 
 
 def spin(sec=0.0):

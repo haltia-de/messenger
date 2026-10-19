@@ -113,11 +113,11 @@ assert media.video("https://vd.okcdn.ru/v.mp4?sig=SECRET", "Мама")
 assert first.did[-1] == ("stop",)  # the voice stops for it
 assert hands.spawned[-1] == ["mpv", "--fs", "--ytdl=no", "--load-unsafe-playlists=no",
                              "--user-agent=" + media.agent, "--", "https://vd.okcdn.ru/v.mp4?sig=SECRET"]
-player = os.path.join(os.environ["HOME"], "b8k-vplay")
+player = os.path.join(os.environ["HOME"], "haltia-vplay")
 with open(player, "w") as fh:
     fh.write("#!/bin/sh\n")
 os.chmod(player, 0o755)
-bm.PLAYER = player
+bm.PLAYERS = (player,)
 assert media.video("https://vd.okcdn.ru/v.mp4", "Мама")
 cmd = hands.spawned[-1]
 assert cmd[:4] == [player, "--title", "Мама", "https://vd.okcdn.ru/v.mp4"]

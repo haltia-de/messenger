@@ -3,14 +3,14 @@
 # Copyright (C) 2026 Mikhail Nevskiy
 # Run the tests: sh tests/run.sh [test_backend.py test_window.py ...]
 # The first run makes .cache/venv (the system's PyGObject, plus the PyMax
-# wheel install.sh pins, by the same name and sha256, and b8k-compat 1.1.2,
-# or B8K_COMPAT=path/to/a/checkout); the window tests get
+# wheel install.sh pins, by the same name and sha256, and haltia-kit 2.0.0,
+# or HALTIA_KIT=path/to/a/checkout); the window tests get
 # a display of their own from broadwayd, stopped again at the end.
-# B8K_SHOTS=dir keeps screenshots of the window there.
+# HALTIA_SHOTS=dir keeps screenshots of the window there.
 set -eu
 here=$(cd "$(dirname "$0")" && pwd)
 top=$(dirname "$here")
-cache=${B8K_CACHE:-$top/.cache}
+cache=${HALTIA_CACHE:-$top/.cache}
 venv=$cache/venv
 whl=$(sed -n 's/^whl=//p' "$top/install.sh")
 sum=$(sed -n 's/^echo "\([0-9a-f]\{64\}\) .*/\1/p' "$top/install.sh")
@@ -29,9 +29,9 @@ if [ ! -x "$venv/bin/python" ]; then
 	fi
 fi
 
-# b8k-compat, the b8k programs' shared library (a dependency of this one).
-if ! "$venv/bin/python" -c "import b8k_compat" 2>/dev/null; then
-	compat=${B8K_COMPAT:-git+https://github.com/trudenboy/b8k-compat@v1.1.2}
+# The kit, Haltia's shared library (a dependency of this one).
+if ! "$venv/bin/python" -c "import haltia_kit.paths" 2>/dev/null; then
+	compat=${HALTIA_KIT:-git+https://github.com/haltia-de/kit@v2.0.0}
 	if command -v uv >/dev/null; then
 		VIRTUAL_ENV=$venv uv pip install -q "$compat"
 	else

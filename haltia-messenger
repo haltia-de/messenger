@@ -1,19 +1,21 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0
 # Copyright (C) 2026 Mikhail Nevskiy
-"""An unofficial client for the MAX messenger: large type, no web browser.
+"""Сообщения (Messages): an unofficial client for the MAX messenger, no web
+browser, part of the Haltia desktop.
 
-io.github.trudenboy.Max: a desktop program of its own, on any GTK 3
-desktop; the b8k tablet shell meets it only through freedesktop standards
-(its .desktop file, the Unity LauncherEntry count, notifications, XDG
-autostart) and gives the look through its GTK theme. Shared code is
-b8k-compat's (settings, keeping awake, photos).
+io.github.haltia_de.Messenger: a desktop program of its own, on any GTK 3
+desktop; the Haltia shell meets it only through freedesktop standards (its
+.desktop file, the Unity LauncherEntry count, MPRIS, notifications, XDG
+autostart) and gives the look through its GTK theme. Shared code is the
+kit's (haltia_kit 2: settings, keeping awake, photos, moving folders). Until 2.0 it was b8k-max, io.github.trudenboy.Max; its files move
+over at the first start (move_old_home).
 
-PyMax (MIT, unpacked in PREFIX/lib/b8k-max) speaks MAX's web protocol
-over a WebSocket, as web.max.ru does, so no web engine is loaded: about
-55 MB in all instead of a second browser. The first start shows a QR code
-to scan in MAX on a phone; the session is then kept in
-~/.local/share/b8k-max/web.db (mode 600). PyMax's simulated telemetry is
+PyMax (MIT, unpacked in PREFIX/lib/haltia-messenger) speaks MAX's web
+protocol over a WebSocket, as web.max.ru does, so no web engine is loaded:
+about 55 MB in all instead of a second browser. The first start shows a QR
+code to scan in MAX on a phone; the session is then kept in
+~/.local/share/haltia-messenger/web.db (mode 600). PyMax's simulated telemetry is
 off: a person is typing here.
 
 Telemetry of our own instead, as MAX's app reports it, so that the server
@@ -21,7 +23,7 @@ sees an ordinary client and is less likely to block the account: the
 screens a person really goes through (to the list, into a chat, the
 window hidden) and how long a chat took to show, in the event shapes of
 PyMax 2.4.1. No texts, no names. It is on until switched off in the
-settings (the gear in the header), kept in ~/.config/b8k/max.conf with
+settings (the gear in the header), kept in ~/.config/haltia/messenger.conf with
 the notifications of new messages.
 
 Pages: the chat list (initials, name, last message, time, unread count)
@@ -45,7 +47,7 @@ dialogs of people outside the contacts are kept off the list, the badge
 and the notifications here (the settings switch them back). Known are the contacts
 MAX sends at login, those added here, those written to here, and, the
 first time, everyone already in a dialog; the ids are kept in
-~/.local/share/b8k-max/known.json (mode 600), since after the first login
+~/.local/share/haltia-messenger/known.json (mode 600), since after the first login
 MAX sends only the contacts that changed. Who may add the account to chats
 is a setting of MAX itself: shown as MAX sends it at login, changed only in
 MAX's own app (it refuses web clients that, "safe mode").
@@ -57,7 +59,7 @@ with the session (with no graphical session it exits at once), closing
 the window only hides it, and starting it again brings the same process
 back (one instance through D-Bus). The unread count of loud chats goes to
 its launcher button as Unity's LauncherEntry. Chats open from a cache: the last
-messages of each chat on disk (~/.cache/b8k-max/chats, mode 600) and the
+messages of each chat on disk (~/.cache/haltia-messenger/chats, mode 600) and the
 last six chats kept built in memory; a chat with nothing new since its
 cache opens without asking MAX at all. The list keeps its rows and redraws
 only a chat that changed. Photos are cached on disk and pruned when not
@@ -66,7 +68,7 @@ shown for a month (daily, as the program runs for weeks).
 The list has two tabs, chats and channels. A long press on a chat pins it
 to the top or switches its notifications (and its part of the count);
 channels are quiet unless switched on. Both are kept here
-(~/.local/share/b8k-max/chats.json): PyMax has no pinning or muting.
+(~/.local/share/haltia-messenger/chats.json): PyMax has no pinning or muting.
 
 A chat opens with its cache and the newest PAGE messages; two older pages
 follow in the background, the rest as the reader scrolls up, keeping the
@@ -77,7 +79,7 @@ shows while an older page comes. A chat left keeps only its newest BUBBLES
 built and, back in it, the place it was left at; photos are fetched only
 near the screen. All of that is ChatView's, one per chat (CONTEXT.md).
 Voice messages play in the bubble (libmpv,
-sound only); a video opens full screen in b8k-vplay (mpv elsewhere) and a
+sound only); a video opens full screen in haltia-vplay (mpv elsewhere) and a
 file in the browser, by the short-lived link MAX gives on request.
 
 Reactions: a long press on a message offers six emoji; those on it show
@@ -85,7 +87,7 @@ under it with their counts, the own one highlighted, a tap puts one on or
 takes the own off. Others' reactions arrive live.
 
 The person of a dialog can be renamed (the edit menu): here only, kept in
-~/.local/share/b8k-max/names.json, since MAX's web protocol as PyMax has it
+~/.local/share/haltia-messenger/names.json, since MAX's web protocol as PyMax has it
 offers no renaming of contacts.
 """
 import asyncio
@@ -97,17 +99,21 @@ import shutil
 import subprocess
 import sys
 import threading
+import configparser
 import time
 import urllib.parse
 import urllib.request
 from datetime import date, datetime
 
-APP_ID = "io.github.trudenboy.Max"  # the GApplication, the .desktop file, the window
-# PyMax (its pinned wheel) is unpacked by install.sh into PREFIX/lib/b8k-max,
-# next to the bin directory this program is in.
+# One id everywhere (ADR 0004 of haltia-de/device-lenovo-b8000h): the
+# GApplication, the .desktop file, the window, the icon, AppStream, MPRIS.
+APP_ID = "io.github.haltia_de.Messenger"
+NAME = "Сообщения"  # on the screen: what it is, not the service (MAX is a trademark)
+# PyMax (its pinned wheel) is unpacked by install.sh into
+# PREFIX/lib/haltia-messenger, next to the bin directory this program is in.
 _here = os.path.dirname(os.path.realpath(os.path.abspath(sys.argv[0] or __file__)))
-for _lib in ("/usr/local/lib/b8k-max", "/usr/lib/b8k-max",
-             os.path.join(os.path.dirname(_here), "lib", "b8k-max")):
+for _lib in ("/usr/local/lib/haltia-messenger", "/usr/lib/haltia-messenger",
+             os.path.join(os.path.dirname(_here), "lib", "haltia-messenger")):
     if os.path.isdir(_lib) and _lib not in sys.path:
         sys.path.insert(0, _lib)
 
@@ -122,13 +128,18 @@ gi.require_version("GdkPixbuf", "2.0")
 gi.require_version("Pango", "1.0")
 from gi.repository import Gdk, GdkPixbuf, Gio, Gtk, Pango  # noqa: E402
 
-from b8k_compat import dialogs, photos  # noqa: E402
-from b8k_compat.awake import Awake  # noqa: E402
-from b8k_compat.settings import Settings  # noqa: E402
+from haltia_kit import dialogs, paths, photos  # noqa: E402
+from haltia_kit.awake import Awake  # noqa: E402
+from haltia_kit.settings import Settings  # noqa: E402
 
 
-DATA = os.path.expanduser("~/.local/share/b8k-max")
-PHOTOS = os.path.expanduser("~/.cache/b8k-max")
+DATA = os.path.expanduser("~/.local/share/haltia-messenger")
+PHOTOS = os.path.expanduser("~/.cache/haltia-messenger")
+CONFIG = os.path.expanduser("~/.config/haltia")  # messenger.conf, [messenger]
+# Where b8k-max (before 2.0) kept them: its folders by that name under these.
+BASES = [os.path.expanduser(b) for b in ("~/.config", "~/.local/share", "~/.cache")]
+OLD_NAME = "b8k-max"
+OLD_CONF = os.path.expanduser("~/.config/b8k/max.conf")
 PAGE = 30  # messages per history request: the newest when a chat opens, then older ones
 PREFETCH = 2  # older pages fetched in the background for the open chat
 FIRST = 12  # messages built at once when a chat opens: a screen of them
@@ -146,7 +157,33 @@ PHOTO_DAYS = 30  # cached photos older than this are removed
 CHATS = os.path.join(PHOTOS, "chats")  # message cache, one file per chat
 KEEP = 80  # messages kept per chat on disk
 VIEWS = 6  # chats kept built in memory
-SETTINGS = Settings("max")  # ~/.config/b8k/max.conf, [max]: yes/no as before
+
+
+def move_old_home():
+    """2.0 renamed the program (b8k-max → haltia-messenger): its session,
+    data, cache and settings move over from the old places once, at the
+    first start, so nothing is lost and MAX asks for no second login. The
+    folders through the kit (a link is left at the old name, till 3.0); the
+    settings here, as their name changes too ([max] → [messenger])."""
+    paths.migrate_dirs(OLD_NAME, "haltia-messenger", bases=BASES)
+    new_conf = os.path.join(CONFIG, "messenger.conf")
+    if os.path.isfile(OLD_CONF) and not os.path.lexists(new_conf):
+        try:
+            old = configparser.ConfigParser(interpolation=None)
+            old.read(OLD_CONF, encoding="utf-8")
+            conf = configparser.ConfigParser(interpolation=None)
+            conf["messenger"] = dict(old["max"]) if old.has_section("max") else {}
+            os.makedirs(CONFIG, exist_ok=True)
+            with open(new_conf + ".new", "w", encoding="utf-8") as fh:
+                conf.write(fh)
+            os.replace(new_conf + ".new", new_conf)
+            os.remove(OLD_CONF)
+        except (OSError, configparser.Error, UnicodeDecodeError) as exc:
+            print("haltia-messenger: settings not moved: %s" % exc, file=sys.stderr)
+
+
+move_old_home()
+SETTINGS = Settings("messenger", CONFIG)  # ~/.config/haltia/messenger.conf, [messenger]
 KNOWN = os.path.join(DATA, "known.json")  # people whose messages are shown (contacts_only)
 ALIASES = os.path.join(DATA, "names.json")  # user id -> the name given here
 PREFS = os.path.join(DATA, "chats.json")  # pinned chats, notifications switched per chat
@@ -175,7 +212,7 @@ EMOJI = (
     ("Разное", "🔥 ⭐ 🌟 ✨ 🎉 🎁 🎂 🌹 🌸 💐 ☀️ 🌧️ ❄️ ☕ 🍰 🍎 🏠 🚗 ⚽ 🎵 📷 📞 ✅ ❌ ❓ ❗ 💯"),
 )
 RECENT = 16  # recent emoji kept
-PLAYER = "b8k-vplay"  # Видео's video player, looked up on PATH; mpv if missing
+PLAYERS = ("haltia-vplay", "b8k-vplay")  # Видео's player (b8k-vplay before 2.0) on PATH; else mpv
 PLAYER_LOG = os.path.join(PHOTOS, "player.log")  # what the players said, for when one fails
 MONTHS = "янв фев мар апр мая июн июл авг сен окт ноя дек".split()
 COLOURS = ((0.21, 0.52, 0.89), (0.15, 0.64, 0.41), (0.90, 0.38, 0.0), (0.57, 0.25, 0.67),
@@ -623,7 +660,7 @@ class PyMaxLink:
         first, as they come. PyMax's runtime exists only once started: done
         at the login, once."""
         dispatcher = getattr(getattr(client, "_app", None), "dispatcher", None)
-        if dispatcher is None or getattr(dispatcher, "b8k_peeks", False):
+        if dispatcher is None or getattr(dispatcher, "haltia_peeks", False):
             return
         dispatch = dispatcher.dispatch
 
@@ -631,7 +668,7 @@ class PyMaxLink:
             self._peek(frame)
             await dispatch(frame)
         dispatcher.dispatch = peek_then_dispatch
-        dispatcher.b8k_peeks = True
+        dispatcher.haltia_peeks = True
 
     def _peek(self, frame):
         """A deletion in a frame from MAX: events.on_delete(chat, [ids])."""
@@ -661,7 +698,7 @@ class PyMaxLink:
         its invoke) exists only once start() runs."""
         from pymax.api.auth import service as auth
 
-        real = getattr(auth.require_payload_model, "b8k_real", auth.require_payload_model)
+        real = getattr(auth.require_payload_model, "haltia_real", auth.require_payload_model)
 
         def keep(response, model, *args, **kwargs):
             if getattr(model, "__name__", "") == "LoginResponse":
@@ -670,7 +707,7 @@ class PyMaxLink:
                     self.settings = config["user"]
             return real(response, model, *args, **kwargs)
 
-        keep.b8k_real = real
+        keep.haltia_real = real
         auth.require_payload_model = keep
 
     def invites(self):
@@ -1491,7 +1528,7 @@ class Libmpv:
     def __init__(self, on_time, on_end):
         import mpv
 
-        self.awake = Awake("MAX", "plays a voice message")
+        self.awake = Awake(NAME, "plays a voice message")
 
         self.mpv = mpv.MPV(video=False, ytdl=False, load_unsafe_playlists=False,
                            input_default_bindings=False, input_vo_keyboard=False,
@@ -1510,7 +1547,7 @@ class Libmpv:
                 GLib.idle_add(lambda: (self.awake.release(), on_end(), False)[2])
 
     def play(self, url, agent):
-        # b8k-compat's Player takes no user agent, which MAX's CDN wants.
+        # the kit's Player takes no user agent, which MAX's CDN wants.
         self.mpv["user-agent"] = agent
         self.mpv.play(url)
         self.mpv.pause = False
@@ -1568,7 +1605,7 @@ def default_folder():
 
 
 def fitted(path, size):
-    """A picture file within size × size, turned upright; b8k-compat's
+    """A picture file within size × size, turned upright; the kit's
     pixbuf_of refuses one too large or of unknown size before decoding (a
     sender chooses these files)."""
     _fmt, w, h = GdkPixbuf.Pixbuf.get_file_info(path)
@@ -1593,7 +1630,7 @@ class Media:
     pruned when unshown for PHOTO_DAYS; voice messages play through libmpv,
     one at a time (on_time(sec, total or None), on_end() come back on the
     GTK side), audio files too; a
-    video opens full screen in b8k-vplay (mpv elsewhere) without
+    video opens full screen in haltia-vplay (mpv elsewhere) without
     youtube-dl or playlists; a file in the browser. What fails, and what
     the players say, goes to PLAYER_LOG (600, host and path only).
 
@@ -1742,7 +1779,7 @@ class Media:
         self.stop()
         # No youtube-dl and no playlists: the link is played as it is.
         opts = {"ytdl": "no", "load-unsafe-playlists": "no", "user-agent": self.agent}
-        player = shutil.which(PLAYER)  # a package puts it in /usr/bin (ADR 0002)
+        player = next(filter(None, map(shutil.which, PLAYERS)), None)  # /usr/bin (ADR 0002)
         if player:
             opts.update({"terminal": "yes", "msg-level": "all=warn"})  # libmpv: to the log
             cmd = [player, "--title", title, url] + ["%s=%s" % kv for kv in opts.items()]
@@ -2551,7 +2588,7 @@ class ChatView:
 
 
 # --- what plays, told to the desktop ---------------------------------------------
-MPRIS_NAME = "org.mpris.MediaPlayer2.io.github.trudenboy.Max"
+MPRIS_NAME = "org.mpris.MediaPlayer2." + APP_ID
 MPRIS_PATH = "/org/mpris/MediaPlayer2"
 MPRIS_XML = """<node>
   <interface name="org.mpris.MediaPlayer2">
@@ -2598,7 +2635,7 @@ MPRIS_XML = """<node>
 
 class Mpris:
     """What plays (a voice message, an audio file), told to the desktop by
-    MPRIS on the session bus, as players do: the b8k shell shows it on the
+    MPRIS on the session bus, as players do: the Haltia shell shows it on the
     program's button, GNOME and KDE in their player widgets; they can pause,
     go on, stop it, or raise the window at its message. Stopped when nothing
     plays. changed() after every change of what plays."""
@@ -2629,7 +2666,7 @@ class Mpris:
             return {"mpris:trackid": GLib.Variant("o", "/org/mpris/MediaPlayer2/TrackList/NoTrack")}
         item = app.playing[4]
         chat = (app.chatlist.get(app.playing_chat) or {}).get("title", "MAX")
-        meta = {"mpris:trackid": GLib.Variant("o", "/io/github/trudenboy/Max/track/%d"
+        meta = {"mpris:trackid": GLib.Variant("o", "/" + APP_ID.replace(".", "/") + "/track/%d"
                                               % abs(int(app.playing_msg or 0))),
                 "xesam:title": GLib.Variant("s", item.get("name") or "Голосовое сообщение"),
                 "xesam:artist": GLib.Variant("as", [chat]),
@@ -2643,7 +2680,7 @@ class Mpris:
         playing = bool(app.playing)
         values = {
             "CanQuit": GLib.Variant("b", False), "CanRaise": GLib.Variant("b", True),
-            "HasTrackList": GLib.Variant("b", False), "Identity": GLib.Variant("s", "MAX"),
+            "HasTrackList": GLib.Variant("b", False), "Identity": GLib.Variant("s", NAME),
             "DesktopEntry": GLib.Variant("s", APP_ID),
             "SupportedUriSchemes": GLib.Variant("as", []),
             "SupportedMimeTypes": GLib.Variant("as", []),
@@ -2732,13 +2769,13 @@ class Max(Gtk.Application):
         Gtk.StyleContext.add_provider_for_screen(
             Gdk.Screen.get_default(), provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
 
-        self.win = Gtk.ApplicationWindow(application=self, title="MAX")
+        self.win = Gtk.ApplicationWindow(application=self, title=NAME)
         self.win.set_default_size(1160, 800)
         # Closing only hides the window: messages keep coming in.
         self.win.connect("delete-event", lambda w, _e: w.hide() or True)
         bar = Gtk.HeaderBar()
         heading = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-        self.title = label("MAX", "title", xalign=0.5)
+        self.title = label(NAME, "title", xalign=0.5)
         self.sub = label("", "sub", xalign=0.5)
         heading.pack_start(self.title, False, False, 0)
         heading.pack_start(self.sub, False, False, 0)
@@ -3098,7 +3135,7 @@ class Max(Gtk.Application):
         self.qr_image.set_from_pixbuf(GdkPixbuf.Pixbuf.new_from_file(path))
         if self.stack.get_visible_child_name() == "settings":
             self.back.hide()
-            self.title.set_text("MAX")
+            self.title.set_text(NAME)
         self.stack.set_visible_child_name("qr")
         self.win.present()  # a login needs the person, background or not
         return False
@@ -3150,13 +3187,13 @@ class Max(Gtk.Application):
     # what the desktop is told: the count on the program's button, new messages
     def badge(self, count):
         """The unread count on the program's button, as a desktop (and the
-        b8k shell) reads it: Unity's LauncherEntry on the session bus. It
+        Haltia shell) reads it: Unity's LauncherEntry on the session bus. It
         goes by itself when the program leaves the bus."""
         bus = self.get_dbus_connection()
         if bus is None:
             return
         try:
-            bus.emit_signal(None, "/io/github/trudenboy/Max", "com.canonical.Unity.LauncherEntry",
+            bus.emit_signal(None, "/" + APP_ID.replace(".", "/"), "com.canonical.Unity.LauncherEntry",
                             "Update", GLib.Variant("(sa{sv})", (
                                 "application://%s.desktop" % APP_ID,
                                 {"count": GLib.Variant("x", count),
@@ -3280,7 +3317,7 @@ class Max(Gtk.Application):
     def show_list(self):
         self.open_chat = None
         self.back.hide()
-        self.title.set_text("MAX")
+        self.title.set_text(NAME)
         self.stack.set_visible_child_name("chats")
         self.fill_list()
 
@@ -3789,7 +3826,7 @@ class Max(Gtk.Application):
             self.close_photo()
         elif self.stack.get_visible_child_name() == "settings" and self.came_from != "chats":
             self.back.hide()  # to the login page, which has no list behind it
-            self.title.set_text("MAX")
+            self.title.set_text(NAME)
             self.stack.set_visible_child_name(self.came_from)
         else:
             self.show_list()
@@ -3830,7 +3867,7 @@ class Max(Gtk.Application):
         save_setting("confirm", on)
 
     def ask(self, question, yes):
-        """A question in the window (b8k-compat's dialog: Отмена by default),
+        """A question in the window (the kit's dialog: Отмена by default),
         only while confirmations are on; True to go ahead."""
         if not self.confirm_acts:
             return True

@@ -156,6 +156,37 @@ import json  # noqa: E402
 assert '"messageId": 117455094100479781' in json.dumps(pl)
 ok("forwarding")
 
+# --- 2.0's rename: b8k-max's session, data, cache and settings move over once ------------------
+import shutil  # noqa: E402
+for d in (bm.DATA, bm.PHOTOS, bm.CONFIG):
+    shutil.rmtree(d, ignore_errors=True)
+OLD_DATA = os.path.join(bm.BASES[1], "b8k-max")
+OLD_CACHE = os.path.join(bm.BASES[2], "b8k-max")
+os.makedirs(OLD_DATA)
+os.makedirs(os.path.join(OLD_CACHE, "chats"))
+os.makedirs(os.path.dirname(bm.OLD_CONF))
+with open(os.path.join(OLD_DATA, "web.db"), "w") as fh:
+    fh.write("session")
+os.chmod(os.path.join(OLD_DATA, "web.db"), 0o600)
+with open(os.path.join(OLD_CACHE, "chats", "5.json"), "w") as fh:
+    fh.write("[]")
+with open(bm.OLD_CONF, "w") as fh:
+    fh.write("[max]\ntelemetry = no\nfolder = /home/x/Загрузки/MAX\n")
+bm.move_old_home()
+assert open(os.path.join(bm.DATA, "web.db")).read() == "session"
+assert os.stat(os.path.join(bm.DATA, "web.db")).st_mode & 0o777 == 0o600
+assert os.path.exists(os.path.join(bm.PHOTOS, "chats", "5.json"))
+assert os.path.islink(OLD_DATA) and os.path.islink(OLD_CACHE)  # the kit leaves links, till 3.0
+assert os.path.realpath(OLD_DATA) == os.path.realpath(bm.DATA) and not os.path.exists(bm.OLD_CONF)
+assert bm.SETTINGS.get_bool("telemetry", True) is False
+assert bm.SETTINGS.get("folder") == "/home/x/Загрузки/MAX"
+bm.move_old_home()  # once moved, nothing more happens
+assert open(os.path.join(bm.DATA, "web.db")).read() == "session"
+os.remove(OLD_DATA)
+os.remove(OLD_CACHE)
+bm.SETTINGS.set("telemetry", True)
+ok("the old home moved")
+
 # --- deletions: MAX's frames read by the link, then the cache and the list ---------------------
 from types import SimpleNamespace  # noqa: E402
 from pymax.protocol import Opcode  # noqa: E402
@@ -273,5 +304,5 @@ class Answer:
 assert isinstance(auth.require_payload_model(Answer(), LoginResponse), LoginResponse)
 assert link.invites() == "ALL"
 link._watch_login()  # a second run does not wrap twice
-assert auth.require_payload_model.b8k_real.__module__ == "pymax.api.response"
+assert auth.require_payload_model.haltia_real.__module__ == "pymax.api.response"
 ok("the link's start and login settings")
