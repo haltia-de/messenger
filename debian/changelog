@@ -1,3 +1,9 @@
+haltia-messenger (2.3.1) unstable; urgency=medium
+
+  * The Debian packages, which 2.3.0's changelog date kept back.
+
+ -- Haltia <rensomail@gmail.com>  Mon, 19 Oct 2026 21:45:00 +0300
+
 haltia-messenger (2.3.0) unstable; urgency=medium
 
   * Packages for Flatpak and Debian; the login's QR code without Pillow.

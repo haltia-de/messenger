@@ -20,6 +20,11 @@
   </content_rating>
   <requires><control>touch</control></requires>
   <releases>
+    <release version="2.3.1" date="2026-10-19">
+      <description>
+        <p>Пакеты для Debian 13 и Ubuntu 24.04 теперь есть в выпуске.</p>
+      </description>
+    </release>
     <release version="2.3.0" date="2026-10-19">
       <description>
         <ul>
