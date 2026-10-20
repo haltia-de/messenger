@@ -22,6 +22,7 @@ def load():
     loader = importlib.machinery.SourceFileLoader("haltia_messenger", SCRIPT)
     spec = importlib.util.spec_from_loader("haltia_messenger", loader)
     module = importlib.util.module_from_spec(spec)
+    sys.modules["haltia_messenger"] = module  # tests/fake_link.py takes the link's entities from it
     loader.exec_module(module)
     return module
 

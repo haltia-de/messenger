@@ -4,8 +4,8 @@ The words this program's code and reviews use for what it deals with. Each
 line: the term, its name in the code, what it is.
 
 - **Связь с MAX** (MAX link, `PyMaxLink`; `FakeLink` in tests): every request
-  to MAX and every event from it, in PyMax's objects; nothing above it knows
-  PyMax's internals.
+  to MAX and every event from it, in the link's own Person, Chat and Message;
+  nothing above it knows PyMax.
 - **Медиа** (Media, `Media`): fetching and playing what messages carry —
   photos, previews, voice, video, files — and how MAX's CDNs are reached.
 - **Окно чата** (Chat view, `ChatView`): one chat on screen, with its

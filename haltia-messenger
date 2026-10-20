@@ -91,6 +91,7 @@ The person of a dialog can be renamed (the edit menu): here only, kept in
 offers no renaming of contacts.
 """
 import asyncio
+import dataclasses
 import hashlib
 import json
 import os
@@ -640,6 +641,82 @@ def attach_summary(a):
     return names.get(t, ""), None
 
 
+def max_message(msg):
+    """A PyMax Message as the link's own; a forwarded one shows the original
+    (its text and attachments, carried inside its link), fwd saying whence."""
+    shown, fwd = msg, None
+    link = getattr(msg, "link", None)
+    if link is not None and kind(getattr(link, "type", "")) == "FORWARD" and link.message:
+        shown = link.message
+        fwd = {"chat": link.chat_name, "sender": shown.sender}
+    out = Message(msg.id, msg.chat_id, msg.sender, msg.time, shown_text(shown.text), fwd=fwd)
+    for a in shown.attaches or []:
+        what, url = attach_summary(a)
+        item = media_of(a)
+        out.parts.append(what)
+        if url:
+            out.photos.append(url)
+        elif item:
+            out.media.append(item)
+        elif what:
+            out.notes.append(what)
+    out.reactions, out.yours = reactions_of(msg.reaction_info)
+    return out
+
+
+def max_chat(c):
+    """A PyMax Chat as the link's own."""
+    members = list(c.participants or {})
+    return Chat(c.id, kind(c.type), c.title or None, members,
+                c.participants_count or len(members), c.new_messages or 0,
+                max_message(c.last_message) if c.last_message else None, c.last_event_time or 0)
+
+
+def max_person(user):
+    return Person(user.id, user_name(user))
+
+
+# --- what a link hands out -----------------------------------------------------------
+# Every link (PyMaxLink; tests/fake_link.py) gives these, never its library's
+# objects: nothing above a link knows which messenger it talks to.
+@dataclasses.dataclass
+class Person:
+    """Someone in the messenger: their id and the name they have there."""
+    id: object
+    name: str = ""
+
+
+@dataclasses.dataclass
+class Message:
+    """A message as it is shown: for a forwarded one the original's text and
+    attachments, and fwd ({"chat": its chat's name or None, "sender": its
+    sender}) saying where it came from."""
+    id: object
+    chat: object
+    sender: object
+    time: int  # ms
+    text: str = ""  # in words: a messenger's own keys are put in words by its link
+    photos: list = dataclasses.field(default_factory=list)  # links of its photos
+    media: list = dataclasses.field(default_factory=list)  # media items (media_of)
+    notes: list = dataclasses.field(default_factory=list)  # what is not shown, in words
+    parts: list = dataclasses.field(default_factory=list)  # each attachment in words ("" a photo)
+    reactions: list = dataclasses.field(default_factory=list)  # [[emoji, count]]
+    yours: str = None  # the account's own reaction
+    fwd: dict = None
+
+
+@dataclasses.dataclass
+class Chat:
+    id: object
+    kind: str  # "DIALOG", "CHAT" (a group) or "CHANNEL"
+    title: str = None  # None for a dialog: it is called by the person
+    members: list = dataclasses.field(default_factory=list)  # ids known in it
+    count: int = 0  # how many are in it
+    unread: int = 0
+    last: Message = None  # its last message
+    time: int = 0  # ms of its last event
+
+
 # --- MAX, in its own thread -------------------------------------------------
 # --- the link to MAX -------------------------------------------------------------
 def forward_payload(chat_id, msg_id, from_chat_id, cid):
@@ -654,9 +731,10 @@ def forward_payload(chat_id, msg_id, from_chat_id, cid):
 class PyMaxLink:
     """The link to MAX (CONTEXT.md: Связь с MAX) through PyMax's web client:
     every request this program makes, and the events it gets, in one place.
-    It hands out PyMax's own objects (Chat, Message, User, ReactionInfo) and
-    keeps everything else of PyMax, its internals included, to itself, so a
-    PyMax upgrade is checked here. tests/fake_link.py is the other one.
+    It hands out the link's own Person, Chat and Message (max_person,
+    max_chat, max_message turn PyMax's into them) and keeps everything of
+    PyMax, its internals included, to itself, so a PyMax upgrade is checked
+    here. tests/fake_link.py is the other one.
 
     run(events) logs in and lives as long as the connection: it calls
     events.on_qr(url) when a QR code is to be scanned, on_login(me, chats,
@@ -771,15 +849,17 @@ class PyMaxLink:
             agent = device.user_agent.header_user_agent
         except AttributeError:
             agent = None
-        await self.events.on_login(client.me.contact if client.me else None,
-                                   list(client.chats or []), list(client.contacts or []),
+        me = client.me.contact if client.me else None
+        await self.events.on_login(max_person(me) if me else None,
+                                   [max_chat(c) for c in client.chats or []],
+                                   [max_person(u) for u in client.contacts or [] if u],
                                    agent, device.client_session_id)
 
     async def _disconnected(self, exc, _reconnect, _delay):
         await self.events.on_disconnect(repr(exc))
 
     async def _message(self, msg, _client):
-        await self.events.on_message(msg)
+        await self.events.on_message(max_message(msg))
 
     async def _reaction(self, event, _client):
         reactions = [[c.reaction, c.count] for c in event.counters or [] if c.count]
@@ -792,20 +872,20 @@ class PyMaxLink:
     # chats and people
     async def chats_page(self, marker=None):
         """A page of the chat list, the newest first, older than marker (ms)."""
-        return await self._api.chats.fetch_chats(marker)
+        return [max_chat(c) for c in await self._api.chats.fetch_chats(marker) or []]
 
     async def chats(self, ids):
-        return await self._api.chats.get_chats(list(ids))
+        return [max_chat(c) for c in await self._api.chats.get_chats(list(ids)) or [] if c]
 
     async def users(self, ids):
-        return await self._api.users.get_users(list(ids))
+        return [max_person(u) for u in await self._api.users.get_users(list(ids)) or [] if u]
 
     async def find_phone(self, phone):
-        """The user with this phone number; an error if nobody in MAX has it."""
-        return await self._api.users.search_by_phone(phone)
+        """The person with this phone number; an error if nobody in MAX has it."""
+        return max_person(await self._api.users.search_by_phone(phone))
 
     async def add_contact(self, user_id):
-        return await self._api.users.add_contact(user_id)
+        return max_person(await self._api.users.add_contact(user_id))
 
     async def link_info(self, link):
         """The channel or group behind a link, or None. PyMax's own call
@@ -820,10 +900,11 @@ class PyMaxLink:
         at = link.find("join/")  # invite links go as join/…, public ones whole
         frame = LinkInfoPayload(link=link[at:] if at != -1 else link)
         response = await self.client._app.invoke(Opcode.LINK_INFO, frame.to_payload())
-        return parse_payload_item_model(response, ChatPayloadKey.CHAT, Chat)
+        chat = parse_payload_item_model(response, ChatPayloadKey.CHAT, Chat)
+        return max_chat(chat) if chat is not None else None
 
     async def join(self, link):
-        return await self._api.chats.join_channel(link)  # groups too
+        return max_chat(await self._api.chats.join_channel(link))  # groups too
 
     async def leave(self, chat_id):
         """Out of a group or channel."""
@@ -840,16 +921,18 @@ class PyMaxLink:
         """Up to backward messages, the newest ones, or those older than
         before (ms)."""
         if before is None:
-            return await self._api.messages.fetch_history(chat_id=chat_id, backward=backward)
-        msgs = await self._api.messages.fetch_history(chat_id=chat_id, backward=backward,
-                                                      forward=0, from_=before - 1)
-        return [m for m in msgs if m.time < before]
+            msgs = await self._api.messages.fetch_history(chat_id=chat_id, backward=backward)
+        else:
+            msgs = await self._api.messages.fetch_history(chat_id=chat_id, backward=backward,
+                                                          forward=0, from_=before - 1)
+        return [max_message(m) for m in msgs or [] if before is None or m.time < before]
 
     async def read(self, chat_id, msg_id):
         await self._api.messages.read_message(msg_id, chat_id)
 
     async def send(self, chat_id, text):
-        return await self._api.messages.send_message(chat_id, text)
+        msg = await self._api.messages.send_message(chat_id, text)
+        return max_message(msg) if msg else None
 
     async def forward(self, chat_id, msg_id, from_chat_id):
         """A message (its attachments with it) into another chat, as MAX
@@ -865,14 +948,16 @@ class PyMaxLink:
         payload = forward_payload(chat_id, msg_id, from_chat_id,
                                   -self._api.messages._next_cid())
         response = await self.client._app.invoke(Opcode.MSG_SEND, payload)
-        return bind_api_model(self.client._app, require_payload_model(response, Message))
+        return max_message(bind_api_model(self.client._app, require_payload_model(response, Message)))
 
     async def react(self, chat_id, msg_id, emoji):
         """The account's reaction put on (None: taken off); MAX's counts
-        afterwards (ReactionInfo), or None when it sends none."""
+        afterwards ([[emoji, count]], own emoji), or None when it sends none."""
         if emoji:
-            return await self._api.messages.add_reaction(chat_id, msg_id, emoji)
-        return await self._api.messages.remove_reaction(chat_id, msg_id)
+            info = await self._api.messages.add_reaction(chat_id, msg_id, emoji)
+        else:
+            info = await self._api.messages.remove_reaction(chat_id, msg_id)
+        return reactions_of(info) if info else None
 
     async def media_url(self, chat_id, msg_id, item):
         """The short-lived link MAX gives for a video or a file of a message.
@@ -1009,7 +1094,7 @@ class Backend:
         self.online = True
         self.tries = 0
         if me:
-            self.names[self.me] = user_name(me)
+            self.names[self.me] = me.name
         # On a reconnect the sync only brings chats that changed since the
         # last one, so page through the whole list as well.
         found = {c.id: c for c in chats or []}
@@ -1024,7 +1109,7 @@ class Backend:
                 found.setdefault(c.id, c)
             if not page or not fresh:
                 break
-            marker = min(c.last_event_time for c in page if c.last_event_time) - 1
+            marker = min(c.time for c in page if c.time) - 1
         chats = list(found.values())
         self.chats = found
         # The contacts come whole on the first login, then only what changed:
@@ -1033,15 +1118,15 @@ class Backend:
         for u in contacts or []:
             if u:
                 self.known.add(u.id)
-                self.names.setdefault(u.id, user_name(u))
+                self.names.setdefault(u.id, u.name)
         if not self.seeded:
             self.known.update(p for p in map(self.peer, chats) if p)
             self.seeded = True
         save_json(KNOWN, sorted(self.known))
         want = set()
         for c in chats:
-            if kind(c.type) == "DIALOG":
-                want.update(u for u in c.participants if u != self.me)
+            if c.kind == "DIALOG":
+                want.update(u for u in c.members if u != self.me)
         await self.lookup(want)
         GLib.idle_add(self.ui.connected, True)
         if self.me:
@@ -1051,15 +1136,15 @@ class Backend:
 
     async def on_message(self, msg):
         await self.lookup({msg.sender})
-        known = msg.chat_id in self.chats  # a new chat comes with its count
-        chat = await self.chat(msg.chat_id) if msg.chat_id is not None else None
+        known = msg.chat in self.chats  # a new chat comes with its count
+        chat = await self.chat(msg.chat) if msg.chat is not None else None
         if chat is not None:
-            chat.last_message = msg
+            chat.last = msg
             if msg.sender != self.me and known:
-                chat.new_messages = (chat.new_messages or 0) + 1
+                chat.unread += 1
         out = self.message(msg)
-        if msg.chat_id is not None:
-            self.cache.add(msg.chat_id, [out])
+        if msg.chat is not None:
+            self.cache.add(msg.chat, [out])
         GLib.idle_add(self.ui.incoming, out, self.summary(chat) if chat is not None else None)
 
     async def on_disconnect(self, why):
@@ -1075,12 +1160,12 @@ class Backend:
         chat = self.chats.get(chat_id)
         summary = None
         if chat is not None:
-            if chat.last_message is not None and chat.last_message.id in msg_ids:
+            if chat.last is not None and chat.last.id in msg_ids:
                 try:
                     newest = await self.link.history(chat_id, 1)
                 except Exception:
                     newest = []
-                chat.last_message = newest[-1] if newest else None
+                chat.last = newest[-1] if newest else None
             summary = self.summary(chat)
         GLib.idle_add(self.ui.deleted, chat_id, list(msg_ids), summary)
 
@@ -1099,14 +1184,13 @@ class Backend:
             except Exception:
                 continue
             for u in users or []:
-                if u:
-                    self.names[u.id] = user_name(u)
+                self.names[u.id] = u.name
 
     def peer(self, chat):
         """The other person of a dialog (None in Избранное, a group, a channel)."""
-        if kind(chat.type) != "DIALOG":
+        if chat.kind != "DIALOG":
             return None
-        others = [u for u in chat.participants if u != self.me]
+        others = [u for u in chat.members if u != self.me]
         return others[0] if others else None
 
     def remember(self, user_id):
@@ -1122,68 +1206,46 @@ class Backend:
     def title(self, chat):
         if chat.title:
             return chat.title
-        if kind(chat.type) == "DIALOG":
-            others = [u for u in chat.participants if u != self.me]
+        if chat.kind == "DIALOG":
+            others = [u for u in chat.members if u != self.me]
             if not others:
                 return "Избранное"
             return self.name(others[0], "Собеседник")
         return "Чат"
 
-    @staticmethod
-    def carried(msg):
-        """The message whose text and attachments are shown: a forwarded
-        one carries the original inside its link."""
-        link = getattr(msg, "link", None)
-        if link is not None and kind(getattr(link, "type", "")) == "FORWARD" and link.message:
-            return link.message
-        return msg
-
     def preview(self, msg):
         if not msg:
             return ""
-        shown = self.carried(msg)
-        text = shown_text(shown.text).replace("\n", " ")
+        text = msg.text.replace("\n", " ")
         if not text:
-            parts = [attach_summary(a)[0] or "фото" for a in shown.attaches or []]
-            text = ", ".join(p for p in parts if p).capitalize()
-        if shown is not msg:
+            text = ", ".join(p or "фото" for p in msg.parts).capitalize()
+        if msg.fwd is not None:
             text = "↪ " + text
         if msg.sender == self.me and self.me:
             text = "Вы: " + text
         return text
 
     def summary(self, chat):
-        last = chat.last_message
+        last = chat.last
         peer = self.peer(chat)
-        return {"id": chat.id, "title": self.title(chat), "type": kind(chat.type),
-                "last": self.preview(last), "time": (last.time if last else 0) or chat.last_event_time,
-                "unread": chat.new_messages or 0, "peer": peer,
+        return {"id": chat.id, "title": self.title(chat), "type": chat.kind,
+                "last": self.preview(last), "time": (last.time if last else 0) or chat.time,
+                "unread": chat.unread, "peer": peer,
                 "stranger": peer is not None and peer not in self.known}
 
     def message(self, msg):
-        shown = self.carried(msg)
+        """A message as the window and the cache keep it (a dict)."""
         forwarded = None
-        if shown is not msg:  # from whom: the chat it came from, else its sender
-            forwarded = msg.link.chat_name or self.name(shown.sender) or "…"
-        texts, photos, media = [], [], []
-        for a in shown.attaches or []:
-            what, url = attach_summary(a)
-            item = media_of(a)
-            if url:
-                photos.append(url)
-            elif item:
-                media.append(item)
-            elif what:
-                texts.append("[%s]" % what)
-        body = shown_text(shown.text)
-        if texts:
-            body = (body + "\n" if body else "") + " ".join(texts)
-        reactions, yours = reactions_of(msg.reaction_info)
-        return {"id": msg.id, "chat": msg.chat_id, "sender": msg.sender,
-                "who": self.name(msg.sender), "text": body, "photos": photos,
+        if msg.fwd is not None:  # from whom: the chat it came from, else its sender
+            forwarded = msg.fwd.get("chat") or self.name(msg.fwd.get("sender")) or "…"
+        body = msg.text
+        if msg.notes:
+            body = (body + "\n" if body else "") + " ".join("[%s]" % n for n in msg.notes)
+        return {"id": msg.id, "chat": msg.chat, "sender": msg.sender,
+                "who": self.name(msg.sender), "text": body, "photos": list(msg.photos),
                 "time": msg.time, "mine": bool(self.me) and msg.sender == self.me,
-                "reactions": reactions, "yours": yours, "media": media,
-                "forwarded": forwarded}
+                "reactions": [list(r) for r in msg.reactions], "yours": msg.yours,
+                "media": [dict(i) for i in msg.media], "forwarded": forwarded}
 
     async def chat(self, chat_id):
         """The chat, from the list or asked for (one just joined, a new
@@ -1210,8 +1272,8 @@ class Backend:
         # and reactions while running come as events). A cache of a few
         # messages (a chat that came by an event) is not full: asked for.
         cached = self.cache.read(chat_id)
-        last = chat.last_message
-        if len(cached) >= PAGE and last and not chat.new_messages and \
+        last = chat.last
+        if len(cached) >= PAGE and last and not chat.unread and \
                 any(m["id"] == last.id for m in cached[-5:]):
             return [], False
         self.ask()
@@ -1223,7 +1285,7 @@ class Backend:
         if msgs:
             try:
                 await self.link.read(chat_id, msgs[-1].id)
-                chat.new_messages = 0
+                chat.unread = 0
             except Exception:
                 pass
         out = [self.message(m) for m in msgs]
@@ -1267,7 +1329,7 @@ class Backend:
         self.cache.add(chat_id, [out])
         chat = await self.chat(chat_id)
         if chat is not None:
-            chat.last_message = msg
+            chat.last = msg
         return out, self.summary(chat) if chat is not None else None
 
     async def send(self, chat_id, text):
@@ -1285,14 +1347,14 @@ class Backend:
         """The person with this phone number, if they are in MAX."""
         self.ask()
         user = await self.link.find_phone(phone)
-        self.names[user.id] = user_name(user)
+        self.names[user.id] = user.name
         return {"id": user.id, "name": self.name(user.id),
                 "chat": self.me ^ user.id if self.me else None}  # their dialog, as MAX numbers it
 
     async def add_contact(self, user_id):
         self.ask()
         user = await self.link.add_contact(user_id)
-        self.names[user.id] = user_name(user)
+        self.names[user.id] = user.name
         self.remember(user.id)
 
     async def link_info(self, link):
@@ -1301,8 +1363,8 @@ class Backend:
         chat = await self.link.link_info(link)
         if chat is None:
             return None
-        return {"id": chat.id, "title": chat.title or "Без названия", "type": kind(chat.type),
-                "members": chat.participants_count or len(chat.participants),
+        return {"id": chat.id, "title": chat.title or "Без названия", "type": chat.kind,
+                "members": chat.count or len(chat.members),
                 "joined": chat.id in self.chats}
 
     async def join(self, link):
@@ -1316,8 +1378,8 @@ class Backend:
         (the link can do no other)."""
         self.ask()
         chat = self.chats.get(chat_id)
-        stamp = chat.last_event_time if chat else None
-        if chat is not None and kind(chat.type) in ("CHAT", "CHANNEL"):
+        stamp = chat.time if chat else None
+        if chat is not None and chat.kind in ("CHAT", "CHANNEL"):
             await self.link.leave(chat_id)
             try:  # and its messages off the list, as the app does
                 await self.link.delete(chat_id, stamp)
@@ -1335,7 +1397,7 @@ class Backend:
         info = await self.link.react(chat_id, msg_id, emoji)
         if info is None:
             return None  # taken, but MAX sent no counts: the window counts itself
-        reactions, _ = reactions_of(info)
+        reactions, _ = info
         self.cache.react(chat_id, msg_id, reactions, emoji)
         return reactions, emoji
 

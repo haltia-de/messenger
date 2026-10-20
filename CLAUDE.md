@@ -105,16 +105,20 @@ programs are found on `PATH` (`haltia-vplay`, `b8k-vplay` before 2.0: `shutil.wh
   event from it goes through one link object: `run(events)`, `chats_page`, `chats`, `users`,
   `history`, `read`, `send`, `find_phone`, `add_contact`, `link_info`, `join`, `leave`, `delete`
   (only for this account: it cannot delete for all), `react`, `media_url`, `invites`, `log`.
-  It hands out PyMax's own objects (`Chat`, `Message`, `User`, `ReactionInfo`) and keeps PyMax's
-  internals (`client._app`, raw opcodes `LINK_INFO`/`LOG`/`CONFIG`) to itself: Backend never
-  touches `client._app` or calls methods on PyMax objects. Events go to `Backend.on_qr`,
+  It hands out the link's own entities, plain dataclasses of the script — `Person` (id, name),
+  `Chat` (id, kind, title, members, count, unread, last, time) and `Message` (as shown: text in
+  words, photos, media items, notes of what is not shown, parts for a preview, reactions, yours,
+  fwd) — never PyMax's: `max_person`/`max_chat`/`max_message` make them (MAX's service keys put
+  in words, a forward's original carried, attachments sorted). PyMax and its internals
+  (`client._app`, raw opcodes `LINK_INFO`/`LOG`/`CONFIG`) stay inside the link; nothing above
+  it imports PyMax. Events go to `Backend.on_qr`,
   `on_login`, `on_message`, `on_reaction`, `on_delete`. Deletions are read from the frames
   themselves (`_watch_deletions`, set once at the login, wraps PyMax's `dispatcher.dispatch`;
   `_peek`: `NOTIF_MSG_DELETE`, or a `NOTIF_MESSAGE` with status `REMOVED`, which PyMax 2.4.1
   loses); `Backend.on_delete` takes them out of the cache (`cache_forget`) and the window
   (`ChatView.remove`, day labels left empty go too) and renews the chat's last message. Messages
   deleted while away go when a fetched page no longer has them (`history`, `ChatView.newest`). `tests/fake_link.py` is the second link (a small MAX
-  in memory); `Max(link=...)`/`Backend(ui, link)` take one. A PyMax upgrade is checked in
+  in memory, on the same entities: `common.load()` registers the script as `haltia_messenger`); `Max(link=...)`/`Backend(ui, link)` take one. A PyMax upgrade is checked in
   `PyMaxLink` only. Don't name a fake's attributes after link operations (`chats`, `users`).
 - **Login.** `PyMaxLink` is PyMax's QR provider; `Backend.on_qr` renders the QR code to scan with
   MAX on a phone. The session lives in `~/.local/share/haltia-messenger/web.db` (chmod 600).

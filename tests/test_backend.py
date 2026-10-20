@@ -9,7 +9,7 @@ import os
 from common import load, ok
 
 bm = load()
-from fake_link import FakeLink, audio, file, now_ms, photo, video  # noqa: E402
+from fake_link import FakeLink, audio, file, now_ms, photo, sticker, video  # noqa: E402
 from gi.repository import GLib  # noqa: E402
 
 
@@ -106,7 +106,7 @@ n = len(fake.asked("history"))
 assert run(B.history(big)) == ([], False) and len(fake.asked("history")) == n  # cached, nothing new
 for i in range(40):  # more than a page came meanwhile
     fake.say(big, "n%d" % i, PETYA, t=t0 + 200000 + i * 1000)
-fake.rooms[big].new_messages = 40
+fake.rooms[big].unread = 40
 msgs, gap = run(B.history(big))
 assert gap and [m["text"] for m in B.cache.read(big)] == ["n%d" % i for i in range(10, 40)]
 older = run(B.older(big, msgs[0]["time"]))
@@ -128,20 +128,18 @@ while not said(ui, "incoming"):
 out, summary = said(ui, "incoming")[-1]
 assert out["text"] == "Позвони вечером" and out["who"] == "Анна Петрова" and not out["mine"]
 assert summary["last"] == "Позвони вечером"
-# MAX's own messages come as keys: in words, an unknown one never as the key
-fake.incoming(anna, "welcome.saved.dialog.message", None)
+fake.incoming(anna, "Себе на память", None)  # no sender: the account's own
 while len(said(ui, "incoming")) < 2:
     drain()
-out, summary = said(ui, "incoming")[-1]
-assert out["text"].startswith("Это Избранное") and summary["last"].startswith("Вы: Это Избранное")
-assert B.message(fake.say(anna, "some.new.service.key"))["text"] == "Служебное сообщение"
-assert B.message(fake.say(anna, "mail.yandex.ru"))["text"] == "mail.yandex.ru"
+assert said(ui, "incoming")[-1][1]["last"] == "Вы: Себе на память"
 m = fake.say(anna, "", ANNA, attaches=[audio("https://vd.okcdn.ru/a.ogg"), video(5, "https://i.oneme.ru/t.jpg"),
-                                       file(6, "a.pdf", 2048), photo("https://i.oneme.ru/p.jpg")],
+                                       file(6, "a.pdf", 2048), photo("https://i.oneme.ru/p.jpg"),
+                                       sticker()],
              reactions=[("👍", 2)])
 d = B.message(m)
 assert [x["kind"] for x in d["media"]] == ["audio", "video", "file"] and d["photos"] == ["https://i.oneme.ru/p.jpg"]
-assert d["reactions"] == [["👍", 2]] and d["yours"] is None
+assert d["reactions"] == [["👍", 2]] and d["yours"] is None and d["text"] == "[стикер]"
+assert B.preview(m) == "Голосовое сообщение, видео, файл «a.pdf», фото, стикер"
 
 
 def back(coro):
@@ -275,13 +273,57 @@ run(Bd.on_login(fake.me, list(fake.rooms.values()), [], fake.agent, 7))
 k1 = fake.say(anna, "первое", ANNA)
 k2 = fake.say(anna, "лишнее", ANNA)
 Bd.cache.add(anna, [Bd.message(k1), Bd.message(k2)])
-Bd.chats[anna].last_message = k2
+Bd.chats[anna].last = k2
 fake.msgs[anna] = [m for m in fake.msgs[anna] if m.id != k2.id]  # deleted for all in MAX
 run(Bd.on_delete(anna, [k2.id]))
 assert k2.id not in [m["id"] for m in Bd.cache.read(anna)] and k1.id in [m["id"] for m in Bd.cache.read(anna)]
 chat_id, ids, summary = said(ui_del, "deleted")[-1]
 assert chat_id == anna and ids == [k2.id] and summary["last"] == "первое"
 ok("deletions")
+
+# --- PyMax's objects as the link's own (max_message, max_chat, max_person) -----------------
+from pymax.types.domain import Chat as PyChat, Message as PyMessage, User as PyUser  # noqa: E402
+
+
+def pm(text="", attaches=(), **more):
+    return PyMessage.model_validate(dict({"id": 9, "chatId": 11, "sender": 5, "text": text,
+                                          "time": 1000, "type": "USER", "attaches": list(attaches)},
+                                         **more))
+
+
+# MAX's own messages come as keys: in words, an unknown one never as the key
+assert bm.max_message(pm("welcome.saved.dialog.message")).text.startswith("Это Избранное")
+assert bm.max_message(pm("some.new.service.key")).text == "Служебное сообщение"
+assert bm.max_message(pm("mail.yandex.ru")).text == "mail.yandex.ru"
+m = bm.max_message(pm("", [
+    {"_type": "AUDIO", "url": "https://vd.okcdn.ru/a.ogg", "duration": 7},
+    {"_type": "VIDEO", "videoId": 5, "thumbnail": "https://i.oneme.ru/t.jpg", "token": "t",
+     "videoType": 0, "width": 640, "height": 360, "duration": 42},
+    {"_type": "FILE", "fileId": 6, "name": "a.pdf", "size": 2048, "token": "t"},
+    {"_type": "FILE", "fileId": 7, "name": "Песня.MP3", "size": 3000, "token": "t"},
+    {"_type": "PHOTO", "baseUrl": "https://i.oneme.ru/p.jpg", "photoId": 1, "width": 640,
+     "height": 480, "photoToken": "t"}],
+    reactionInfo={"totalCount": 2, "counters": [{"reaction": "👍", "count": 2}],
+                  "yourReaction": "👍"}))
+assert [x["kind"] for x in m.media] == ["audio", "video", "file", "audio"]
+assert m.media[3] == {"kind": "audio", "url": None, "file": 7, "name": "Песня.MP3", "size": 3000,
+                      "duration": 0}
+assert m.photos == ["https://i.oneme.ru/p.jpg"] and m.notes == []
+assert m.parts == ["голосовое сообщение", "видео", "файл «a.pdf»", "файл «Песня.MP3»", ""]
+assert m.reactions == [["👍", 2]] and m.yours == "👍" and m.fwd is None
+fw = bm.max_message(pm("", link={"type": "FORWARD", "chatId": -80, "chatName": "Работа",
+                                 "message": {"id": 3, "sender": 6, "text": "Собрание",
+                                             "time": 500, "type": "USER"}}))
+assert fw.id == 9 and fw.sender == 5 and fw.text == "Собрание" and fw.fwd == {"chat": "Работа", "sender": 6}
+c = bm.max_chat(PyChat.model_validate({
+    "id": 11, "type": "DIALOG", "status": "ACTIVE", "owner": 1, "participants": {"1": 0, "5": 0},
+    "newMessages": 3, "lastEventTime": 2000,
+    "lastMessage": {"id": 9, "sender": 5, "text": "Привет", "time": 1000, "type": "USER"}}))
+assert c.kind == "DIALOG" and c.members == [1, 5] and c.count == 2 and c.unread == 3
+assert c.title is None and c.time == 2000 and c.last.text == "Привет"
+assert bm.max_person(PyUser.model_validate({"id": 5, "names": [{"name": "Анна", "type": "CUSTOM"}]})) \
+    == bm.Person(5, "Анна")
+ok("PyMax's objects as the link's own")
 
 # --- search, contacts, joining, removing, renaming, invites ----------------------------
 fake.person(40, "Ольга", phone="+79001234567")
