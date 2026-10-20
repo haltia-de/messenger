@@ -358,7 +358,7 @@ chats of the message's messenger (between messengers: step 4). At the
   `PyMaxLink._fix_uploads` puts its own on the client — a photo's token from the answer's one
   entry (`photo_token`: MAX's upload link has no `photoIds` since autumn 2026), a voice as a
   multipart form (`audio/ogg`, no user agent) sent at once by its upload token with a real
-  waveform (`voice_wave`: 80 levels 0…127 by ffmpeg, base64; flat without it), and an upload's
+  waveform (`voice_wave`: 80 levels 0…127 by ffmpeg as bytes, a string of exactly 80 characters in the frame — MAX answers «Invalid media wave length» else; flat without ffmpeg), and an upload's
   error read from a 200's body. Both checked against the official Linux app's own log
   (`~/.local/share/ONEME/logs`: it logs every request and answer, tokens masked); `send` sends again, uploaded anew, while MAX answers
   `…not.ready` (`VOICE_TRIES`, `VOICE_PAUSE`). Recorders make Opus 48 kHz mono, which MAX checks.

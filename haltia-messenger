@@ -93,7 +93,6 @@ The person of a dialog can be renamed (the edit menu): here only, kept in
 offers no renaming of contacts.
 """
 import asyncio
-import base64
 import dataclasses
 import hashlib
 import importlib.util
@@ -883,8 +882,10 @@ VOICE_PAUSE = 3  # s between those
 
 def voice_wave(path, bars=80):
     """A voice message's waveform as MAX's apps send it: bars levels
-    0…127 (web.max.ru: a bar's mean level × 800, at most 127), base64;
-    flat when ffmpeg cannot read the file."""
+    0…127 (web.max.ru: a bar's mean level × 800, at most 127), as bytes —
+    in the JSON frame a string of exactly bars characters, which MAX checks
+    ("Invalid media wave length" else); flat when ffmpeg cannot read the
+    file."""
     levels = bytes(bars)
     try:
         pcm = subprocess.run(["ffmpeg", "-nostdin", "-loglevel", "error", "-i", path, "-ac", "1",
@@ -898,7 +899,7 @@ def voice_wave(path, bars=80):
                            for i in range(bars))
     except (OSError, subprocess.SubprocessError, TypeError, ValueError):
         pass
-    return base64.b64encode(levels)
+    return levels
 
 
 def photo_token(url, answer):
@@ -6310,6 +6311,7 @@ class Max(Gtk.Application):
         def done(msg, err):
             self.sendb.set_sensitive(True)
             if err:
+                log_line("send %s: %r" % ("voice" if voice else "message", err))
                 self.sub.set_text("Нет связи — сообщение не отправлено"
                                   if isinstance(err, Offline) else "не отправлено, попробуйте ещё раз")
                 if voice:
