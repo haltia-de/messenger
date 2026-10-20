@@ -797,6 +797,7 @@ class Chat:
     unread: int = 0
     last: Message = None  # its last message
     time: int = 0  # ms of its last event
+    link: str = None  # a public channel's or group's link (https://…), to join it by
 
 
 # --- MAX, in its own thread -------------------------------------------------
@@ -874,6 +875,7 @@ class VaultStore:
                 pass
 
 
+SEARCH_COUNT = 20  # public channels and groups asked for by a search
 VOICE_TRIES = 4  # a voice sent again while MAX says it is not ready yet
 VOICE_PAUSE = 3  # s between those
 
@@ -913,7 +915,7 @@ class PyMaxLink:
     hosts = ("max.ru",)  # links of its channels and groups
     # What it can besides messages (Account.can): find by phone, join by
     # link, reactions, forwarding, telemetry, its own invite setting.
-    can = frozenset({"phone", "links", "react", "forward", "telemetry", "invites"})
+    can = frozenset({"phone", "links", "search", "react", "forward", "telemetry", "invites"})
 
     @staticmethod
     def dialog_of(me, user):
@@ -1073,6 +1075,24 @@ class PyMaxLink:
 
     async def add_contact(self, user_id):
         return max_person(await self._api.users.add_contact(user_id))
+
+    async def search(self, query, count=SEARCH_COUNT):
+        """Public channels and groups by name, as MAX's own search finds
+        them (PUBLIC_SEARCH, as web.max.ru sends it; PyMax has no call):
+        Chats with their link. People and bots found are left out."""
+        from pymax.api.response import payload_dict
+        from pymax.protocol import Opcode
+
+        frame = await self.client._app.invoke(Opcode.PUBLIC_SEARCH,
+                                              {"query": query, "count": count, "type": "ALL"})
+        out = []
+        for item in payload_dict(frame).get("result") or []:
+            c = item.get("chat") if isinstance(item, dict) else None
+            if not isinstance(c, dict) or c.get("id") is None or c.get("type") not in ("CHANNEL", "CHAT"):
+                continue
+            out.append(Chat(c["id"], c["type"], c.get("title") or "", [],
+                            c.get("participantsCount") or 0, link=c.get("link")))
+        return out
 
     async def link_info(self, link):
         """The channel or group behind a link, or None. PyMax's own call
@@ -1398,7 +1418,7 @@ class TelethonLink:
     label = "Telegram"
     prefix = "tg:"
     hosts = TG_HOSTS
-    can = frozenset({"phone", "links", "react", "forward"})
+    can = frozenset({"phone", "links", "search", "react", "forward"})
 
     @staticmethod
     def dialog_of(_me, user):
@@ -1576,6 +1596,20 @@ class TelethonLink:
             return None
         entity = await self.client.get_entity(name)
         return None if isinstance(entity, types.User) else tg_chat(entity, self.me)
+
+    async def search(self, query, count=SEARCH_COUNT):
+        """Public channels and groups by name (Telegram's contacts.search):
+        those with a username, linked as https://t.me/name."""
+        from telethon.tl import functions, types
+
+        found = await self.client(functions.contacts.SearchRequest(q=query, limit=count))
+        out = []
+        for c in found.chats:
+            if isinstance(c, types.Channel) and c.username:
+                chat = tg_chat(c, self.me)
+                chat.link = "https://t.me/" + c.username
+                out.append(chat)
+        return out
 
     async def join(self, link):
         from telethon import utils
@@ -1895,6 +1929,21 @@ class Backend:
 
     async def link_info(self, link):
         return await self._by_link(link).link_info(link)
+
+    async def search(self, query):
+        """Public channels and groups by name in every messenger online that
+        can search; the error of the last asked if none answered."""
+        error, found, asked = Offline(), [], False
+        for account in self.accounts.values():
+            if account.can("search") and account.online:
+                try:
+                    found += await account.search(query)
+                    asked = True
+                except Exception as exc:
+                    error = exc
+        if not asked:
+            raise error
+        return found
 
     async def join(self, link):
         return await self._by_link(link).join(link)
@@ -2322,6 +2371,15 @@ class Account:
         user = await self.link.add_contact(user_id)
         self.names[user.id] = user.name
         self.remember(user.id)
+
+    async def search(self, query):
+        """Public channels and groups by name, not joined yet, with their
+        link: as link_info's answers."""
+        self.ask()
+        return [{"id": c.id, "title": c.title or "Без названия", "type": c.kind,
+                 "members": c.count or len(c.members), "joined": False, "link": c.link,
+                 "account": self.id, "label": self.label}
+                for c in await self.link.search(query) if c.link and c.id not in self.chats]
 
     async def link_info(self, link):
         """The channel or group behind a link, before joining it."""
@@ -5263,7 +5321,6 @@ class Max(Gtk.Application):
             self.backend.run(self.backend.link_info(link), chat)
         else:
             hits = self.chatlist.find(text)
-            self.find_hint.set_text("" if hits else "Среди ваших чатов такого нет.")
             if hits:
                 box = Gtk.ListBox()
                 box.set_selection_mode(Gtk.SelectionMode.NONE)
@@ -5272,6 +5329,26 @@ class Max(Gtk.Application):
                     box.add(self.chat_row((c, self.chatlist.is_pinned(c["id"]),
                                            self.chatlist.quiet(c["id"]))))
                 self.found.pack_start(box, False, False, 0)
+            # and channels and groups of everyone, by MAX's (Telegram's) own search
+            self.find_hint.set_text("Ищу каналы и группы…")
+
+            def public(found, err):
+                if self.find_entry.get_text().strip() != text:
+                    return  # asked something else meanwhile
+                found = [f for f in found or [] if not self.chatlist.listed(f["id"])]
+                if found:
+                    self.find_hint.set_text("")
+                    self.found.pack_start(label("Каналы и группы", "big"), False, False, 0)
+                    for info in found:
+                        self.show_found_chat(info, info["link"])
+                elif hits:
+                    self.find_hint.set_text("")
+                else:
+                    self.find_hint.set_text("Среди ваших чатов такого нет." if err else
+                                            "Ничего не нашлось.")
+                self.found.show_all()
+
+            self.backend.run(self.backend.search(text), public)
         self.found.show_all()
 
     def found_card(self, title, about, key):
@@ -5331,7 +5408,8 @@ class Max(Gtk.Application):
         channel = info["type"] == "CHANNEL"
         n = info["members"]
         about = ("канал" if channel else "группа" if info["type"] else "ссылка") + (
-            " · %s: %d" % ("подписчиков" if channel else "участников", n) if n else "")
+            " · %s: %d" % ("подписчиков" if channel else "участников", n) if n else "") + (
+            " · " + info["label"] if self.tagged and info.get("label") else "")
         buttons = self.found_card(info["title"], about, info["id"] or 0)
         if info["joined"] and self.chatlist.listed(info["id"]):
             self.action(buttons, "Открыть", "act", lambda _b: self.open(info["id"]))

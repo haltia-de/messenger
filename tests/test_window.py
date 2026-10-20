@@ -421,6 +421,21 @@ assert app.confirm_yes.get_label() == "Отписаться"
 app.confirm_yes.clicked()
 wait(lambda: app.stack.get_visible_child_name() == "chats", what="left")
 assert fake.asked("leave")[-1] == {"chat_id": -70} and not app.chatlist.listed(-70)
+# by its name: MAX's own search finds channels not joined, under the own chats
+app.show_find()
+app.find_entry.set_text("пого")
+app.find()
+wait(lambda: buttons(app.found), what="a channel found by its name")
+assert fake.asked("search")[-1] == {"query": "пого"}
+assert any(isinstance(w, Gtk.Label) and w.get_text() == "Каналы и группы" for w in walk(app.found))
+assert any(isinstance(w, Gtk.Label) and w.get_text() == "Погода" for w in walk(app.found))
+buttons(app.found)[0].clicked()
+wait(lambda: app.open_chat == -70, what="joined from the search")
+assert fake.asked("join")[-1] == {"link": "https://max.ru/weather"}
+app.show_find()
+app.find_entry.set_text("нет такого")
+app.find()
+wait(lambda: app.find_hint.get_text() == "Ничего не нашлось.", what="nothing found said")
 ok("search, join, leave")
 
 # --- a long chat: pages as the reader scrolls up, a spinner, cut on leaving -------------------
@@ -691,7 +706,8 @@ wait(lambda: open(doc_path, "rb").read().startswith(b"file from"), what="replace
 assert len(os.listdir(folder)) == 5
 taken[0] = "copy"
 file_save.clicked()
-wait(lambda: "Документ с очень длинным названием (2).pdf" in os.listdir(folder), what="a copy beside it")
+wait(lambda: "Документ с очень длинным названием (2).pdf" in os.listdir(folder)
+     and app.sub.get_text().startswith("сохранено") and file_save.get_sensitive(), what="a copy beside it")
 taken[0] = None
 app.sub.set_text("")
 file_save.clicked()

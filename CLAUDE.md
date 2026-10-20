@@ -192,7 +192,11 @@ chats of the message's messenger (between messengers: step 4). At the
 - **Search, join, delete.** The `find` page (magnifier on the list) reads its entry with
   `phone_of` (a person: `users.search_by_phone`, then write or `users.add_contact`), `link_of`
   (a channel or group: `LINK_INFO` invoked directly so public `max.ru/name` links work too, then
-  `chats.join_channel`), else filters the own chats by title. A dialog opened from the search
+  `chats.join_channel`), else filters the own chats by title and asks MAX's own search of
+  public channels and groups (`Backend.search` → the link's `search`: `PUBLIC_SEARCH`
+  `{query, count, type: "ALL"}`, as web.max.ru and the official app send it — PyMax has no call;
+  `result[].chat` with `link`, people left out; Telegram's `contacts.search`), shown under
+  «Каналы и группы» with «Подписаться» by the result's link; those already listed left out. A dialog opened from the search
   waits in `Max.pending` (chat id = own id XOR theirs, as PyMax numbers dialogs) until its first
   message. The chat menu's delete (the edit button in the header, `chat_menu`; it also renames, pins
   and switches notifications) asks on the page (`confirm` bar), then `Backend.remove`: a dialog

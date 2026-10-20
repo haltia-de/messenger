@@ -417,6 +417,25 @@ async def uploads():
     return got, photo, voice
 
 
+asked_max = []
+
+
+async def public_search(op, payload=None):  # as MAX answered the official client (its log)
+    asked_max.append((op.name, payload))
+    return SimpleNamespace(payload={"result": [
+        {"chat": {"id": -71, "type": "CHANNEL", "title": "«Фонтанка.ру»", "participantsCount": 900,
+                  "access": "PUBLIC", "link": "https://max.ru/fontanka", "status": "ACTIVE"},
+         "highlights": ["Фонтанка"]},
+        {"chat": {"id": -72, "type": "CHAT", "title": "Двор", "link": "https://max.ru/dvor"}},
+        {"contact": {"contact": {"id": 9}}}], "total": 3, "marker": 3, "ucpQId": "q"})
+
+finder = bm.PyMaxLink("/nonexistent")
+finder.client = SimpleNamespace(_app=SimpleNamespace(invoke=public_search))
+found = asyncio.run(finder.search("фонтанка"))
+assert asked_max == [("PUBLIC_SEARCH", {"query": "фонтанка", "count": bm.SEARCH_COUNT, "type": "ALL"})]
+assert [(c.id, c.kind, c.title, c.count, c.link) for c in found] == [
+    (-71, "CHANNEL", "«Фонтанка.ру»", 900, "https://max.ru/fontanka"),
+    (-72, "CHAT", "Двор", 0, "https://max.ru/dvor")]  # people left out
 got, photo, voice = asyncio.run(uploads())
 assert photo.photo_token == "PT" and got[0][0] == "/uploadImage" and got[0][2] == "image/png"
 assert got[1][:3] == ("/uploadAudio", "up.ogg", "audio/ogg") and got[1][3] == b"OggS voice"
@@ -718,7 +737,7 @@ fake.person(ANNA, "Анна", contact=True, phone="+79001112233")
 anna = fake.dialog(ANNA)
 fake.say(anna, "Привет из MAX", ANNA)
 tg = FakeLink(me="tg:1", name="Я", account="telegram", label="Telegram", prefix="tg:",
-              can={"phone", "links", "react", "forward"}, hosts=("t.me",))
+              can={"phone", "links", "search", "react", "forward"}, hosts=("t.me",))
 SASHA = tg.person("tg:77", "Внук Саша", contact=True, phone="+79005556677")
 tg.person("tg:88", "Анна", phone="+79001112233")
 tg.split = True
@@ -742,6 +761,10 @@ assert p["chat"] == sasha and p["label"] == "Telegram"
 assert [(p["chat"], p["account"]) for p in back(B.find_phone("+79001112233"))] == \
     [(anna, "max"), ("tg:88", "telegram")]  # in both: one each
 assert back(B.link_info("https://t.me/club"))["title"] == "Клуб" and not fake.asked("link_info")
+fake.group(-90, "Клубника", kind="CHANNEL", joined=False, link="https://max.ru/berry")
+found = back(B.search("клуб"))  # both messengers' channels, each saying whose
+assert [(f["id"], f["account"], f["link"]) for f in found] == \
+    [(-90, "max", "https://max.ru/berry"), ("tg:-5", "telegram", "https://t.me/club")]
 back(B.log([{"event": "GO"}]))
 assert fake.asked("log") and not tg.asked("log")  # telemetry is MAX's only
 assert os.path.exists(os.path.join(bm.DATA, "telegram", "known.json"))  # its files apart

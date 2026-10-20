@@ -30,7 +30,7 @@ def user(uid, name):
 
 class FakeLink:
     hosts = ("max.ru",)
-    can = frozenset({"phone", "links", "react", "forward", "telemetry", "invites"})
+    can = frozenset({"phone", "links", "search", "react", "forward", "telemetry", "invites"})
 
     def dialog_id(self, peer):
         """A dialog's id: as MAX numbers it (own id XOR theirs), or, with a
@@ -84,6 +84,7 @@ class FakeLink:
         chat = self._chat(cid, kind, title, parts, unread, keep=joined)
         if link:
             self.links[link] = chat
+            chat.link = link
         return cid
 
     def _chat(self, cid, kind, title, parts, unread, keep=True):
@@ -223,6 +224,11 @@ class FakeLink:
     async def link_info(self, link):
         self._call("link_info", link=link)
         return self.links.get(link)
+
+    async def search(self, query):
+        """Public channels and groups with a link, by a part of their title."""
+        self._call("search", query=query)
+        return [c for c in self.links.values() if query.casefold() in (c.title or "").casefold()]
 
     async def join(self, link):
         self._call("join", link=link)

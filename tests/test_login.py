@@ -65,7 +65,7 @@ mama = fake.dialog(MAMA)
 fake.say(mama, "Привет", MAMA, t=now_ms())
 bm.save_json(bm.KNOWN, [MAMA])
 tg = FakeLink(me="tg:1", name="Я", account="telegram", label="Telegram", prefix="tg:",
-              can={"phone", "links", "react", "forward"}, hosts=("t.me",))
+              can={"phone", "links", "search", "react", "forward"}, hosts=("t.me",))
 tg.kept = False
 tg.password = "секрет"  # Telegram's two-step verification
 SASHA = tg.person("tg:77", "Внук Саша", contact=True)
