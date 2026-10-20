@@ -4,7 +4,10 @@
 message cache and its gaps, pages, reactions, invites, renaming, removing;
 and the small helpers (phones, links, media hosts, photo pruning)."""
 import asyncio
+import base64
 import os
+import shutil
+import subprocess
 import threading
 
 from common import load, ok
@@ -440,7 +443,14 @@ got, photo, voice = asyncio.run(uploads())
 assert photo.photo_token == "PT" and got[0][0] == "/uploadImage" and got[0][2] == "image/png"
 assert got[1][:3] == ("/uploadAudio", "up.ogg", "audio/ogg") and got[1][3] == b"OggS voice"
 attach = voice.model_dump(by_alias=True)
-assert attach.get("audioId") == 55 and "token" not in attach and attach["duration"] == 3200
+assert attach["token"] == "VT" and "audioId" not in attach and attach["duration"] == 3200  # as MAX's app
+assert len(base64.b64decode(attach["wave"])) == 80  # flat: up.ogg is no real Ogg
+tone = os.path.join(bm.PHOTOS, "tone.ogg")
+if shutil.which("ffmpeg"):
+    subprocess.run(["ffmpeg", "-nostdin", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "sine=d=2",
+                    "-ac", "1", "-c:a", "libopus", tone], check=True)
+    levels = base64.b64decode(bm.voice_wave(tone))
+    assert len(levels) == 80 and max(levels) > 0 and max(levels) <= 127
 assert bm.attachment_words([bm.attachment("/x/a.png"), bm.attachment("/x/b.pdf")]) == "Фото, файл «b.pdf»"
 ok("PyMax's objects as the link's own")
 

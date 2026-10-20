@@ -93,6 +93,7 @@ The person of a dialog can be renamed (the edit menu): here only, kept in
 offers no renaming of contacts.
 """
 import asyncio
+import base64
 import dataclasses
 import hashlib
 import importlib.util
@@ -880,6 +881,26 @@ VOICE_TRIES = 4  # a voice sent again while MAX says it is not ready yet
 VOICE_PAUSE = 3  # s between those
 
 
+def voice_wave(path, bars=80):
+    """A voice message's waveform as MAX's apps send it: bars levels
+    0…127 (web.max.ru: a bar's mean level × 800, at most 127), base64;
+    flat when ffmpeg cannot read the file."""
+    levels = bytes(bars)
+    try:
+        pcm = subprocess.run(["ffmpeg", "-nostdin", "-loglevel", "error", "-i", path, "-ac", "1",
+                              "-ar", "8000", "-f", "s16le", "-"], capture_output=True,
+                             timeout=30, check=True).stdout
+        samples = memoryview(pcm[:len(pcm) // 2 * 2]).cast("h")
+        n = len(samples)
+        if n >= bars:
+            levels = bytes(min(127, int(sum(abs(x) for x in samples[i * n // bars:(i + 1) * n // bars])
+                                        / max(1, (i + 1) * n // bars - i * n // bars) / 32768 * 800))
+                           for i in range(bars))
+    except (OSError, subprocess.SubprocessError, TypeError, ValueError):
+        pass
+    return base64.b64encode(levels)
+
+
 def photo_token(url, answer):
     """The token of the one photo of an upload's answer: by the photoIds of
     its link if there are (MAX gave them till autumn 2026), else the only
@@ -1216,9 +1237,11 @@ class PyMaxLink:
             type=2, uploader_type=1).to_payload())
         info = VideoUploadResponse.model_validate(frame.payload).info[0]
         await self._post_form(info.url, await voice.read(), voice.name or "voice.ogg", "audio/ogg")
-        # No token: the message names it by audioId (the token is a video's).
-        return VoiceAttachPayload(video_id=info.video_id, token="",
-                                  duration=await voice.get_duration(), wave=b"\x00" * 80)
+        # As MAX's own app sends it: by the upload's token, at once (no
+        # NOTIF_ATTACH comes for a voice), its waveform as a string.
+        wave = await asyncio.to_thread(voice_wave, getattr(voice, "path", None))
+        return VoiceAttachPayload(video_id=info.video_id, token=info.token,
+                                  duration=await voice.get_duration(), wave=wave)
 
     async def forward(self, chat_id, msg_id, from_chat_id):
         """A message (its attachments with it) into another chat, as MAX

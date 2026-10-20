@@ -357,8 +357,10 @@ chats of the message's messenger (between messengers: step 4). At the
   sent stays. PyMax 2.4.1's photo and voice uploads fail on today's MAX (its issues #108, #103):
   `PyMaxLink._fix_uploads` puts its own on the client — a photo's token from the answer's one
   entry (`photo_token`: MAX's upload link has no `photoIds` since autumn 2026), a voice as a
-  multipart form (`audio/ogg`, no user agent) named in the message by `audioId` (no token), and
-  an upload's error read from a 200's body; `send` sends again, uploaded anew, while MAX answers
+  multipart form (`audio/ogg`, no user agent) sent at once by its upload token with a real
+  waveform (`voice_wave`: 80 levels 0…127 by ffmpeg, base64; flat without it), and an upload's
+  error read from a 200's body. Both checked against the official Linux app's own log
+  (`~/.local/share/ONEME/logs`: it logs every request and answer, tokens masked); `send` sends again, uploaded anew, while MAX answers
   `…not.ready` (`VOICE_TRIES`, `VOICE_PAUSE`). Recorders make Opus 48 kHz mono, which MAX checks.
   Drop these when a PyMax release fixes them. The microphone shows only with `voice` on (the setting «Голосовые сообщения», on by
   default; `voice_on`). A voice message: the microphone button held (`GestureMultiPress` pressed /
