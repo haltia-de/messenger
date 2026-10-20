@@ -164,6 +164,9 @@ def no_dialog(*_a):  # a real save dialog would wait for a person: never in a te
 
 real_ask_save_path = app.ask_save_path
 app.ask_save_path = no_dialog
+real_ask_taken = app.ask_taken
+taken = ["other"]  # a name taken: what the person chose (ask_taken), the save dialog by default
+app.ask_taken = lambda folder, name: taken[0]
 questions = []  # b8k-compat's ask, answered here: yes unless `answer` says otherwise
 answer = [True]
 bm.dialogs.ask = lambda parent, question, yes, *a: questions.append((question, yes)) or answer[0]
@@ -679,6 +682,30 @@ app.ask_save_path = lambda where, name: os.path.join(where, name)  # the same: r
 file_save.clicked()
 wait(lambda: open(doc_path, "rb").read().startswith(b"file from"), what="replaced")
 assert len(os.listdir(folder)) == 5 and not [n for n in os.listdir(folder) if "(2)" in n]
+# asked what to do, plainly: replace it, a copy beside it, or the save dialog
+app.ask_save_path = no_dialog
+open(doc_path, "w").write("old")
+taken[0] = "replace"
+file_save.clicked()
+wait(lambda: open(doc_path, "rb").read().startswith(b"file from"), what="replaced as chosen")
+assert len(os.listdir(folder)) == 5
+taken[0] = "copy"
+file_save.clicked()
+wait(lambda: "Документ с очень длинным названием (2).pdf" in os.listdir(folder), what="a copy beside it")
+taken[0] = None
+app.sub.set_text("")
+file_save.clicked()
+spin(0.2)
+assert app.sub.get_text() == "не сохранено" and len(os.listdir(folder)) == 6
+taken[0] = "other"
+chosen = []
+real_choose = bm.dialogs.choose
+bm.dialogs.choose = lambda parent, title, items, current=None: chosen.append((title, items)) or 1
+assert real_ask_taken(folder, "a.pdf") == "copy"
+assert "уже есть файл «a.pdf»" in chosen[0][0] and chosen[0][1][0] == "Заменить его"
+bm.dialogs.choose = lambda *a, **k: None
+assert real_ask_taken(folder, "a.pdf") is None
+bm.dialogs.choose = real_choose
 # the sound plays only while its chat is in front
 def playing_again():
     play.clicked()
@@ -935,4 +962,13 @@ app.record_start()  # a tap, not a message: nothing sent
 app.record_stop(True)
 wait(lambda: app.sub.get_text() == "Держите кнопку, пока говорите", what="the hint")
 assert len(fake.asked("send")) == n
+# voice messages switched off in the settings: no microphone
+label_ = [w for w in walk(app.stack.get_child_by_name("settings"))
+          if isinstance(w, Gtk.Label) and w.get_text() == "Голосовые сообщения"][0]
+voice_switch = [w for w in walk(label_.get_parent()) if isinstance(w, Gtk.Switch)][0]
+assert voice_switch.get_active() and app.mic.get_visible()
+voice_switch.set_active(False)
+assert not app.mic.get_visible() and bm.SETTINGS.get_bool("voice", True) is False
+voice_switch.set_active(True)
+assert app.mic.get_visible()
 ok("sending photos, files and voice")

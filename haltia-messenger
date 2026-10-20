@@ -4239,6 +4239,7 @@ class Max(Gtk.Application):
         self.playing_pos = 0.0  # s played
         self.mpris = None  # what plays, told to the desktop (Mpris)
         self.keep_sound = SETTINGS.get_bool("keep_sound", False)  # plays on outside its chat
+        self.voice_on = SETTINGS.get_bool("voice", True)  # the microphone button: voice messages sent
         self.held = 0.0  # when a row was long-pressed: its release opens nothing
         self.open_chat = None
         self.views = {}  # chat id -> its ChatView, most recently used last
@@ -4511,6 +4512,8 @@ class Max(Gtk.Application):
         self.mic.set_can_focus(False)
         self.mic.set_focus_on_click(False)
         self.mic.set_tooltip_text("Держите, пока говорите; отпустите — уйдёт")
+        self.mic.set_no_show_all(True)  # only with voice messages switched on
+        self.mic.set_visible(self.voice_on)
         self.mic.hold = Gtk.GestureMultiPress.new(self.mic)
         self.mic.hold.connect("pressed", lambda *_a: self.record_start())
         self.mic.hold.connect("released", lambda *_a: self.record_stop(True))
@@ -4646,6 +4649,10 @@ class Max(Gtk.Application):
             "Перед тем как сохранить файл на планшет или переслать сообщение в "
             "выбранный чат, программа переспрашивает. Если выключить, делает сразу."),
             False, False, 0)
+        settings.pack_start(self.setting(
+            "Голосовые сообщения", self.voice_on, self.on_voice,
+            "Кнопка микрофона рядом с полем ввода: держите её, пока говорите, "
+            "отпустите — сообщение уйдёт. Если выключить, кнопки не будет."), False, False, 0)
         settings.pack_start(self.setting(
             "Звук играет и вне чата", self.keep_sound, self.on_keep_sound,
             "Голосовое или аудиофайл продолжают играть в других чатах, в списке и "
@@ -5421,15 +5428,31 @@ class Max(Gtk.Application):
         dialog.destroy()
         return path
 
+    def ask_taken(self, folder, name):
+        """The name is taken in the folder: "replace" it, save a "copy"
+        beside it (numbered), or choose an"other" name or folder; None if
+        cancelled."""
+        n = dialogs.choose(self.win, "В папке «%s» уже есть файл «%s». Что сделать?"
+                           % (os.path.basename(folder.rstrip("/")) or folder, name),
+                           ["Заменить его", "Сохранить рядом копию",
+                            "Выбрать другое имя или папку…"])
+        return None if n is None else ("replace", "copy", "other")[n]
+
     def target(self, folder, name):
         """Where a file goes: (folder, name, replace), or None if the person
         cancelled. A free name goes as it is (asked first, with confirmations
-        on); a taken one opens the save dialog, which asks enough."""
+        on); for a taken one the person is asked what to do (ask_taken), and
+        the save dialog opens for another name or folder."""
         name = safe_name(name)
         if not os.path.exists(os.path.join(folder, name)):
             if not self.ask("Сохранить «%s» в папку «%s»?" % (name, folder), "Сохранить"):
                 return None
             return folder, name, False
+        what = self.ask_taken(folder, name)
+        if what in ("replace", "copy"):
+            return folder, name, what == "replace"
+        if what is None:
+            return None
         path = self.ask_save_path(folder, name)
         if not path:
             return None
@@ -5679,6 +5702,11 @@ class Max(Gtk.Application):
         if not self.confirm_acts:
             return True
         return dialogs.ask(self.win, question, yes)
+
+    def on_voice(self, on):
+        self.voice_on = on
+        save_setting("voice", on)
+        self.mic.set_visible(on)
 
     def on_keep_sound(self, on):
         self.keep_sound = on

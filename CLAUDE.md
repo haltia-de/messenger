@@ -330,13 +330,15 @@ chats of the message's messenger (between messengers: step 4). At the
   (in its corner, and in the viewer's), voice, audio file, video and file has its own
   `document-save-symbolic` button (`ChatView._save_button`, `on_save(msg, item)` →
   `save_message(chat_id, m, [item], button)`; a photo is the item `{"kind": "photo", "url",
-  "n"}`); the button is busy till saved (`set_busy`: insensitive, a spinner for its icon); a name
-  taken in the folder opens the save dialog (`target` → `ask_save_path`: another name or folder,
+  "n"}`); the button is busy till saved (`set_busy`: insensitive, a spinner for its icon); for a
+  name taken in the folder the person is asked plainly (`target` → `ask_taken`, the kit's
+  `dialogs.choose`: replace it, a numbered copy beside it, or the save dialog); the save dialog
+  (`ask_save_path`: another name or folder,
   or replace, the dialog asking first; `Gtk.FileChooserNative`, as is «Папка для файлов»
   (`choose_folder`): the portal's dialog inside Flatpak and under KDE, GTK's own elsewhere,
   where `focus_accept` finds it; the focus starts on Сохранить, not the name entry, so the
   on-screen keyboard stays down over the file list till the name is tapped; cancel saves nothing; `Media.save(…, replace=True)` then writes
-  over it, and keeps the old one if the download fails); tests stub `ask_save_path`; the
+  over it, and keeps the old one if the download fails); tests stub `ask_save_path` and `ask_taken`; the
   long-press menu has only the reactions, and a tap on a file opens it (`save_message`: links of videos and
   files asked of MAX first; `Media.save` into `load_text("folder", default_folder())`, set in the
   settings, under `safe_name`, numbered when taken, via `.part`). A forwarded message's text and
@@ -348,7 +350,8 @@ chats of the message's messenger (between messengers: step 4). At the
   `attached`, drawn above the entry (`show_attached`: a small photo or the name, each with its
   ✕). `send()` sends the text with them (`Backend.send(chat, text, files)` → the link's
   `send(chat, text, files)`; PyMaxLink makes PyMax's `Photo`/`File`/`Voice`); what could not be
-  sent stays. A voice message: the microphone button held (`GestureMultiPress` pressed /
+  sent stays. The microphone shows only with `voice` on (the setting «Голосовые сообщения», on by
+  default; `voice_on`). A voice message: the microphone button held (`GestureMultiPress` pressed /
   released; `record_start`/`record_stop`) records by `Recorder` — `RECORDERS`' first on `PATH`:
   ffmpeg from pulse to Ogg/Opus (in the tablet's image), gst-launch, parecord's Ogg/Vorbis;
   stopped by SIGINT so the file is finished, in a thread — into `PHOTOS/voice-*.ogg`, sent as
