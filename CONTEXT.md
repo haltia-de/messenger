@@ -17,7 +17,7 @@ line: the term, its name in the code, what it is.
 - **Сводка чата** (Chat summary, a dict from `Backend.summary`): what the
   list shows of a chat: title, type, last message, time, unread, peer,
   stranger.
-- **Кэш сообщений** (Message cache, `cache_*` in `~/.cache/haltia-messenger/chats`):
+- **Кэш сообщений** (Message cache, `MessageCache`, `Backend.cache`; files in `~/.cache/haltia-messenger/chats`):
   the newest `KEEP` messages of each chat on disk, so a chat opens at once.
 - **Свои люди** (Known people, `Backend.known`, `known.json`): contacts,
   people written to here, and those already in a dialog the first time;

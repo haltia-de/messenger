@@ -908,9 +908,10 @@ class Backend:
     again when it gives up, after RETRY's pauses (retry() cuts one short),
     and the window told: ui.failed(why, pause), ui.connected(on)."""
 
-    def __init__(self, ui, link=None):
+    def __init__(self, ui, link=None, cache=None):
         self.ui = ui
         self.link = link  # PyMaxLink unless given (tests)
+        self.cache = cache or MessageCache(CHATS)  # its own in tests that ask
         self.loop = None
         self.online = False  # logged in and connected: requests go to MAX
         self.tries = 0  # the link's starts in a row that ended without a login
@@ -1052,7 +1053,7 @@ class Backend:
                 chat.new_messages = (chat.new_messages or 0) + 1
         out = self.message(msg)
         if msg.chat_id is not None:
-            cache_add(msg.chat_id, [out])
+            self.cache.add(msg.chat_id, [out])
         GLib.idle_add(self.ui.incoming, out, self.summary(chat) if chat is not None else None)
 
     async def on_disconnect(self, why):
@@ -1064,7 +1065,7 @@ class Backend:
     async def on_delete(self, chat_id, msg_ids):
         """Messages deleted (by their sender for everyone, or here): out of
         the cache and the window; the chat's last message anew if it went."""
-        cache_forget(chat_id, msg_ids)
+        self.cache.forget(chat_id, msg_ids)
         chat = self.chats.get(chat_id)
         summary = None
         if chat is not None:
@@ -1080,7 +1081,7 @@ class Backend:
     async def on_reaction(self, chat_id, msg_id, reactions):
         """Someone's reaction changed; the event does not say whose, so the
         account's own stays as it was known."""
-        cache_react(chat_id, msg_id, reactions)
+        self.cache.react(chat_id, msg_id, reactions)
         GLib.idle_add(self.ui.reacted, chat_id, msg_id, reactions, ...)
 
     # --- names, summaries, messages ---------------------------------------------
@@ -1202,7 +1203,7 @@ class Backend:
         # Nothing new since a full cache: no request at all (new messages
         # and reactions while running come as events). A cache of a few
         # messages (a chat that came by an event) is not full: asked for.
-        cached = cache_read(chat_id)
+        cached = self.cache.read(chat_id)
         last = chat.last_message
         if len(cached) >= PAGE and last and not chat.new_messages and \
                 any(m["id"] == last.id for m in cached[-5:]):
@@ -1224,14 +1225,14 @@ class Backend:
             fetched = {m["id"] for m in out}
             gone = [m["id"] for m in cached if m["time"] >= out[0]["time"] and m["id"] not in fetched]
             if gone:
-                cache_forget(chat_id, gone)
+                self.cache.forget(chat_id, gone)
                 cached = [m for m in cached if m["id"] not in gone]
         known = {m["id"] for m in cached}
         gap = bool(cached) and len(out) >= PAGE and not known & {m["id"] for m in out} and \
             out[0]["time"] > cached[-1]["time"]
         if gap:
-            cache_drop(chat_id)
-        cache_add(chat_id, out)
+            self.cache.drop(chat_id)
+        self.cache.add(chat_id, out)
         return out, gap
 
     async def older(self, chat_id, before):
@@ -1257,7 +1258,7 @@ class Backend:
         self.ask()
         msg = await self.link.forward(chat_id, msg_id, from_chat_id)
         out = self.message(msg)
-        cache_add(chat_id, [out])
+        self.cache.add(chat_id, [out])
         chat = await self.chat(chat_id)
         if chat is not None:
             chat.last_message = msg
@@ -1271,7 +1272,7 @@ class Backend:
         msg = await self.link.send(chat_id, text)
         out = self.message(msg) if msg else None
         if out:
-            cache_add(chat_id, [out])
+            self.cache.add(chat_id, [out])
         return out
 
     async def find_phone(self, phone):
@@ -1319,7 +1320,7 @@ class Backend:
         else:
             await self.link.delete(chat_id, stamp)
         self.chats.pop(chat_id, None)
-        cache_drop(chat_id)
+        self.cache.drop(chat_id)
 
     async def react(self, chat_id, msg_id, emoji):
         """Put the account's reaction on a message (None takes it off);
@@ -1329,7 +1330,7 @@ class Backend:
         if info is None:
             return None  # taken, but MAX sent no counts: the window counts itself
         reactions, _ = reactions_of(info)
-        cache_react(chat_id, msg_id, reactions, emoji)
+        self.cache.react(chat_id, msg_id, reactions, emoji)
         return reactions, emoji
 
     async def rename(self, user_id, name):
@@ -1353,83 +1354,107 @@ class Backend:
             await self.link.log(events)
 
 
-_cache_lock = threading.Lock()
+class MessageCache:
+    """The message cache (CONTEXT.md: Кэш сообщений): the newest KEEP
+    messages of each chat, so a chat opens at once. A chat's messages are
+    read from its file (folder/<id>.json, 600) the first time they are
+    needed and kept in memory; a change is written by a thread of its own
+    `delay` s after the last one, all of a chat at once and atomically
+    (.new + os.replace), and whatever is left at flush() (the program's
+    end). Both threads use it; read() gives a copy."""
 
+    def __init__(self, folder, delay=2.0):
+        self.folder, self.delay = folder, delay
+        self.chats = {}  # chat id -> its messages, oldest first
+        self.dirty = set()  # chat ids changed and not written yet
+        self.lock = threading.Lock()
+        self.timer = None
 
-def cache_read(chat_id):
-    try:
-        with open(os.path.join(CHATS, "%d.json" % chat_id)) as fh:
-            return json.load(fh)
-    except (OSError, ValueError):
-        return []
+    def _path(self, chat_id):
+        return os.path.join(self.folder, "%d.json" % chat_id)
 
+    def _get(self, chat_id):  # under the lock
+        msgs = self.chats.get(chat_id)
+        if msgs is None:
+            try:
+                with open(self._path(chat_id)) as fh:
+                    msgs = json.load(fh)
+            except (OSError, ValueError):
+                msgs = []
+            if not isinstance(msgs, list):
+                msgs = []
+            self.chats[chat_id] = msgs
+        return msgs
 
-def cache_add(chat_id, msgs):
-    """Merge messages into the chat's cache file; the newest KEEP stay."""
-    if not msgs:
-        return
-    with _cache_lock:
-        known = {m["id"]: m for m in cache_read(chat_id)}
-        for m in msgs:
-            known[m["id"]] = m
-        keep = sorted(known.values(), key=lambda m: m["time"] or 0)[-KEEP:]
-        try:
-            os.makedirs(CHATS, mode=0o700, exist_ok=True)
-            path = os.path.join(CHATS, "%d.json" % chat_id)
-            fd = os.open(path + ".new", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-            with os.fdopen(fd, "w") as fh:
-                json.dump(keep, fh, ensure_ascii=False)
-            os.replace(path + ".new", path)
-        except OSError:
-            pass
+    def _changed(self, chat_id):  # under the lock
+        self.dirty.add(chat_id)
+        if self.timer is None:
+            self.timer = threading.Timer(self.delay, self.flush)
+            self.timer.daemon = True
+            self.timer.start()
 
+    def read(self, chat_id):
+        """The chat's cached messages, oldest first (a copy)."""
+        with self.lock:
+            return [dict(m) for m in self._get(chat_id)]
 
-def cache_react(chat_id, msg_id, reactions, yours=...):
-    """New reactions of one cached message (yours left alone if not given)."""
-    with _cache_lock:
-        msgs = cache_read(chat_id)
-        for m in msgs:
-            if m["id"] == msg_id:
-                m["reactions"] = reactions
-                if yours is not ...:
-                    m["yours"] = yours
-                break
-        else:
+    def add(self, chat_id, msgs):
+        """Messages merged in (by id); the newest KEEP stay."""
+        if not msgs:
             return
-        try:
-            path = os.path.join(CHATS, "%d.json" % chat_id)
-            fd = os.open(path + ".new", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-            with os.fdopen(fd, "w") as fh:
-                json.dump(msgs, fh, ensure_ascii=False)
-            os.replace(path + ".new", path)
-        except OSError:
-            pass
+        with self.lock:
+            known = {m["id"]: m for m in self._get(chat_id)}
+            for m in msgs:
+                known[m["id"]] = dict(m)
+            self.chats[chat_id] = sorted(known.values(), key=lambda m: m["time"] or 0)[-KEEP:]
+            self._changed(chat_id)
 
+    def react(self, chat_id, msg_id, reactions, yours=...):
+        """New reactions of one cached message (yours left alone if not given)."""
+        with self.lock:
+            for m in self._get(chat_id):
+                if m["id"] == msg_id:
+                    m["reactions"] = reactions
+                    if yours is not ...:
+                        m["yours"] = yours
+                    self._changed(chat_id)
+                    return
 
-def cache_forget(chat_id, msg_ids):
-    """Deleted messages out of a chat's cache."""
-    gone = set(msg_ids)
-    with _cache_lock:
-        msgs = cache_read(chat_id)
-        keep = [m for m in msgs if m["id"] not in gone]
-        if len(keep) == len(msgs):
-            return
-        try:
-            path = os.path.join(CHATS, "%d.json" % chat_id)
-            fd = os.open(path + ".new", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-            with os.fdopen(fd, "w") as fh:
-                json.dump(keep, fh, ensure_ascii=False)
-            os.replace(path + ".new", path)
-        except OSError:
-            pass
+    def forget(self, chat_id, msg_ids):
+        """Deleted messages out of a chat's cache."""
+        gone = set(msg_ids)
+        with self.lock:
+            msgs = self._get(chat_id)
+            keep = [m for m in msgs if m["id"] not in gone]
+            if len(keep) != len(msgs):
+                self.chats[chat_id] = keep
+                self._changed(chat_id)
 
+    def drop(self, chat_id):
+        """The chat's cache gone, on disk too (a gap, or the chat removed)."""
+        with self.lock:
+            self.chats[chat_id] = []
+            self.dirty.discard(chat_id)
+            try:
+                os.remove(self._path(chat_id))
+            except OSError:
+                pass
 
-def cache_drop(chat_id):
-    with _cache_lock:
-        try:
-            os.remove(os.path.join(CHATS, "%d.json" % chat_id))
-        except OSError:
-            pass
+    def flush(self):
+        """Every change not yet on disk, written now."""
+        with self.lock:
+            self.timer = None
+            dirty, self.dirty = self.dirty, set()
+            for chat_id in dirty:
+                try:
+                    os.makedirs(self.folder, mode=0o700, exist_ok=True)
+                    path = self._path(chat_id)
+                    fd = os.open(path + ".new", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+                    with os.fdopen(fd, "w") as fh:
+                        json.dump(self.chats.get(chat_id, []), fh, ensure_ascii=False)
+                    os.replace(path + ".new", path)
+                except OSError as exc:
+                    log_line("cache %s: %r" % (chat_id, exc))
 
 
 def load_json(path, default):
@@ -2927,6 +2952,10 @@ class Max(Gtk.Application):
         if FLATPAK:
             ask_background(self.get_dbus_connection())
 
+    def do_shutdown(self):
+        self.backend.cache.flush()  # what the last two seconds changed
+        Gtk.Application.do_shutdown(self)
+
     def do_activate(self):
         if self.win:
             self.win.present()
@@ -4134,7 +4163,7 @@ class Max(Gtk.Application):
         view = self.views.pop(chat_id, None)
         if view is None:
             view = ChatView(
-                chat_id, self.about(chat_id).get("type"), cache_read(chat_id),
+                chat_id, self.about(chat_id).get("type"), self.backend.cache.read(chat_id),
                 fetch_older=lambda before, done: self.backend.run(
                     self.backend.older(chat_id, before), done, owner=self.views.get(chat_id)),
                 on_hold=lambda msg_id, widget: self.pick_reaction(chat_id, msg_id, widget),
@@ -4382,7 +4411,7 @@ class Max(Gtk.Application):
                 if emoji:
                     counts[emoji] = counts.get(emoji, 0) + 1
                 res = [[e, n] for e, n in counts.items() if n > 0], emoji
-                cache_react(chat_id, msg_id, *res)
+                self.backend.cache.react(chat_id, msg_id, *res)
             self.reacted(chat_id, msg_id, *res)
 
         self.backend.run(self.backend.react(chat_id, msg_id, emoji), done)

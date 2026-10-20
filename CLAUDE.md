@@ -153,7 +153,10 @@ programs are found on `PATH` (`haltia-vplay`, `b8k-vplay` before 2.0: `shutil.wh
   (`ON_HALTIA`: `Haltia` in `XDG_CURRENT_DESKTOP`), whose own ✕ closes windows. With
   `--background` the window is not shown at start.
 - **Caches.** `~/.cache/haltia-messenger/chats/<id>.json` keeps the last `KEEP` messages per chat and
-  `list.json` the chat list (all mode 600, written atomically via `.new` + `os.replace`). A chat whose
+  `list.json` the chat list (all mode 600, written atomically via `.new` + `os.replace`). The
+  messages go through `MessageCache` (`Backend.cache`): read from disk once and kept in memory,
+  written by a timer thread 2 s after the last change and at `do_shutdown` (`flush`); both
+  threads use it, `read` gives copies — never touch the files themselves. A chat whose
   `last_message` is already cached and has no unread opens with no history request at all; else
   the last `PAGE` are fetched (see Paging). The last `VIEWS` chat views stay built in memory. The chat list
   keeps one row per chat (`Max.rows`, sorted and filtered by GTK) and `fill_list` redraws only rows

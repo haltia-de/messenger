@@ -108,7 +108,7 @@ for i in range(40):  # more than a page came meanwhile
     fake.say(big, "n%d" % i, PETYA, t=t0 + 200000 + i * 1000)
 fake.rooms[big].new_messages = 40
 msgs, gap = run(B.history(big))
-assert gap and [m["text"] for m in bm.cache_read(big)] == ["n%d" % i for i in range(10, 40)]
+assert gap and [m["text"] for m in B.cache.read(big)] == ["n%d" % i for i in range(10, 40)]
 older = run(B.older(big, msgs[0]["time"]))
 assert [m["text"] for m in older] == ["m%d" % i for i in range(80, 100)] + \
     ["n%d" % i for i in range(10)]
@@ -164,7 +164,7 @@ src = fake.say(anna, "Смотри", ANNA, attaches=[file(8, "план.pdf", 100
 out, summary = back(B.forward(petya, src.id, anna))
 assert out["text"] == "Смотри" and out["media"][0]["name"] == "план.pdf" and out["mine"]
 assert out["forwarded"] == "Анна Петрова"  # a dialog has no name: the sender's
-assert summary["last"] == "Вы: ↪ Смотри" and [m["id"] for m in bm.cache_read(petya)][-1] == out["id"]
+assert summary["last"] == "Вы: ↪ Смотри" and [m["id"] for m in B.cache.read(petya)][-1] == out["id"]
 fake.group(-80, "Работа", members=[PETYA])
 fake.say(-80, "Собрание", PETYA)
 src = fake.msgs[-80][-1]
@@ -274,11 +274,11 @@ Bd = bm.Backend(ui_del, fake)
 run(Bd.on_login(fake.me, list(fake.rooms.values()), [], fake.agent, 7))
 k1 = fake.say(anna, "первое", ANNA)
 k2 = fake.say(anna, "лишнее", ANNA)
-bm.cache_add(anna, [Bd.message(k1), Bd.message(k2)])
+Bd.cache.add(anna, [Bd.message(k1), Bd.message(k2)])
 Bd.chats[anna].last_message = k2
 fake.msgs[anna] = [m for m in fake.msgs[anna] if m.id != k2.id]  # deleted for all in MAX
 run(Bd.on_delete(anna, [k2.id]))
-assert k2.id not in [m["id"] for m in bm.cache_read(anna)] and k1.id in [m["id"] for m in bm.cache_read(anna)]
+assert k2.id not in [m["id"] for m in Bd.cache.read(anna)] and k1.id in [m["id"] for m in Bd.cache.read(anna)]
 chat_id, ids, summary = said(ui_del, "deleted")[-1]
 assert chat_id == anna and ids == [k2.id] and summary["last"] == "первое"
 ok("deletions")
@@ -405,3 +405,26 @@ until(lambda: got)
 drain()
 assert got == ["here"]
 ok("the connection lost, given up and started again; requests always answered")
+
+# --- the message cache: in memory, on disk a little later, read back by a new one -----------------
+c = bm.MessageCache(os.path.join(bm.PHOTOS, "cache-test"), delay=0.05)
+c.add(7, [{"id": i, "time": i, "text": "t%d" % i} for i in range(bm.KEEP + 5)])
+assert [m["id"] for m in c.read(7)] == list(range(5, bm.KEEP + 5))  # the newest KEEP
+c.read(7)[0]["text"] = "changed outside"  # a copy: the cache keeps its own
+assert c.read(7)[0]["text"] == "t5"
+assert not os.path.exists(c._path(7))  # not written at once
+until(lambda: os.path.exists(c._path(7)))
+assert oct(os.stat(c._path(7)).st_mode & 0o777) == "0o600"
+c.react(7, 6, [["👍", 1]], "👍")
+c.forget(7, [5])
+c.flush()  # the program's end: what is left goes now
+fresh = bm.MessageCache(c.folder)
+got = fresh.read(7)
+assert got[0]["id"] == 6 and got[0]["reactions"] == [["👍", 1]] and got[0]["yours"] == "👍"
+fresh.drop(7)
+assert fresh.read(7) == [] and not os.path.exists(c._path(7))
+c.add(8, [{"id": 1, "time": 1}])
+c.drop(8)  # dropped before its write: nothing comes back on disk
+time.sleep(0.15)
+assert not os.path.exists(c._path(8))
+ok("the message cache")
