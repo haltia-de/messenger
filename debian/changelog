@@ -1,3 +1,10 @@
+haltia-messenger (2.5.0) unstable; urgency=medium
+
+  * Photos, files and voice messages sent; the MAX login in the keyring.
+  * A card per messenger in the settings; Telegram through Telethon, experimental.
+
+ -- Haltia <rensomail@gmail.com>  Tue, 20 Oct 2026 17:30:00 +0300
+
 haltia-messenger (2.4.0) unstable; urgency=medium
 
   * Every request to MAX answered; the link started again; a bar with no connection.

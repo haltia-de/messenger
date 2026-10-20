@@ -20,6 +20,24 @@
   </content_rating>
   <requires><control>touch</control></requires>
   <releases>
+    <release version="2.5.0" date="2026-10-20">
+      <description>
+        <ul>
+          <li>Photos and files are sent with the paperclip left of the entry: the chosen ones wait above it, each with its ✕. A voice message records while you hold the microphone button.</li>
+          <li>The MAX login is kept in the desktop's keyring. No need to sign in again: the old login moves there by itself.</li>
+          <li>The settings show each messenger as a card with a switch, a QR-code sign-in and «Выйти» (sign out).</li>
+          <li>Experimental: Telegram. It stays off until switched on in the settings. The chats of both messengers share one list, and a phone number is looked up in both.</li>
+          <li>When attaching, the file chooser starts with the photos.</li>
+        </ul>
+        <ul>
+          <li xml:lang="ru">Фото и файлы отправляются скрепкой слева от поля ввода: выбранные ждут над полем, у каждого свой ✕. Голосовое сообщение записывается, пока держите кнопку микрофона.</li>
+          <li xml:lang="ru">Вход в MAX хранится в связке ключей рабочего стола. Входить заново не нужно: прежний вход переносится туда сам.</li>
+          <li xml:lang="ru">Мессенджеры в настройках показаны карточками: у каждого переключатель, вход по QR-коду и «Выйти».</li>
+          <li xml:lang="ru">Экспериментально: Telegram. Он выключен, пока его не включить в настройках. Чаты обоих мессенджеров идут одним списком, поиск по номеру телефона ищет в обоих.</li>
+          <li xml:lang="ru">При отправке фото окно выбора сразу показывает фотографии.</li>
+        </ul>
+      </description>
+    </release>
     <release version="2.4.0" date="2026-10-20">
       <description>
         <p>Faster and steadier, above all on a tablet:</p>

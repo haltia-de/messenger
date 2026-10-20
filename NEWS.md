@@ -1,5 +1,23 @@
 # Что нового · What's new
 
+## 2.5.0 (2026-10-20)
+
+### Русский
+
+- Фото и файлы отправляются скрепкой слева от поля ввода: выбранные ждут над полем, у каждого свой ✕. Голосовое сообщение записывается, пока держите кнопку микрофона.
+- Вход в MAX хранится в связке ключей рабочего стола. Входить заново не нужно: прежний вход переносится туда сам.
+- Мессенджеры в настройках показаны карточками: у каждого переключатель, вход по QR-коду и «Выйти».
+- Экспериментально: Telegram. Он выключен, пока его не включить в настройках. Чаты обоих мессенджеров идут одним списком, поиск по номеру телефона ищет в обоих.
+- При отправке фото окно выбора сразу показывает фотографии.
+
+### English
+
+- Photos and files are sent with the paperclip left of the entry: the chosen ones wait above it, each with its ✕. A voice message records while you hold the microphone button.
+- The MAX login is kept in the desktop's keyring. No need to sign in again: the old login moves there by itself.
+- The settings show each messenger as a card with a switch, a QR-code sign-in and «Выйти» (sign out).
+- Experimental: Telegram. It stays off until switched on in the settings. The chats of both messengers share one list, and a phone number is looked up in both.
+- When attaching, the file chooser starts with the photos.
+
 ## 2.4.0 (2026-10-20)
 
 ### Русский
