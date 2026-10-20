@@ -671,6 +671,7 @@ class PyMaxLink:
         self.client = None
         self.events = None
         self.settings = {}  # the account's own settings, from the last login
+        self.tasks = set()  # events of its own (deletions) on their way
 
     async def run(self, events):
         from pymax import WebClient
@@ -723,7 +724,10 @@ class PyMaxLink:
             else:
                 return
             if chat_id is not None and ids:
-                asyncio.ensure_future(self.events.on_delete(int(chat_id), [int(i) for i in ids]))
+                task = asyncio.ensure_future(
+                    self.events.on_delete(int(chat_id), [int(i) for i in ids]))
+                self.tasks.add(task)  # held till done: the loop keeps only a weak reference
+                task.add_done_callback(self.tasks.discard)
         except Exception as exc:  # a frame of another shape: not for us
             log_line("delete frame: %r" % exc)
 
@@ -1640,11 +1644,25 @@ def log_open():
         return None
 
 
+_log = {"fh": None, "lines": 0}
+_log_lock = threading.Lock()
+
+
 def log_line(text):
-    fh = log_open()
-    if fh:
-        with fh:
-            fh.write("%s %s\n" % (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), text))
+    """A line into LOG, from any thread; the file stays open, and is started
+    anew past its size (looked at every hundred lines)."""
+    with _log_lock:
+        if _log["fh"] is None or _log["lines"] >= 100:
+            if _log["fh"] is not None:
+                _log["fh"].close()
+            _log["fh"], _log["lines"] = log_open(), 0
+        if _log["fh"] is None:
+            return
+        _log["lines"] += 1
+        try:
+            _log["fh"].write("%s %s\n" % (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), text))
+        except (OSError, ValueError):
+            _log["fh"] = None
 
 
 class Libmpv:
@@ -1663,8 +1681,13 @@ class Libmpv:
                            loglevel="warn")
         self.duration = None  # of what plays, once libmpv knows it (files carry none)
         self.mpv.observe_property("duration", lambda _n, v: setattr(self, "duration", v))
-        self.mpv.observe_property(
-            "time-pos", lambda _n, v: v is not None and GLib.idle_add(on_time, v, self.duration))
+        self.told = None  # the half second last told: the bar needs no more
+
+        def moved(_name, v):
+            if v is not None and int(v * 2) != self.told:
+                self.told = int(v * 2)
+                GLib.idle_add(on_time, v, self.duration)
+        self.mpv.observe_property("time-pos", moved)
 
         @self.mpv.event_callback("end-file")
         def _end(event):
@@ -3034,6 +3057,8 @@ class Max(Gtk.Application):
 
     def do_shutdown(self):
         self.backend.cache.flush()  # what the last two seconds changed
+        if self.recent is not None and self.recent != self.recent_saved:
+            save_json(EMOJI_RECENT, self.recent)  # the panel left open
         Gtk.Application.do_shutdown(self)
 
     def do_activate(self):
@@ -3256,7 +3281,10 @@ class Max(Gtk.Application):
         self.smile.set_can_focus(False)
         self.smile.set_focus_on_click(False)
         self.smile.connect("toggled", lambda b: self.emoji_panel(b.get_active()))
-        self.emoji_pop = None
+        self.emoji_pop = None  # the panel while open
+        self.emoji_built = None  # (popover, the recent ones' box, what they show), once built
+        self.recent = None  # the emoji used last, read once
+        self.recent_saved = None
         self.inputbar.pack_start(self.smile, False, False, 0)
         self.inputbar.pack_start(self.entry, True, True, 0)
         self.inputbar.pack_start(self.sendb, False, False, 0)
@@ -3302,10 +3330,12 @@ class Max(Gtk.Application):
         self.fwd_entry = Gtk.SearchEntry()
         self.fwd_entry.get_style_context().add_class("input")
         self.fwd_entry.set_placeholder_text("Кому переслать")
-        self.fwd_entry.connect("search-changed", lambda _e: self.fill_forward())
+        self.fwd_entry.connect("search-changed", lambda _e: self.search_forward())
         fwd.pack_start(self.fwd_entry, False, False, 0)
         self.fwd_list = Gtk.ListBox()
         self.fwd_list.set_selection_mode(Gtk.SelectionMode.NONE)
+        self.fwd_found = None  # the ids the search finds, None: all
+        self.fwd_list.set_filter_func(lambda row: self.fwd_found is None or row.chat_id in self.fwd_found)
         self.fwd_list.connect("row-activated", lambda _l, row: self.forward_to(row.chat_id))
         fwd_scroll = Gtk.ScrolledWindow()
         fwd_scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
@@ -3843,16 +3873,21 @@ class Max(Gtk.Application):
 
     def fill_forward(self):
         """The chats a message can go to: dialogs and groups, the newest
-        first (channels take only their owners' posts), or what the search
-        finds."""
+        first (channels take only their owners' posts); built when the page
+        opens, and the search only filters them (search_forward)."""
         for child in self.fwd_list.get_children():
             child.destroy()
-        text = self.fwd_entry.get_text().strip()
-        chats = self.chatlist.find(text) if text else [e[0] for e in self.chatlist.entries("chats")]
-        for c in chats:
+        self.fwd_found = None
+        for c, _pinned, _quiet in self.chatlist.entries("chats"):
             if c.get("type") != "CHANNEL":
                 self.fwd_list.add(self.chat_row((c, False, False)))
         self.fwd_list.show_all()
+        self.search_forward()
+
+    def search_forward(self):
+        text = self.fwd_entry.get_text().strip()
+        self.fwd_found = {c["id"] for c in self.chatlist.find(text)} if text else None
+        self.fwd_list.invalidate_filter()
 
     def forward_to(self, target):
         if not self.forwarding:
@@ -4347,8 +4382,11 @@ class Max(Gtk.Application):
         self.playing = [bar, play, length, secs(item["duration"]), item]
         self.playing_chat, self.playing_msg, self.playing_pos = chat_id, m["id"], 0.0
         # Its bubble gone (the chat cut or deleted): the sound stops too.
-        play.connect("destroy", lambda b: self.playing and self.playing[1] is b and (
-            self.media.stop(), setattr(self, "playing", None), self.mpris and self.mpris.changed()))
+        if not getattr(play, "sound_watched", False):  # once per button, however often played
+            play.sound_watched = True
+            play.connect("destroy", lambda b: self.playing and self.playing[1] is b and (
+                self.media.stop(), setattr(self, "playing", None),
+                self.mpris and self.mpris.changed()))
         set_play(play, "pause")
         self.show_nowplay()
         if self.mpris:
@@ -4519,51 +4557,67 @@ class Max(Gtk.Application):
             if self.emoji_pop:
                 self.emoji_pop.popdown()
             return
-        pop = Gtk.Popover.new(self.smile)
-        pop.set_modal(False)  # the entry keeps the focus, the keyboard stays
-        pop.set_position(Gtk.PositionType.TOP)
-        column = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
-        for margin in ("start", "end", "top", "bottom"):
-            getattr(column, "set_margin_" + margin)(8)
-        recent = [e for e in load_json(EMOJI_RECENT, []) if isinstance(e, str)]
-        groups = ([("Недавние", recent)] if recent else []) + \
-            [(name, line.split()) for name, line in EMOJI]
-        for name, emoji in groups:
-            column.pack_start(label(name, "emoji-group"), False, False, 4)
-            grid = Gtk.FlowBox(selection_mode=Gtk.SelectionMode.NONE, homogeneous=True,
-                               max_children_per_line=10, min_children_per_line=6)
-            grid.set_can_focus(False)
-            for e in emoji:
-                b = Gtk.Button(label=e)
-                b.get_style_context().add_class("emoji")
-                b.set_can_focus(False)
-                b.set_focus_on_click(False)
-                b.connect("clicked", lambda _b, e=e: self.put_emoji(e))
-                grid.add(b)
-            column.pack_start(grid, False, False, 0)
-        scroll = Gtk.ScrolledWindow()
-        scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
-        scroll.set_kinetic_scrolling(True)
-        scroll.set_size_request(760, 360)
-        scroll.add(column)
-        pop.add(scroll)
-        pop.connect("closed", self.emoji_closed)
-        scroll.show_all()
+        if self.recent is None:
+            self.recent = [e for e in load_json(EMOJI_RECENT, []) if isinstance(e, str)]
+            self.recent_saved = list(self.recent)
+        if self.emoji_built is None:  # built once: some hundreds of buttons
+            pop = Gtk.Popover.new(self.smile)
+            pop.set_modal(False)  # the entry keeps the focus, the keyboard stays
+            pop.set_position(Gtk.PositionType.TOP)
+            column = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+            for margin in ("start", "end", "top", "bottom"):
+                getattr(column, "set_margin_" + margin)(8)
+            recent_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+            column.pack_start(recent_box, False, False, 0)
+            for name, line in EMOJI:
+                self.emoji_group(column, name, line.split())
+            scroll = Gtk.ScrolledWindow()
+            scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+            scroll.set_kinetic_scrolling(True)
+            scroll.set_size_request(760, 360)
+            scroll.add(column)
+            pop.add(scroll)
+            pop.connect("closed", self.emoji_closed)
+            scroll.show_all()
+            self.emoji_built = [pop, recent_box, []]
+        pop, recent_box, shown = self.emoji_built
+        if shown != self.recent:  # the recent ones anew, only when they changed
+            for child in recent_box.get_children():
+                child.destroy()
+            if self.recent:
+                self.emoji_group(recent_box, "Недавние", self.recent)
+            recent_box.show_all()
+            self.emoji_built[2] = list(self.recent)
         self.emoji_pop = pop
         pop.popup()
+
+    def emoji_group(self, column, name, emoji):
+        column.pack_start(label(name, "emoji-group"), False, False, 4)
+        grid = Gtk.FlowBox(selection_mode=Gtk.SelectionMode.NONE, homogeneous=True,
+                           max_children_per_line=10, min_children_per_line=6)
+        grid.set_can_focus(False)
+        for e in emoji:
+            b = Gtk.Button(label=e)
+            b.get_style_context().add_class("emoji")
+            b.set_can_focus(False)
+            b.set_focus_on_click(False)
+            b.connect("clicked", lambda _b, e=e: self.put_emoji(e))
+            grid.add(b)
+        column.pack_start(grid, False, False, 0)
 
     def emoji_closed(self, pop):
         if self.emoji_pop is pop:
             self.emoji_pop = None
             self.smile.set_active(False)
-        GLib.idle_add(pop.destroy)
+        if self.recent is not None and self.recent != self.recent_saved:
+            save_json(EMOJI_RECENT, self.recent)  # once per panel, not per emoji
+            self.recent_saved = list(self.recent)
 
     def put_emoji(self, emoji):
         """An emoji where the cursor is; it goes first among the recent ones."""
         pos = self.entry.insert_text(emoji, self.entry.get_position())
         self.entry.set_position(pos)
-        recent = [emoji] + [e for e in load_json(EMOJI_RECENT, []) if e != emoji]
-        save_json(EMOJI_RECENT, recent[:RECENT])
+        self.recent = ([emoji] + [e for e in self.recent or [] if e != emoji])[:RECENT]
 
     def send(self):
         text = self.entry.get_text().strip()

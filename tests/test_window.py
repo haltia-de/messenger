@@ -291,15 +291,18 @@ assert app.stack.get_visible_child_name() == "forward" and app.title.get_text() 
 targets = [r.chat_id for r in app.fwd_list.get_children()]
 assert dacha in targets and mama in targets and news not in targets  # no channels
 app.fwd_entry.set_text("дач")
-wait(lambda: [r.chat_id for r in app.fwd_list.get_children()] == [dacha], what="forward search")
+fwd_shown = lambda: [r for r in app.fwd_list.get_children() if r.get_child_visible()]  # noqa: E731
+built = app.fwd_list.get_children()
+wait(lambda: [r.chat_id for r in fwd_shown()] == [dacha], what="forward search")
+assert app.fwd_list.get_children() == built  # filtered, not built anew
 shot("forward.png")
 answer[0] = False  # asked first: «no» keeps choosing
-app.fwd_list.emit("row-activated", app.fwd_list.get_children()[0])
+app.fwd_list.emit("row-activated", fwd_shown()[0])
 spin(0.1)
 assert questions[-1] == ("Переслать сообщение в «Дача»?", "Переслать")
 assert app.stack.get_visible_child_name() == "forward" and not fake.asked("forward")
 answer[0] = True
-app.fwd_list.emit("row-activated", app.fwd_list.get_children()[0])
+app.fwd_list.emit("row-activated", fwd_shown()[0])
 wait(lambda: app.open_chat == dacha, what="forwarded, and in that chat")
 assert app.stack.get_visible_child_name() == "chat"
 assert fake.asked("forward")[-1] == {"chat_id": dacha, "msg_id": first, "from_chat_id": mama}
@@ -342,11 +345,11 @@ assert app.entry.get_text() == "Привет 😀❤️" and app.emoji_pop is no
 app.entry.set_position(0)
 smiley.clicked()
 assert app.entry.get_text() == "😀Привет 😀❤️"
-assert bm.load_json(bm.EMOJI_RECENT, []) == ["😀", "❤️"]
 shot("emoji.png")
 app.smile.set_active(False)
 spin(0.1)
 assert app.emoji_pop is None
+assert bm.load_json(bm.EMOJI_RECENT, []) == ["😀", "❤️"]  # written once the panel closed
 app.smile.set_active(True)
 spin(0.1)
 assert [w.get_text() for w in walk(app.emoji_pop) if isinstance(w, Gtk.Label)
