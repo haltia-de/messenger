@@ -369,6 +369,8 @@ chats of the message's messenger (between messengers: step 4). At the
   stopped by SIGINT so the file is finished, in a thread — into `PHOTOS/voice-*.ogg`, sent as
   `{"kind": "voice", "duration": ms}` and removed; shorter than `SHORTEST` is not sent.
   `Max(recorder=…)` takes a recorder with fake hands (`popen`, `which`) in tests.
+- **No keyboard on entering a chat.** `open()` focuses nothing (`win.set_focus(None)`): the
+  on-screen keyboard comes when the entry is tapped, never over a channel (no entry there).
 - **Emoji in messages.** The «😊» toggle left of the entry opens a non-modal popover (`EMOJI`
   groups, the recent ones first from `EMOJI_RECENT`, `emoji.json`); a tap inserts at the cursor
   (`put_emoji`). Non-modal on purpose: the entry keeps the focus, so the on-screen keyboard

@@ -862,6 +862,24 @@ assert any(isinstance(w, Gtk.Label) and "api_id" in w.get_text() for w in c.get_
 assert not app.tagged  # one messenger: the rows say nothing of whose
 ok("Telegram without keys")
 
+# --- entering a chat focuses no entry: the on-screen keyboard comes on a tap (in a channel never) ---
+for came_from, chat in (("dialog", news), ("search", news), ("list", mama)):
+    app.show_list()
+    if came_from == "dialog":
+        app.open(mama)
+        spin(0.2)
+        app.entry.grab_focus()
+        app.show_list()
+    elif came_from == "search":
+        app.show_find()
+        app.find_entry.grab_focus()
+    app.open(chat)
+    spin(0.3)
+    focus = app.win.get_focus()
+    assert not isinstance(focus, Gtk.Entry), (came_from, focus)
+app.show_list()
+ok("no keyboard on entering a chat")
+
 # --- no connection: the bar, the place kept, a message not lost; a login from anywhere ---------
 bm.RETRY = (0.05,)
 app.open(mama)

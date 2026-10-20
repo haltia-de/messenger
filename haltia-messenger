@@ -5996,6 +5996,9 @@ class Max(Gtk.Application):
         self.back.show()
         self.inputbar.set_visible(s.get("type") != "CHANNEL")
         self.stack.set_visible_child_name("chat")
+        # Nothing focused: the on-screen keyboard comes when the entry is tapped,
+        # not over the messages being read (and never in a channel).
+        self.win.set_focus(None)
         view.enter()
 
         def done(res, err):
