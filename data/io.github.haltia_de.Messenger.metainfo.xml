@@ -20,6 +20,12 @@
   </content_rating>
   <requires><control>touch</control></requires>
   <releases>
+    <release version="2.3.3" date="2026-10-20">
+      <description>
+        <p>Messages from the service itself, such as the welcome in Saved Messages, are shown in words instead of a technical key.</p>
+        <p xml:lang="ru">Сообщения самого сервиса, например приветствие в Избранном, показываются словами, а не служебным ключом.</p>
+      </description>
+    </release>
     <release version="2.3.2" date="2026-10-19">
       <description>
         <p>On an ordinary desktop the window has its window buttons again, so it can be closed; it keeps receiving messages in the background.</p>

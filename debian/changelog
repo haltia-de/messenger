@@ -1,3 +1,9 @@
+haltia-messenger (2.3.3) unstable; urgency=medium
+
+  * MAX's own messages in words instead of their keys.
+
+ -- Haltia <rensomail@gmail.com>  Tue, 20 Oct 2026 09:53:00 +0300
+
 haltia-messenger (2.3.2) unstable; urgency=medium
 
   * The window buttons of the desktop off the Haltia shell.
