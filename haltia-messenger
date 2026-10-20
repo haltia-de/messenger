@@ -485,6 +485,23 @@ def plain(text):
     return "".join(c if c.isprintable() else " " for c in (text or "")).strip()
 
 
+# Messages MAX itself puts into chats come as keys its own clients translate.
+SERVICE_TEXTS = {
+    "welcome.saved.dialog.message":
+        "Это Избранное. Сохраняйте сюда сообщения, файлы и заметки: их видите только вы.",
+}
+SERVICE_KEY = re.compile(r"[a-z]+(?:\.[a-z][a-z_]*){3,}")  # four parts or more: not a site's name
+
+
+def shown_text(text):
+    """A message's text as it is shown: a key of MAX's own messages in
+    words, an unknown one as «Служебное сообщение» rather than the key."""
+    text = text or ""
+    if text in SERVICE_TEXTS:
+        return SERVICE_TEXTS[text]
+    return "Служебное сообщение" if SERVICE_KEY.fullmatch(text) else text
+
+
 def note_text(summary, msg):
     """(title, body) of the notification of a message. The text is a
     sender's, and notification daemons read markup in the body (links,
@@ -1058,7 +1075,7 @@ class Backend:
         if not msg:
             return ""
         shown = self.carried(msg)
-        text = (shown.text or "").replace("\n", " ")
+        text = shown_text(shown.text).replace("\n", " ")
         if not text:
             parts = [attach_summary(a)[0] or "фото" for a in shown.attaches or []]
             text = ", ".join(p for p in parts if p).capitalize()
@@ -1091,7 +1108,7 @@ class Backend:
                 media.append(item)
             elif what:
                 texts.append("[%s]" % what)
-        body = shown.text or ""
+        body = shown_text(shown.text)
         if texts:
             body = (body + "\n" if body else "") + " ".join(texts)
         reactions, yours = reactions_of(msg.reaction_info)

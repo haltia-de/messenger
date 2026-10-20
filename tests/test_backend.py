@@ -128,6 +128,14 @@ while not said(ui, "incoming"):
 out, summary = said(ui, "incoming")[-1]
 assert out["text"] == "Позвони вечером" and out["who"] == "Анна Петрова" and not out["mine"]
 assert summary["last"] == "Позвони вечером"
+# MAX's own messages come as keys: in words, an unknown one never as the key
+fake.incoming(anna, "welcome.saved.dialog.message", None)
+while len(said(ui, "incoming")) < 2:
+    drain()
+out, summary = said(ui, "incoming")[-1]
+assert out["text"].startswith("Это Избранное") and summary["last"].startswith("Вы: Это Избранное")
+assert B.message(fake.say(anna, "some.new.service.key"))["text"] == "Служебное сообщение"
+assert B.message(fake.say(anna, "mail.yandex.ru"))["text"] == "mail.yandex.ru"
 m = fake.say(anna, "", ANNA, attaches=[audio("https://vd.okcdn.ru/a.ogg"), video(5, "https://i.oneme.ru/t.jpg"),
                                        file(6, "a.pdf", 2048), photo("https://i.oneme.ru/p.jpg")],
              reactions=[("👍", 2)])
