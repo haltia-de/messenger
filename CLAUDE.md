@@ -158,6 +158,7 @@ programs are found on `PATH` (`haltia-vplay`, `b8k-vplay` before 2.0: `shutil.wh
   keys: `TG_API_ID`/`TG_API_HASH`, or `[telegram] api_id`/`api_hash` in `messenger.conf`
   (`telegram_keys()`); without keys or Telethon `Backend.missing(name)` says why, and the
   card shows it with its switch off and greyed. Telemetry and invites stay MAX's (`can`).
+  Telegram is experimental (`EXPERIMENTAL`: its card says so) and off until switched on.
 - **Login.** `PyMaxLink` is PyMax's QR provider; `Backend.on_qr` renders the QR code to scan with
   MAX on a phone. The session lives in the keyring: `secrets()` is haltia-kit's `Vault`
   (`app=APP_ID`, `account=max`; libsecret, the Secret portal in Flatpak; `DATA/max-session.json`,

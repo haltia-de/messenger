@@ -210,6 +210,7 @@ KEYRING = AUTO  # the Secret Service if one answers; tests put a fake here
 MESSENGERS = (("max", "MAX"), ("telegram", "Telegram"))  # (account, its name on the screen)
 # This program's keys of Telegram's API (my.telegram.org); [telegram] api_id
 # and api_hash in messenger.conf take their place.
+EXPERIMENTAL = {"telegram"}  # said so in its card; off until switched on, as all but MAX
 TG_API_ID = 0
 TG_API_HASH = ""
 TG_HOSTS = ("t.me", "telegram.me")
@@ -4763,6 +4764,9 @@ class Max(Gtk.Application):
         switch.connect("notify::active", lambda sw, _p: self.switch_account(name, sw.get_active()))
         row.pack_end(switch, False, False, 0)
         card.pack_start(row, False, False, 0)
+        if name in EXPERIMENTAL:
+            card.pack_start(label("Экспериментально: что-то может работать не так.", "hint",
+                                  wrap=True), False, False, 0)
         if missing:
             card.pack_start(label(missing, "hint", wrap=True), False, False, 0)
             return card
