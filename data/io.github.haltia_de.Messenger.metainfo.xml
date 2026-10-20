@@ -20,6 +20,24 @@
   </content_rating>
   <requires><control>touch</control></requires>
   <releases>
+    <release version="2.4.0" date="2026-10-20">
+      <description>
+        <p>Faster and steadier, above all on a tablet:</p>
+        <ul>
+          <li>New messages and scrolling no longer make the window stall.</li>
+          <li>Without a connection a yellow bar says so; the program reconnects by itself and you stay where you were. A message that could not go out stays in the entry.</li>
+          <li>Buttons no longer stay grey for good after a lost connection.</li>
+          <li>Photos load a couple at a time, the ones on screen first.</li>
+        </ul>
+        <p xml:lang="ru">Быстрее и надёжнее, особенно на планшете:</p>
+        <ul xml:lang="ru">
+          <li>Новые сообщения и прокрутка больше не подтормаживают окно.</li>
+          <li>Когда нет связи, это видно по жёлтой полосе; программа сама переподключается, а вы остаётесь там, где были. Неотправленное сообщение остаётся в поле ввода.</li>
+          <li>Кнопки больше не остаются серыми навсегда после обрыва связи.</li>
+          <li>Фото загружаются по два, сначала те, что на экране.</li>
+        </ul>
+      </description>
+    </release>
     <release version="2.3.3" date="2026-10-20">
       <description>
         <p>Messages from the service itself, such as the welcome in Saved Messages, are shown in words instead of a technical key.</p>

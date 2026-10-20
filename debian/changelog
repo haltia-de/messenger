@@ -1,3 +1,11 @@
+haltia-messenger (2.4.0) unstable; urgency=medium
+
+  * Every request to MAX answered; the link started again; a bar with no connection.
+  * The message cache in memory, photos through a queue, the chat list and the
+    chat view redrawing only what changed.
+
+ -- Haltia <rensomail@gmail.com>  Tue, 20 Oct 2026 11:20:00 +0300
+
 haltia-messenger (2.3.3) unstable; urgency=medium
 
   * MAX's own messages in words instead of their keys.
