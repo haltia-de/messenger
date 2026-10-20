@@ -350,7 +350,13 @@ chats of the message's messenger (between messengers: step 4). At the
   `attached`, drawn above the entry (`show_attached`: a small photo or the name, each with its
   ✕). `send()` sends the text with them (`Backend.send(chat, text, files)` → the link's
   `send(chat, text, files)`; PyMaxLink makes PyMax's `Photo`/`File`/`Voice`); what could not be
-  sent stays. The microphone shows only with `voice` on (the setting «Голосовые сообщения», on by
+  sent stays. PyMax 2.4.1's photo and voice uploads fail on today's MAX (its issues #108, #103):
+  `PyMaxLink._fix_uploads` puts its own on the client — a photo's token from the answer's one
+  entry (`photo_token`: MAX's upload link has no `photoIds` since autumn 2026), a voice as a
+  multipart form (`audio/ogg`, no user agent) named in the message by `audioId` (no token), and
+  an upload's error read from a 200's body; `send` sends again, uploaded anew, while MAX answers
+  `…not.ready` (`VOICE_TRIES`, `VOICE_PAUSE`). Recorders make Opus 48 kHz mono, which MAX checks.
+  Drop these when a PyMax release fixes them. The microphone shows only with `voice` on (the setting «Голосовые сообщения», on by
   default; `voice_on`). A voice message: the microphone button held (`GestureMultiPress` pressed /
   released; `record_start`/`record_stop`) records by `Recorder` — `RECORDERS`' first on `PATH`:
   ffmpeg from pulse to Ogg/Opus (in the tablet's image), gst-launch, parecord's Ogg/Vorbis;

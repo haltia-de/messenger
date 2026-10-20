@@ -874,6 +874,23 @@ class VaultStore:
                 pass
 
 
+VOICE_TRIES = 4  # a voice sent again while MAX says it is not ready yet
+VOICE_PAUSE = 3  # s between those
+
+
+def photo_token(url, answer):
+    """The token of the one photo of an upload's answer: by the photoIds of
+    its link if there are (MAX gave them till autumn 2026), else the only
+    one; an error rather than a guess between several."""
+    photos = (answer or {}).get("photos") or {}
+    wanted = urllib.parse.parse_qs(urllib.parse.urlsplit(url or "").query).get("photoIds", [None])[0]
+    if wanted in photos:
+        return photos[wanted]["token"]
+    if len(photos) == 1:
+        return next(iter(photos.values()))["token"]
+    raise RuntimeError("upload: %d photos in the answer" % len(photos))
+
+
 class PyMaxLink:
     """The link to MAX (CONTEXT.md: Связь с MAX) through PyMax's web client:
     every request this program makes, and the events it gets, in one place.
@@ -1102,20 +1119,86 @@ class PyMaxLink:
 
     async def send(self, chat_id, text, files=()):
         """A message, with files (attachment(): photos, files; voice with
-        its duration in ms) if any."""
+        its duration in ms) if any. A voice MAX has not made ready yet
+        (…attachment….not.ready) goes again, uploaded anew, a few times."""
+        from pymax.exceptions import ApiError
         from pymax.files import File, Photo, Voice
 
-        sent = []
-        for f in files:
-            if f["kind"] == "photo":
-                sent.append(Photo(path=f["path"]))
-            elif f["kind"] == "voice":
-                sent.append(Voice(path=f["path"], duration=int(f["duration"])))
-            else:
-                sent.append(File(path=f["path"], name=f.get("name")))
-        msg = await self._api.messages.send_message(chat_id, text or None,
-                                                    attachments=sent or None)
+        self._fix_uploads()
+        for attempt in range(VOICE_TRIES):
+            sent = []
+            for f in files:
+                if f["kind"] == "photo":
+                    sent.append(Photo(path=f["path"]))
+                elif f["kind"] == "voice":
+                    sent.append(Voice(path=f["path"], duration=int(f["duration"])))
+                else:
+                    sent.append(File(path=f["path"], name=f.get("name")))
+            try:
+                msg = await self._api.messages.send_message(chat_id, text or None,
+                                                            attachments=sent or None)
+                break
+            except ApiError as exc:
+                if not (exc.error or "").endswith("not.ready") or attempt == VOICE_TRIES - 1:
+                    raise
+                log_line("send: %s, again" % exc.error)
+                await asyncio.sleep(VOICE_PAUSE)
         return max_message(msg) if msg else None
+
+    def _fix_uploads(self):
+        """PyMax 2.4.1's photo and voice uploads, replaced on this client
+        (its issues #108 and #103): MAX no longer puts photoIds in a photo's
+        upload link, and takes a voice as a multipart form, answered by
+        audioId; its errors come in a 200's body."""
+        uploads = self._api.uploads
+        if getattr(uploads, "fixed", False):
+            return
+        uploads.upload_photo = self._upload_photo
+        uploads.upload_voice = self._upload_voice
+        uploads.fixed = True
+
+    async def _post_form(self, url, data, name, ctype):
+        import aiohttp
+
+        form = aiohttp.FormData()
+        form.add_field("file", data, filename=name, content_type=ctype)
+        async with aiohttp.ClientSession(proxy=self.client._app.config.proxy) as session, \
+                session.post(url, data=form) as response:
+            body = await response.text()
+            if response.status != 200:
+                raise RuntimeError("upload: HTTP %d" % response.status)
+        try:
+            answer = json.loads(body) if body.strip() else {}
+        except ValueError:
+            answer = {}
+        if isinstance(answer, dict) and answer.get("error_code"):
+            raise RuntimeError("upload: %s" % (answer.get("error_data") or answer["error_code"]))
+        return answer
+
+    async def _upload_photo(self, photo, profile=False):
+        from pymax.api.response import payload_dict
+        from pymax.api.uploads.payloads import AttachPhotoPayload, UploadPayload
+        from pymax.protocol import Opcode
+
+        frame = await self.client._app.invoke(Opcode.PHOTO_UPLOAD,
+                                              payload=UploadPayload(profile=profile).to_payload())
+        url = payload_dict(frame).get("url")
+        ext, ctype = photo.validate_photo() or ("jpg", "image/jpeg")
+        answer = await self._post_form(url, await photo.read(), "image." + ext, ctype)
+        return AttachPhotoPayload(photo_token=photo_token(url, answer))
+
+    async def _upload_voice(self, voice):
+        from pymax.api.uploads.models import VideoUploadResponse
+        from pymax.api.uploads.payloads import UploadPayload, VoiceAttachPayload
+        from pymax.protocol import Opcode
+
+        frame = await self.client._app.invoke(Opcode.VIDEO_UPLOAD, payload=UploadPayload(
+            type=2, uploader_type=1).to_payload())
+        info = VideoUploadResponse.model_validate(frame.payload).info[0]
+        await self._post_form(info.url, await voice.read(), voice.name or "voice.ogg", "audio/ogg")
+        # No token: the message names it by audioId (the token is a video's).
+        return VoiceAttachPayload(video_id=info.video_id, token="",
+                                  duration=await voice.get_duration(), wave=b"\x00" * 80)
 
     async def forward(self, chat_id, msg_id, from_chat_id):
         """A message (its attachments with it) into another chat, as MAX
@@ -2694,10 +2777,12 @@ class Libmpv:
 RECORDERS = (
     ("ffmpeg", lambda path: [
         "ffmpeg", "-nostdin", "-loglevel", "error", "-y", "-f", "pulse", "-i", "default",
-        "-ac", "1", "-c:a", "libopus", "-b:a", "32k", "-application", "voip", path]),
+        "-ac", "1", "-ar", "48000", "-c:a", "libopus", "-b:a", "32k", "-application", "voip",
+        "-f", "ogg", path]),
     ("gst-launch-1.0", lambda path: [
         "gst-launch-1.0", "-q", "-e", "autoaudiosrc", "!", "audioconvert", "!", "audioresample",
-        "!", "opusenc", "!", "oggmux", "!", "filesink", "location=" + path]),
+        "!", "audio/x-raw,rate=48000,channels=1", "!", "opusenc", "!", "oggmux", "!",
+        "filesink", "location=" + path]),
     ("parecord", lambda path: ["parecord", "--file-format=oga", path]),
 )
 SHORTEST = 1000  # ms: a press shorter than this was not a message

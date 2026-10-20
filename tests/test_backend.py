@@ -329,18 +329,99 @@ assert bm.max_person(PyUser.model_validate({"id": 5, "names": [{"name": "Анн�
 sent_to_max = []
 
 
+not_ready = [0]  # MAX answers …not.ready this many times first
+
+
 class Messages:
     async def send_message(self, chat_id, text, attachments=None):
         sent_to_max.append((chat_id, text, attachments))
+        if not_ready[0]:
+            not_ready[0] -= 1
+            from pymax.exceptions import ApiError
+            raise ApiError(opcode=64, error="errors.process.attachment.video.not.ready")
 
 
 link = bm.PyMaxLink("/nonexistent")
-link.client = SimpleNamespace(_app=SimpleNamespace(api=SimpleNamespace(messages=Messages())))
+link.client = SimpleNamespace(_app=SimpleNamespace(api=SimpleNamespace(
+    messages=Messages(), uploads=SimpleNamespace())))
 asyncio.run(link.send(11, "", [bm.attachment("/x/Дача.JPG"), bm.attachment("/x/Счёт.pdf"),
                                {"kind": "voice", "path": "/x/v.ogg", "duration": 3200}]))
 chat, text, files = sent_to_max[-1]
 assert chat == 11 and text is None and [type(f).__name__ for f in files] == ["Photo", "File", "Voice"]
 assert files[1].name == "Счёт.pdf" and files[2].duration == 3200
+assert link._api.uploads.upload_photo == link._upload_photo  # PyMax 2.4.1's own fail on MAX now
+bm.VOICE_PAUSE = 0
+not_ready[0] = 2
+n = len(sent_to_max)
+asyncio.run(link.send(11, "", [{"kind": "voice", "path": "/x/v.ogg", "duration": 3200}]))
+assert len(sent_to_max) == n + 3  # not ready twice: sent again, uploaded anew
+assert bm.photo_token("https://iu.oneme.ru/uploadImage?r=x", {"photos": {"0": {"token": "T"}}}) == "T"
+assert bm.photo_token("https://x/u?photoIds=7", {"photos": {"7": {"token": "A"}, "8": {"token": "B"}}}) == "A"
+for bad in ({"photos": {}}, {"photos": {"1": {"token": "A"}, "2": {"token": "B"}}}):
+    try:
+        bm.photo_token("https://iu.oneme.ru/uploadImage?r=x", bad)
+        raise AssertionError("guessed")
+    except RuntimeError:
+        pass
+
+
+async def uploads():
+    """The uploads against a small server answering as MAX's do."""
+    from aiohttp import web
+    from pymax.files import Photo, Voice
+
+    got = []
+
+    async def take(request):
+        form = await request.post()
+        part = form["file"]
+        got.append((request.path, part.filename, part.content_type, part.file.read()))
+        if request.path == "/bad":
+            return web.json_response({"error_code": "1", "error_data": "AUDIO_VALIDATION_FAILED"})
+        if request.path == "/uploadImage":
+            return web.json_response({"photos": {"0": {"token": "PT"}}})
+        return web.Response(text="")
+
+    app = web.Application()
+    app.router.add_post("/{name}", take)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    base = "http://127.0.0.1:%d" % site._server.sockets[0].getsockname()[1]
+    voice_url = [base + "/uploadAudio"]
+
+    async def invoke(op, payload=None):
+        if op.name == "PHOTO_UPLOAD":
+            return SimpleNamespace(payload={"url": base + "/uploadImage?r=tok"})
+        return SimpleNamespace(payload={"info": [{"url": voice_url[0], "videoId": 55, "token": "VT"}]})
+
+    one = bm.PyMaxLink("/nonexistent")
+    one.client = SimpleNamespace(_app=SimpleNamespace(invoke=invoke, config=SimpleNamespace(proxy=None)))
+    pic, ogg = os.path.join(bm.PHOTOS, "up.png"), os.path.join(bm.PHOTOS, "up.ogg")
+    with open(pic, "wb") as fh:
+        fh.write(b"\x89PNG\r\n\x1a\n" + b"0" * 16)
+    with open(ogg, "wb") as fh:
+        fh.write(b"OggS voice")
+    try:
+        photo = await one._upload_photo(Photo(path=pic))
+        voice = await one._upload_voice(Voice(path=ogg, duration=3200))
+        voice_url[0] = base + "/bad"
+        try:
+            await one._upload_voice(Voice(path=ogg, duration=3200))
+            raise AssertionError("an error in a 200 taken for a success")
+        except RuntimeError as exc:
+            assert "AUDIO_VALIDATION_FAILED" in str(exc)
+    finally:
+        await runner.cleanup()
+    return got, photo, voice
+
+
+got, photo, voice = asyncio.run(uploads())
+assert photo.photo_token == "PT" and got[0][0] == "/uploadImage" and got[0][2] == "image/png"
+assert got[1][:3] == ("/uploadAudio", "up.ogg", "audio/ogg") and got[1][3] == b"OggS voice"
+attach = voice.model_dump(by_alias=True)
+assert attach.get("audioId") == 55 and "token" not in attach and attach["duration"] == 3200
 assert bm.attachment_words([bm.attachment("/x/a.png"), bm.attachment("/x/b.pdf")]) == "Фото, файл «b.pdf»"
 ok("PyMax's objects as the link's own")
 
