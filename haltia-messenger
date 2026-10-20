@@ -203,6 +203,7 @@ def move_old_home():
 move_old_home()
 SETTINGS = Settings("messenger", CONFIG)  # ~/.config/haltia/messenger.conf, [messenger]
 KEYRING = AUTO  # the Secret Service if one answers; tests put a fake here
+MESSENGERS = (("max", "MAX"),)  # the accounts there can be: (account, its name on the screen)
 _vault = []
 
 
@@ -929,6 +930,17 @@ class PyMaxLink:
         change it."""
         return self.settings.get("CHATS_INVITE")
 
+    async def signed_in(self):
+        """Whether a login is kept (then run() needs no QR code); Locked if
+        the keyring is closed."""
+        if os.path.exists(os.path.join(self.work_dir, "web.db")):
+            return True  # 2.4's, moved into the keyring by run()
+        return await asyncio.to_thread((self.vault or secrets()).get, self.account) is not None
+
+    async def logout(self):
+        """The login forgotten here (the next run() shows a QR code)."""
+        await asyncio.to_thread((self.vault or secrets()).drop, self.account)
+
     async def show_qr(self, qr_url):  # PyMax's QrHandler
         await self.events.on_qr(qr_url)
 
@@ -1092,17 +1104,28 @@ class Backend:
         self.cache = cache or MessageCache(CHATS)  # its own in tests that ask
         self.loop = None
         self.accounts = {}  # name -> Account, in the order added
-        self.living = set()  # the accounts' tasks, once the loop runs
+        self.given = {}  # name -> a link given (tests); else made by make()
         for one in link if isinstance(link, (list, tuple)) else [link] if link else []:
-            self.add(one)  # given (tests): else PyMaxLink, at the start
+            self.given[one.account] = one
+            self.add(one)
+
+    def make(self, name):
+        """The link of a messenger by its account's name."""
+        if name in self.given:
+            return self.given[name]
+        if name == "max":
+            return PyMaxLink(DATA)
+        raise KeyError(name)
 
     def add(self, link):
-        """An account on this link; started at once if the loop runs."""
+        """An account on this link, not started (begin() starts it)."""
         folder = DATA if link.account == "max" else os.path.join(DATA, link.account)
         account = self.accounts[link.account] = Account(self.ui, link, self.cache, folder)
-        if self.living:
-            asyncio.run_coroutine_threadsafe(self._live(account), self.loop)
         return account
+
+    def names(self):
+        """The messengers there can be, the given ones (tests) too."""
+        return [n for n, _label in MESSENGERS] + [n for n in self.given if n not in dict(MESSENGERS)]
 
     def start(self):
         # The loop is there before its thread runs: a request made at once waits in it.
@@ -1114,19 +1137,54 @@ class Backend:
         self.loop.run_until_complete(self._main())
 
     async def _main(self):
+        """Every messenger switched on and signed in starts; the window is
+        told of the others (signin: off, out, locked)."""
         os.makedirs(DATA, mode=0o700, exist_ok=True)
-        if not self.accounts:
-            self.add(PyMaxLink(DATA))
-        self.living.add(None)  # from now on an added account starts at once
-        await asyncio.gather(*(self._live(a) for a in list(self.accounts.values())))
+        for name in self.names():
+            await self.begin(name, quiet=True)
+        await asyncio.Event().wait()  # the accounts live in their own tasks
 
-    async def _live(self, account):
-        task = asyncio.current_task()
-        self.living.add(task)
-        try:
-            await account.live()
-        finally:
-            self.living.discard(task)
+    async def begin(self, name, quiet=False):
+        """Start a messenger's account: at once if a login is kept, else
+        only when asked (not quiet: the person pressed «Войти»: a QR
+        code comes)."""
+        if not messenger_on(name):
+            GLib.idle_add(self.ui.signin, name, {"kind": "off"})
+            return
+        account = self.accounts.get(name) or self.add(self.make(name))
+        if account.task is not None:
+            return
+        if quiet:
+            try:
+                kept = await account.link.signed_in()
+            except Locked:
+                GLib.idle_add(self.ui.signin, name, {"kind": "locked"})
+                return
+            if not kept:
+                GLib.idle_add(self.ui.signin, name, {"kind": "out"})
+                return
+        GLib.idle_add(self.ui.signin, name, {"kind": "getting"})
+        account.task = asyncio.get_running_loop().create_task(account.live())
+
+    async def stop(self, name):
+        """A messenger switched off: disconnected, its login kept."""
+        account = self.accounts.get(name)
+        if account is not None:
+            await account.stop()
+        GLib.idle_add(self.ui.signin, name, {"kind": "off"})
+
+    async def logout(self, name):
+        """Out of a messenger's account: disconnected, the login and the
+        messages kept of it here forgotten."""
+        account = self.accounts.get(name)
+        if account is None:
+            return
+        await account.stop()
+        await account.link.logout()
+        for chat_id in list(account.chats):
+            self.cache.drop(chat_id)
+        account.chats = {}
+        GLib.idle_add(self.ui.signin, name, {"kind": "out"})
 
     def run(self, coro, done=None, owner=None):
         """Run a coroutine in the messengers' thread; done(result, error) in
@@ -1150,11 +1208,17 @@ class Backend:
             GLib.idle_add(answer, res, err)
         fut.add_done_callback(back)
 
-    def retry(self):
+    def retry(self, name=None):
         """Start the links that gave up again now, not after the pause (the
-        wait page's button)."""
+        wait page's button); one messenger's only with name. One that
+        waits for a closed keyring is asked again."""
         for account in self.accounts.values():
-            account.retry()
+            if name in (None, account.id):
+                account.retry()
+        if name is not None and self.loop is not None:
+            account = self.accounts.get(name)
+            if account is None or account.task is None:
+                asyncio.run_coroutine_threadsafe(self.begin(name, quiet=True), self.loop)
 
     def of(self, some_id):
         """The account whose chat or person this id is; Offline if none."""
@@ -1268,6 +1332,7 @@ class Account:
         self.known_path = os.path.join(folder, "known.json")
         self.aliases_path = os.path.join(folder, "names.json")
         self.loop = None
+        self.task = None  # live(), while it runs
         self.online = False  # logged in and connected: requests go to the messenger
         self.tries = 0  # the link's starts in a row that ended without a login
         self.wake = None  # set by retry(): the pause before the next start ends
@@ -1303,6 +1368,17 @@ class Account:
         if not self.online:
             raise Offline()
 
+    async def stop(self):
+        """Disconnected: the link's run() cancelled (PyMax closes on it)."""
+        task, self.task = self.task, None
+        self.online = False
+        if task is not None:
+            task.cancel()
+            try:
+                await task
+            except BaseException:  # its cancellation, or what it died of
+                pass
+
     async def live(self):
         os.makedirs(self.folder, mode=0o700, exist_ok=True)
         self.loop = asyncio.get_running_loop()
@@ -1311,6 +1387,13 @@ class Account:
             try:
                 await self.link.run(self)
                 why = "соединение закрыто"
+            except Locked:  # the keyring closed: asked again by retry() only
+                self.online = False
+                log_line("%s: the keyring is closed" % self.id)
+                GLib.idle_add(self.ui.signin, self.id, {"kind": "locked"})
+                self.wake.clear()
+                await self.wake.wait()
+                continue
             except Exception as exc:
                 why = repr(exc)
             self.online = False
@@ -1341,6 +1424,7 @@ class Account:
         self.tries = 0
         if me:
             self.names[self.me] = me.name
+            GLib.idle_add(self.ui.signin, self.id, {"kind": "in", "name": self.name(self.me)})
         # On a reconnect the sync only brings chats that changed since the
         # last one, so page through the whole list as well.
         found = {c.id: c for c in chats or []}
@@ -1810,6 +1894,12 @@ def save_text(path, text):
 def load_setting(key):
     """A yes/no setting of [max] (telemetry, buzz…); yes until set."""
     return SETTINGS.get_bool(key, True)
+
+
+def messenger_on(name):
+    """Whether a messenger is switched on (the settings' card): MAX until
+    switched off, the others once switched on."""
+    return SETTINGS.get_bool("account_" + name, name == "max")
 
 
 def load_text(key, default):
@@ -3635,14 +3725,20 @@ class Max(Gtk.Application):
         wait.pack_start(self.retryb, False, False, 0)
         self.stack.add_named(wait, "wait")
 
-        qr = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=20)
-        qr.set_valign(Gtk.Align.CENTER)
-        qr.pack_start(label("Вход в MAX", "big", xalign=0.5), False, False, 0)
-        self.qr_image = Gtk.Image()
-        qr.pack_start(self.qr_image, False, False, 0)
-        qr.pack_start(label("Откройте MAX на телефоне и отсканируйте этот код",
-                            "hint", xalign=0.5), False, False, 0)
-        self.stack.add_named(qr, "qr")
+        # The messengers' sign-in, as cards: the same on the login page (the
+        # first start, a login ended) and in the settings (draw_accounts).
+        self.signins = {}  # account -> its state (Backend: signin), as last told
+        login = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=20)
+        for side in ("start", "end", "top", "bottom"):
+            getattr(login, "set_margin_" + side)(24)
+        login.pack_start(label("Вход", "big", xalign=0.5), False, False, 0)
+        self.login_cards = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=20)
+        login.pack_start(self.login_cards, False, False, 0)
+        login_scroll = Gtk.ScrolledWindow()
+        login_scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        login_scroll.set_kinetic_scrolling(True)
+        login_scroll.add(login)
+        self.stack.add_named(login_scroll, "login")
 
         self.list = Gtk.ListBox()
         self.list.set_selection_mode(Gtk.SelectionMode.NONE)
@@ -3833,6 +3929,10 @@ class Max(Gtk.Application):
         settings.set_margin_start(24)
         settings.set_margin_end(24)
         settings.set_margin_top(24)
+        settings.pack_start(label("Мессенджеры", "big"), False, False, 0)
+        self.settings_cards = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=20)
+        settings.pack_start(self.settings_cards, False, False, 0)
+        settings.pack_start(label("Настройки", "big"), False, False, 0)
         settings.pack_start(self.setting(
             "Сообщения только от контактов", self.chatlist.contacts_only, self.on_contacts_only,
             "Переписки с теми, кого нет в ваших контактах, не видны и не вибрируют. "
@@ -3887,7 +3987,12 @@ class Max(Gtk.Application):
         self.stack.add_named(settings_scroll, "settings")
         self.stack.connect("notify::visible-child-name", self.page_changed)
 
-        # The last known list at once; the connection refreshes it.
+        # The last known list at once; the connection refreshes it. A
+        # messenger switched off shows nothing of its own.
+        for name, _label in MESSENGERS:
+            if not messenger_on(name):
+                self.chatlist.replace([], name)
+        self.draw_accounts()
         cached = bool(self.chatlist.chats)
         if cached:
             self.fill_list()
@@ -3924,17 +4029,126 @@ class Max(Gtk.Application):
             priority=GLib.PRIORITY_LOW)
 
     # called from the MAX thread through idle_add
-    def show_qr(self, _account, path):
-        """A login is needed (the first, or MAX ended the last one): from
-        any page; the cache stays."""
-        self.qr_image.set_from_pixbuf(GdkPixbuf.Pixbuf.new_from_file(path))
+    def show_qr(self, account, path):
+        """A login is needed (the first, or MAX ended the last one): its
+        card shows the code, on the login page from any page (in the
+        settings if open there); the cache stays."""
+        self.signin(account, {"kind": "waiting", "qr": path})
+        if self.stack.get_visible_child_name() != "settings":
+            self.show_login()
+        self.win.present()  # a login needs the person, background or not
+        return False
+
+    def show_login(self):
         self.back.hide()
         self.title.set_text(NAME)
         self.sub.set_text("")
         self.offline.hide()
-        self.stack.set_visible_child_name("qr")
-        self.win.present()  # a login needs the person, background or not
+        self.stack.set_visible_child_name("login")
+
+    def signin(self, account, state):
+        """An account's sign-in as it is now: off, out, getting, waiting
+        (its QR code), in (with the name), locked (the keyring closed),
+        failed (with the pause): its cards drawn anew. With no list yet and
+        no messenger getting in, the login page asks for one."""
+        self.signins[account] = state
+        self.draw_accounts()
+        page = self.stack.get_visible_child_name()
+        if state["kind"] in ("out", "off", "locked") and not self.chatlist.chats and \
+                page == "wait" and not any(st["kind"] in ("getting", "in", "waiting")
+                                           for st in self.signins.values()):
+            self.show_login()
         return False
+
+    def draw_accounts(self):
+        for box in (self.login_cards, self.settings_cards):
+            for child in box.get_children():
+                child.destroy()
+            for name, title in MESSENGERS:
+                box.pack_start(self.account_card(name, title), False, False, 0)
+            box.show_all()
+
+    def account_card(self, name, title):
+        """One messenger's card: its switch, and the sign-in as it is."""
+        state = self.signins.get(name) or {"kind": "getting" if messenger_on(name) else "off"}
+        kind_ = state["kind"]
+        card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
+        card.get_style_context().add_class("settings")
+        card.account, card.state = name, kind_  # for the tests
+        row = Gtk.Box(spacing=24)
+        row.pack_start(label(title, "setting", wrap=True), True, True, 0)
+        switch = Gtk.Switch(active=messenger_on(name), valign=Gtk.Align.CENTER)
+        switch.connect("notify::active", lambda sw, _p: self.switch_account(name, sw.get_active()))
+        row.pack_end(switch, False, False, 0)
+        card.pack_start(row, False, False, 0)
+
+        def button(text, action, cls="act"):
+            b = Gtk.Button(label=text)
+            b.get_style_context().add_class(cls)
+            b.set_halign(Gtk.Align.START)
+            b.connect("clicked", lambda _b: action())
+            card.pack_start(b, False, False, 0)
+
+        def hint(text):
+            card.pack_start(label(text, "hint", wrap=True), False, False, 0)
+
+        if kind_ == "off":
+            hint("Выключен: сообщения из %s не приходят. Вход сохраняется." % title)
+        elif kind_ == "in":
+            hint("Вход выполнен: %s" % state.get("name", ""))
+            button("Выйти", lambda: self.logout(name, title), "danger")
+        elif kind_ == "waiting":
+            image = Gtk.Image.new_from_pixbuf(GdkPixbuf.Pixbuf.new_from_file(state["qr"]))
+            image.set_halign(Gtk.Align.CENTER)
+            card.pack_start(image, False, False, 0)
+            hint("Откройте %s на телефоне и отсканируйте этот код" % title)
+        elif kind_ == "out":
+            hint("Вход не выполнен.")
+            button("Войти по QR-коду", lambda: self.sign_in(name))
+        elif kind_ == "locked":
+            hint("Связка ключей закрыта: вход в %s хранится в ней." % title)
+            button("Открыть", lambda: self.backend.retry(name))
+        elif kind_ == "failed":
+            hint("Нет связи с %s. Повторю через %d с." % (title, state.get("pause", 0)))
+            button("Повторить", lambda: self.backend.retry(name))
+        else:
+            hint("Подключение…")
+        return card
+
+    def sign_in(self, name):
+        self.signin(name, {"kind": "getting"})
+        self.backend.run(self.backend.begin(name))
+
+    def switch_account(self, name, on):
+        """A messenger switched on (it signs in, if it has a login) or off
+        (disconnected, its chats off the list, the login kept)."""
+        if on == messenger_on(name):
+            return
+        SETTINGS.set("account_" + name, on)
+        if on:
+            self.signin(name, {"kind": "getting"})
+            self.backend.run(self.backend.begin(name, quiet=True))
+        else:
+            self.signin(name, {"kind": "off"})
+            self.down.discard(name)
+            self.connected(name, True)
+            self.backend.run(self.backend.stop(name))
+            self.chatlist.replace([], name)
+            self.fill_list()
+
+    def logout(self, name, title):
+        if not dialogs.ask(self.win, "Выйти из %s? Переписка в нём останется, но здесь "
+                           "её не будет, пока вы не войдёте снова." % title, "Выйти"):
+            return
+
+        def done(_res, err):
+            if err is not None:
+                log_line("logout %s: %r" % (name, err))
+            self.down.discard(name)
+            self.connected(name, True)
+            self.chatlist.replace([], name)
+            self.fill_list()
+        self.backend.run(self.backend.logout(name), done)
 
     def logged_in(self, account, user, session):
         agent = self.backend.accounts[account].agent
@@ -3949,6 +4163,8 @@ class Max(Gtk.Application):
         """A link gave up; Backend starts it again after pause s (the
         reason is in the log). With a list shown the person stays where
         they are, under the bar; else the wait page says it, with a button."""
+        self.signins[account] = {"kind": "failed", "pause": pause}
+        self.draw_accounts()
         self.connected(account, False)
         if self.chatlist.chats:
             return False
@@ -3967,7 +4183,7 @@ class Max(Gtk.Application):
         if self.down and len(self.backend.accounts) > 1 and len(self.down) == 1:
             text = "Нет связи с %s — переподключаюсь…" % self.backend.label(next(iter(self.down)))
         self.offline.get_children()[0].set_text(text)
-        self.offline.set_visible(bool(self.down) and self.stack.get_visible_child_name() != "qr")
+        self.offline.set_visible(bool(self.down) and self.stack.get_visible_child_name() != "login")
         if on:
             self.retryb.hide()
             self.wait_text.set_text(self.connecting())
@@ -3990,7 +4206,7 @@ class Max(Gtk.Application):
         changed = {i for i, s in self.chatlist.chats.items() if before.get(i) != s}
         changed |= set(before) - set(self.chatlist.chats)
         page = self.stack.get_visible_child_name()
-        if page in ("wait", "qr"):
+        if page in ("wait", "login"):
             self.stack.set_visible_child_name("chats")
         elif page == "settings":
             self.came_from = "chats"
@@ -4755,7 +4971,7 @@ class Max(Gtk.Application):
         page = self.stack.get_visible_child_name()
         # Settings from the list or before the login, so telemetry can be
         # switched off before anything is sent.
-        self.gear.set_visible(page in ("chats", "wait", "qr"))
+        self.gear.set_visible(page in ("chats", "wait", "login"))
         self.findb.set_visible(page == "chats")
         self.edit.set_visible(page == "chat" and self.chatlist.listed(self.open_chat))
         self.viewer_save.set_visible(page == "photo")

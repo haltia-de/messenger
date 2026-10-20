@@ -621,7 +621,7 @@ for b in (vsave, video_save, file_save):
     b.clicked()
     # busy till saved: not to be pressed again, a spinner in the icon's place
     assert not b.get_sensitive() and isinstance(b.get_image(), Gtk.Spinner)
-wait(lambda: len(os.listdir(folder)) == 3, what="three saved")
+wait(lambda: os.path.isdir(folder) and len(os.listdir(folder)) == 3, what="three saved")
 wait(lambda: all(b.get_sensitive() for b in (vsave, video_save, file_save)), what="buttons back")
 assert all(isinstance(b.get_image(), Gtk.Image) for b in (vsave, video_save, file_save))
 assert sorted(os.listdir(folder)) == sorted(["голосовое-%s.ogg" % m.id, "видео-%s.mp4" % m.id,
@@ -822,7 +822,9 @@ bm.qr_png("https://max.ru/:auth/x", qr)
 app.open(mama)
 spin(0.2)
 app.show_qr("max", qr)  # MAX ended the login: the code, from the chat
-assert app.stack.get_visible_child_name() == "qr" and not app.back.get_visible()
+assert app.stack.get_visible_child_name() == "login" and not app.back.get_visible()
+card = [c for c in app.login_cards.get_children() if c.account == "max"][0]
+assert card.state == "waiting" and any(isinstance(w, bm.Gtk.Image) for w in card.get_children())
 app.show_chats("max", list(listed.values()))
 assert app.stack.get_visible_child_name() == "chats"
 ok("no connection, and a login from anywhere")

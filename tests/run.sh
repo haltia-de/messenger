@@ -44,22 +44,27 @@ if [ -z "${HALTIA_PYTHON:-}" ] && ! "$venv/bin/python" -c "import haltia_kit.vau
 	fi
 fi
 
-# A display for GTK: the first free broadway one from :50.
-n=50
+# A display for GTK: the first free broadway one from :50, a new one for
+# each test (a broadwayd takes no second program after the first is gone).
 run=${XDG_RUNTIME_DIR:-/tmp}
-while [ -e "$run/broadway$((n + 1)).socket" ]; do n=$((n + 1)); done
-broadwayd ":$n" >/dev/null 2>&1 &
-bw=$!
-trap 'kill $bw 2>/dev/null' EXIT INT TERM
-i=0
-while [ ! -e "$run/broadway$((n + 1)).socket" ] && [ $i -lt 50 ]; do sleep 0.1; i=$((i + 1)); done
+bw=
+display() {
+	if [ -n "$bw" ]; then kill "$bw" 2>/dev/null || true; wait "$bw" 2>/dev/null || true; fi
+	n=50
+	while [ -e "$run/broadway$((n + 1)).socket" ]; do n=$((n + 1)); done
+	broadwayd ":$n" >/dev/null 2>&1 &
+	bw=$!
+	i=0
+	while [ ! -e "$run/broadway$((n + 1)).socket" ] && [ $i -lt 50 ]; do sleep 0.1; i=$((i + 1)); done
+}
 
-[ $# -gt 0 ] || set -- test_chatlist.py test_media.py test_backend.py test_window.py
+[ $# -gt 0 ] || set -- test_chatlist.py test_media.py test_backend.py test_window.py test_login.py
 cd "$here"
 log=$(mktemp)
 trap 'kill $bw 2>/dev/null; rm -f "$log"' EXIT INT TERM
 for t in "$@"; do
 	echo "== $t"
+	display
 	status=0
 	GDK_BACKEND=broadway BROADWAY_DISPLAY=":$n" "$python" "$t" >"$log" 2>&1 || status=$?
 	grep -v -e 'Gtk-WARNING' -e 'Gtk-CRITICAL' -e '^$' "$log" || true  # GTK's noise

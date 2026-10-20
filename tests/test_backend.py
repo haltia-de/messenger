@@ -503,6 +503,7 @@ SASHA = tg.person("tg:77", "Внук Саша", contact=True, phone="+7900555667
 sasha = tg.dialog(SASHA)
 tg.say(sasha, "Привет из Telegram", SASHA)
 tg.group("tg:-5", "Клуб", kind="CHANNEL", joined=False, link="https://t.me/club")
+bm.SETTINGS.set("account_telegram", True)  # switched on: the others start off
 ui = UI()
 B = bm.Backend(ui, [fake, tg])
 B.start()

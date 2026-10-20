@@ -160,13 +160,34 @@ class FakeLink:
         """The arguments of each call of one operation, in order."""
         return [a for n, a in self.calls if n == name]
 
+    def scan(self):
+        """The QR code scanned on the phone: the login goes on."""
+        self.loop.call_soon_threadsafe(self.scanned.set_result, True)
+
     async def run(self, events):
         self.loop, self.events = asyncio.get_running_loop(), events
         self.runs += 1
         self.ended = self.loop.create_future()  # give_up() ends this run
+        if self.refuse is not None:  # the keyring closed, say
+            raise self.refuse
+        if not self.kept:  # no login kept: a QR code, till scan()
+            self.scanned = self.loop.create_future()
+            await events.on_qr("https://max.ru/:login/fake")
+            await self.scanned
+            self.kept = True
         await events.on_login(self.me, list(self.rooms.values()),
                               [self.people[u] for u in self.contacts], self.agent, 7)
         await self.ended  # connected till then
+
+    kept = True  # a login is kept: the program starts it without a QR code
+    refuse = None  # an exception run() raises at once (Locked: the keyring closed)
+
+    async def signed_in(self):
+        return self.kept
+
+    async def logout(self):
+        self._call("logout")
+        self.kept = False
 
     async def chats_page(self, marker=None):
         self._call("chats_page", marker=marker)

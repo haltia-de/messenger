@@ -141,7 +141,17 @@ programs are found on `PATH` (`haltia-vplay`, `b8k-vplay` before 2.0: `shutil.wh
   600, only where no Secret Service answers — never as a fallback of a refused unlock, which
   raises `Locked`), reached by PyMax through `VaultStore` (its `ExtraConfig.store`; blocking
   calls in a thread). 2.4's `web.db` moves in once (`take_old`) and is removed. Tests put a
-  `FakeKeyring` in `KEYRING` (`common.load`).
+  `FakeKeyring` in `KEYRING` (`common.load`). The sign-in is drawn as one card per messenger
+  (`MESSENGERS`; `account_card`, the same in the settings' «Мессенджеры» and on the `login`
+  page, which the first start and a login ended show): a switch (`messenger_on`, setting
+  `account_<name>`: MAX on until switched off, others off until switched on; off disconnects,
+  keeps the login, takes its chats off the list) and the state Backend tells
+  (`ui.signin(account, state)`: `off`, `out` — «Войти по QR-коду» → `Backend.begin(name)` —,
+  `getting`, `waiting` with its QR code, `in` with the name — «Выйти», asked first:
+  `Backend.logout`, the link's `logout()` forgets the login, the account's cache goes —,
+  `locked` — «Открыть»: `retry(name)` asks the keyring again —, `failed` with the pause). At the
+  start (`_main`) a messenger switched on starts only if its link has a login kept
+  (`link.signed_in()`); `Account.stop()` cancels its task.
 - **Telemetry.** PyMax's own (a random simulation of browsing) stays off in `ExtraConfig`. The
   `Telemetry` class sends MAX-app-style events built from real UI actions instead: `NAV GO` on
   every screen change (`moved()`, driven by the stack page and window map/unmap), `PERF login`
@@ -349,11 +359,12 @@ programs are found on `PATH` (`haltia-vplay`, `b8k-vplay` before 2.0: `shutil.wh
 ## Tests
 
 `sh tests/run.sh` makes `.cache/venv` once (system PyGObject plus the PyMax wheel `install.sh`
-pins, and haltia-kit 2.1.0 from GitHub, or `HALTIA_KIT=path/to/checkout`), starts a `broadwayd` of its own and runs four plain scripts with `assert`s, each printing
+pins, and haltia-kit 2.2.0 from GitHub, or `HALTIA_KIT=path/to/checkout`), starts a `broadwayd` of its own for each script (one takes no second program) and runs five plain scripts with `assert`s, each printing
 «… ok» per part: `tests/test_chatlist.py` (the chat list's rules: no MAX, no window),
 `tests/test_media.py` (Media with fake hands: hosts, the header, redirects, cache, players),
-`tests/test_backend.py` (Backend on the fake link, no window) and `tests/test_window.py` (the real
-window and Backend on the fake link). Tests build MAX's state in `FakeLink` (people, dialogs,
+`tests/test_backend.py` (Backend on the fake link, no window), `tests/test_window.py` (the real
+window and Backend on the fake link) and `tests/test_login.py` (the sign-in: the first start,
+the cards, switching off, the logout, a closed keyring; the fake's `kept`, `scan()`, `refuse`). Tests build MAX's state in `FakeLink` (people, dialogs,
 groups, channels, messages with attachments and reactions), drive the window as a person would,
 and check what it shows (widget trees: rows, `ChatView.widget`) and what was asked of MAX
 (`fake.asked(...)`), not private attributes. `HALTIA_SHOTS=dir` saves screenshots. `tests/demo.py`
