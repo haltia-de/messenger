@@ -1475,14 +1475,23 @@ def load_json(path, default):
 
 def save_json(path, data):
     """Written whole and atomically, mode 600 (it names people)."""
-    try:
-        os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
-        fd = os.open(path + ".new", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, "w") as fh:
-            json.dump(data, fh, ensure_ascii=False)
-        os.replace(path + ".new", path)
-    except OSError:
-        pass
+    save_text(path, json.dumps(data, ensure_ascii=False))
+
+
+_save_lock = threading.Lock()
+
+
+def save_text(path, text):
+    """A file written whole and atomically, mode 600, from any thread."""
+    with _save_lock:
+        try:
+            os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
+            fd = os.open(path + ".new", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w") as fh:
+                fh.write(text)
+            os.replace(path + ".new", path)
+        except OSError:
+            pass
 
 
 def load_setting(key):
@@ -2113,6 +2122,8 @@ class ChatList:
         self.list_path, self.prefs_path = list_path, prefs_path
         self.contacts_only = contacts_only
         self.chats = {s["id"]: s for s in load_json(list_path, []) if isinstance(s, dict)}
+        self.saved_list = None  # the list's text as last written
+        self.saving = None  # the thread writing it
         self.pending = {}  # dialogs opened from the search, not written to yet
         prefs = load_json(prefs_path, {})
         self.pinned = [i for i in prefs.get("pinned", []) if isinstance(i, int)]
@@ -2217,14 +2228,26 @@ class ChatList:
     def entries(self, tab):
         """What a tab ("chats" or "channels") shows, top to bottom:
         (summary, pinned, quiet) each."""
-        shown = [s for s in self.chats.values() if not self.hidden(s["id"])
-                 and (s.get("type") == "CHANNEL") == (tab == "channels")]
+        shown = [i for i in self.chats if self.shown(i, tab)]
+        return [self.entry(i) for i in sorted(shown, key=self.order)]
 
-        def order(s):
-            if s["id"] in self.pinned:
-                return (0, self.pinned.index(s["id"]))
-            return (1, -(s["time"] or 0))
-        return [(s, s["id"] in self.pinned, self.quiet(s["id"])) for s in sorted(shown, key=order)]
+    def entry(self, chat_id):
+        """(summary, pinned, quiet) of a chat in the list; None if not in it."""
+        s = self.chats.get(chat_id)
+        return None if s is None else (s, chat_id in self.pinned, self.quiet(chat_id))
+
+    def shown(self, chat_id, tab):
+        """Whether a chat is in a tab ("chats" or "channels") now."""
+        s = self.chats.get(chat_id)
+        return s is not None and not self.hidden(chat_id) and \
+            (s.get("type") == "CHANNEL") == (tab == "channels")
+
+    def order(self, chat_id):
+        """The chat's place in its tab as a key: pinned first, in the order
+        pinned, then the newest."""
+        if chat_id in self.pinned:
+            return (0, self.pinned.index(chat_id))
+        return (1, -((self.chats.get(chat_id) or {}).get("time") or 0))
 
     def counts(self):
         """Unread messages: per tab, and in loud chats (the subtitle and the
@@ -2243,7 +2266,12 @@ class ChatList:
 
     # --- on disk ----------------------------------------------------------------------
     def _save_list(self):
-        save_json(self.list_path, list(self.chats.values()))
+        """Written only when it changed, by a thread (the text made here)."""
+        text = json.dumps(list(self.chats.values()), ensure_ascii=False)
+        if text != self.saved_list:
+            self.saved_list = text
+            self.saving = threading.Thread(target=save_text, args=(self.list_path, text), daemon=True)
+            self.saving.start()
 
     def _save_prefs(self):
         save_json(self.prefs_path, {"pinned": self.pinned, "muted": sorted(self.muted),
@@ -3031,7 +3059,7 @@ class Max(Gtk.Application):
         # The list's rules and state; pins and notifications are kept here
         # only: MAX's own pinning and muting are not in PyMax.
         self.chatlist = ChatList(LIST, PREFS, contacts_only=load_setting("contacts_only"))
-        self.positions = {}  # chat id -> place in the tab shown (the ListBox's order)
+        self.counted = None  # (tab labels, subtitle, badge) as last shown
         self.tab = "chats"  # or "channels"
         self.media = media or Media()  # photos, voice, video, files: how MAX's CDNs are reached
         self.playing = None  # (progress bar, button, duration) of what plays
@@ -3189,9 +3217,8 @@ class Max(Gtk.Application):
         # Newest first. GTK wants a 32-bit answer: the difference of two
         # times in ms overflows past 24 days, so only the sign is given.
         # The order and the tab are ChatList's (entries); GTK only shows them.
-        self.list.set_sort_func(lambda a, b: self.positions.get(a.chat_id, 0)
-                                - self.positions.get(b.chat_id, 0))
-        self.list.set_filter_func(lambda row: row.chat_id in self.positions)
+        self.list.set_sort_func(lambda a, b: self.placed(a.chat_id, b.chat_id))
+        self.list.set_filter_func(lambda row: self.chatlist.shown(row.chat_id, self.tab))
         self.rows = {}  # chat id -> its row, kept between updates
         # A long press on a chat: pin it, switch its notifications.
         self.list_press = Gtk.GestureLongPress.new(self.list)
@@ -3446,11 +3473,22 @@ class Max(Gtk.Application):
             self.mpris = Mpris(self)
         except GLib.Error as exc:  # another MAX owns it, or no bus: no MPRIS
             log_line("mpris: %r" % exc)
-        threading.Thread(target=self.media.prune, daemon=True).start()
         # The program lives for weeks in the background: prune daily too.
         GLib.timeout_add_seconds(86400, lambda: threading.Thread(
             target=self.media.prune, daemon=True).start() or True)
-        self.backend.start()
+        if self.win.get_visible():
+            # MAX (PyMax's import, the login) after the first frame: the
+            # window and the last list are drawn without sharing the GIL.
+            drawn = self.win.connect("draw", lambda *_a: self.after_first_frame(drawn) and False)
+        else:
+            self.after_first_frame()
+
+    def after_first_frame(self, handler=None):
+        if handler is not None:
+            self.win.disconnect(handler)
+        GLib.idle_add(lambda: (self.backend.start(), threading.Thread(
+            target=self.media.prune, daemon=True).start()) and False,
+            priority=GLib.PRIORITY_LOW)
 
     # called from the MAX thread through idle_add
     def show_qr(self, path):
@@ -3499,13 +3537,18 @@ class Max(Gtk.Application):
         self.backend.retry()
 
     def show_chats(self, summaries):
+        """The whole list after a login: only the chats that differ from the
+        list shown are redrawn (a reconnect changes few)."""
+        before = dict(self.chatlist.chats)
         self.chatlist.replace(summaries)
+        changed = {i for i, s in self.chatlist.chats.items() if before.get(i) != s}
+        changed |= set(before) - set(self.chatlist.chats)
         page = self.stack.get_visible_child_name()
         if page in ("wait", "qr"):
             self.stack.set_visible_child_name("chats")
         elif page == "settings":
             self.came_from = "chats"
-        self.fill_list()
+        self.fill_list(only=changed if self.rows else None)
         return False
 
     def incoming(self, msg, summary):
@@ -3515,7 +3558,7 @@ class Max(Gtk.Application):
             if was_pending and self.open_chat == summary["id"]:
                 self.edit.set_visible(self.stack.get_visible_child_name() == "chat")
         if self.chatlist.hidden(msg["chat"]) and self.open_chat != msg["chat"]:
-            self.fill_list()
+            self.fill_list(only={msg["chat"]})
             return False  # from a stranger: no bubble, no buzz, left unread
         here = self.open_chat == msg["chat"] and self.win.is_visible()
         view = self.views.get(msg["chat"])
@@ -3527,7 +3570,7 @@ class Max(Gtk.Application):
         if not msg["mine"] and self.buzz_new and self.chatlist.loud(msg["chat"]) and not (
                 here and self.win.is_active()):
             self.notify(msg)
-        self.fill_list()
+        self.fill_list(only={msg["chat"]})
         return False
 
     # what the desktop is told: the count on the program's button, new messages
@@ -3557,35 +3600,65 @@ class Max(Gtk.Application):
         self.send_notification("chat-%d" % msg["chat"], note)
 
     # the list
-    def fill_list(self):
+    def fill_list(self, only=None):
         """Bring the list in line with the summaries. Rows are kept and only
         a chat that changed is redrawn: a new message used to rebuild every
-        row, slow on the tablet with a hundred chats."""
-        entries = {tab: self.chatlist.entries(tab) for tab in ("chats", "channels")}
-        wanted = {e[0]["id"]: e for tab in entries.values() for e in tab}
-        for chat_id in [i for i in self.rows if i not in wanted]:
-            self.rows.pop(chat_id).destroy()
-        for chat_id, entry in wanted.items():
+        row, slow on the tablet with a hundred chats. With only (chat ids: a
+        message, a read) just those rows are looked at and put in their place
+        (row.changed()); else all, sorted and filtered anew (a tab, a pin,
+        the login)."""
+        ids = set(self.chatlist.chats) | set(self.rows) if only is None else set(only)
+        for chat_id in ids:
+            entry = self.chatlist.entry(chat_id)
             row = self.rows.get(chat_id)
+            if entry is None:
+                if row is not None:
+                    self.rows.pop(chat_id).destroy()
+                continue
+            look = self.look(entry)
             if row is None:
                 row = self.rows[chat_id] = self.chat_row(entry)
-                self.list.add(row)
+                self.list.add(row)  # sorted and filtered as it goes in
                 row.show_all()
-            elif row.look != self.look(entry):
+            elif row.look != look:
                 row.remove(row.get_child())
                 row.add(self.chat_row(entry).steal())
                 row.show_all()
-            row.summary, row.look = entry[0], self.look(entry)
-        self.positions = {e[0]["id"]: i for i, e in enumerate(entries[self.tab])}
-        self.list.invalidate_sort()
-        self.list.invalidate_filter()
+                row.summary, row.look = entry[0], look
+                if only is not None:
+                    row.changed()  # its place and tab anew, the others stay
+            elif only is not None:
+                row.changed()  # pinned or hidden since: placed anew all the same
+        if only is None:
+            self.list.invalidate_sort()
+            self.list.invalidate_filter()
+        self.show_counts()
+
+    def show_counts(self):
+        """The tabs' counts, the subtitle and the panel's button, each only
+        when it changed."""
         counts = self.chatlist.counts()
-        for b, name, tab in ((self.tab_chats, "Чаты", "chats"), (self.tab_channels, "Каналы", "channels")):
-            b.set_label("%s · %d" % (name, counts[tab]) if counts[tab] else name)
+        sub = None
         if self.open_chat is None and self.stack.get_visible_child_name() == "chats":
-            self.sub.set_text("непрочитанных: %d" % counts["loud"] if counts["loud"] else "")
-        # The button counts what may buzz: quiet chats (channels by default) are left out.
-        self.badge(counts["loud"])
+            sub = "непрочитанных: %d" % counts["loud"] if counts["loud"] else ""
+        now = (counts["chats"], counts["channels"], sub, counts["loud"])
+        was = self.counted or (None, None, None, None)
+        if now[:2] != was[:2]:
+            for b, name, tab in ((self.tab_chats, "Чаты", "chats"),
+                                 (self.tab_channels, "Каналы", "channels")):
+                # the label's own text: the button's set_label builds a new child (ms on the tablet)
+                b.get_child().set_text("%s · %d" % (name, counts[tab]) if counts[tab] else name)
+        if sub is not None and sub != self.sub.get_text():
+            self.sub.set_text(sub)
+        if now[3] != was[3]:
+            # The button counts what may buzz: quiet chats (channels by default) are left out.
+            self.badge(counts["loud"])
+        self.counted = now
+
+    def placed(self, a, b):
+        """The ListBox's order of two chats: ChatList's (-1, 0, 1)."""
+        ka, kb = self.chatlist.order(a), self.chatlist.order(b)
+        return (ka > kb) - (ka < kb)
 
     def chat_row(self, entry):
         """One chat of a list (an entry of ChatList's): initials, name, last
@@ -3907,7 +3980,7 @@ class Max(Gtk.Application):
             out, summary = res
             if summary:
                 self.chatlist.update(summary)
-                self.fill_list()
+                self.fill_list(only={summary["id"]})
             view = self.views.get(target)
             if view:
                 view.add(out)
@@ -4340,7 +4413,7 @@ class Max(Gtk.Application):
                 self.sub.set_text("")
             if self.chatlist.listed(chat_id):
                 self.chatlist.read(chat_id)
-                self.fill_list()
+                self.fill_list(only={chat_id})
 
         self.backend.run(self.backend.history(chat_id), done, owner=view)
 
@@ -4542,7 +4615,7 @@ class Max(Gtk.Application):
             view.remove(msg_ids)
         if summary and self.chatlist.listed(chat_id):
             self.chatlist.update(summary)
-            self.fill_list()
+            self.fill_list(only={chat_id})
         return False
 
     def reacted(self, chat_id, msg_id, reactions, yours):

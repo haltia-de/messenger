@@ -158,7 +158,7 @@ spin(0.3)
 
 # --- the list: tabs, strangers hidden, channels quiet --------------------------------------
 assert rows() == [dacha, mama], rows()  # the stranger's dialog is hidden, channels elsewhere
-assert app.tab_channels.get_label() == "Каналы · 4"
+assert app.tab_channels.get_child().get_text() == "Каналы · 4"
 app.tab_channels.set_active(True)
 spin(0.1)
 assert rows() == [news]
@@ -813,3 +813,18 @@ assert app.stack.get_visible_child_name() == "qr" and not app.back.get_visible()
 app.show_chats(list(listed.values()))
 assert app.stack.get_visible_child_name() == "chats"
 ok("no connection, and a login from anywhere")
+
+# --- a message redraws its own row only; the panel's button told only of a new count --------------
+app.show_list()
+spin(0.2)
+kept = {i: r.get_child() for i, r in app.rows.items()}
+told = len(badges)
+fake.incoming(news, "Тихая новость", 99)  # a quiet channel: the loud count stays
+wait(lambda: app.chatlist.get(news)["last"] == "Тихая новость", what="the channel's message")
+spin(0.1)
+assert len(badges) == told  # nothing new to tell
+assert [i for i, r in app.rows.items() if r.get_child() is not kept.get(i)] == [news]
+fake.incoming(dacha, "Огурцы взошли", PETYA)
+wait(lambda: rows()[0] == dacha, what="dacha on top")
+assert len(badges) == told + 1 and badges[-1] == app.chatlist.counts()["loud"]
+ok("only the row that changed")

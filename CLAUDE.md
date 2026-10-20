@@ -160,9 +160,17 @@ programs are found on `PATH` (`haltia-vplay`, `b8k-vplay` before 2.0: `shutil.wh
   `last_message` is already cached and has no unread opens with no history request at all; else
   the last `PAGE` are fetched (see Paging). The last `VIEWS` chat views stay built in memory. The chat list
   keeps one row per chat (`Max.rows`, sorted and filtered by GTK) and `fill_list` redraws only rows
-  whose look changed — don't go back to rebuilding it (≈30× slower per message). Photos are cached
+  whose look changed — don't go back to rebuilding it (≈30× slower per message). A message, a read
+  or a delete calls `fill_list(only={chat})`: that row alone is redrawn and re-placed
+  (`row.changed()`); `invalidate_sort`/`invalidate_filter` only for a full refresh (a tab, a pin,
+  `contacts_only`), and the login's list redraws only the chats that differ (`show_chats`).
+  `show_counts` touches the tabs, the subtitle and the badge only when a count changed (a tab's
+  text through its label child: `set_label` builds a new one, ms on the tablet). The tablet's
+  numbers come from `tests/bench.py`. Photos are cached
   in `~/.cache/haltia-messenger/` by URL hash, touched when shown, pruned after `PHOTO_DAYS` unshown (at
-  start and daily). Small state files in `DATA` go through `load_json`/`save_json` (600, atomic).
+  start and daily). Small state files in `DATA` go through `load_json`/`save_json`/`save_text` (600,
+  atomic, from any thread). The MAX thread starts after the window's first frame (`after_first_frame`;
+  at once with `--background`), so PyMax's import does not share the GIL with the first drawing.
 - **Chat list** (`ChatList`, CONTEXT.md «Список чатов»; no GTK). Owns the summaries, dialogs from
   the search not written to yet (`start_dialog`/`wrote`), pins and per-chat notifications (`PREFS`,
   `chats.json`; local — PyMax has no pin/mute request, `CHAT_PERSONAL_CONFIG` is bare), the
@@ -171,8 +179,9 @@ programs are found on `PATH` (`haltia-vplay`, `b8k-vplay` before 2.0: `shutil.wh
   newest; strangers hidden), `counts()` (per tab, and `loud` for the subtitle and the panel's
   button), `loud(chat)` (buzz?), `hidden`, `find`, `get`, `listed`. Channels are quiet unless
   switched on, others loud unless switched off. Keep these rules there; `Max` only draws them: one
-  kept row per chat, redrawn when its `look(entry)` changes, ordered and filtered by `positions` from
-  `entries(Max.tab)`. A long press on the list (`row_menu`, one gesture on the ListBox,
+  kept row per chat, redrawn when its `look(entry)` changes, ordered by `order(chat)` and filtered
+  by `shown(chat, Max.tab)` (`entry(chat)` per row; `entries(tab)` is the same answer for a whole
+  tab). `list.json` is written only when it changed, by a thread (`saving`). A long press on the list (`row_menu`, one gesture on the ListBox,
   `get_row_at_y`) opens the pin/notification menu; `held` stops the release from opening the chat.
 - **Chat view** (`ChatView`, see `CONTEXT.md`). One chat on screen is one deep module: its own
   scroll area (`.widget`, an Overlay over the ScrolledWindow with the round «↓» button that shows

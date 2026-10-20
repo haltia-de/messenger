@@ -65,8 +65,14 @@ assert ids(L.entries("channels")) == [-32, -31] and L.get(-32)["last"] == "До�
 L.read(-32)
 assert L.get(-32)["unread"] == 0
 L.update(chat(14, "Новый", t=300, peer=40))
+L.saving.join()  # written by a thread
 assert 14 in [s["id"] for s in bm.load_json(LIST, [])]  # a new chat is kept at once
+saved = L.saving
+L.read(14)
+L.update(dict(L.get(14)))  # nothing new: not written again
+assert L.saving is saved
 L.remove(14)
+L.saving.join()
 assert not L.listed(14) and 14 not in [s["id"] for s in bm.load_json(LIST, [])]
 L.retitle(11, "Мамочка")
 assert L.get(11)["title"] == "Мамочка" and L.find("мамоч")[0]["id"] == 11
@@ -84,7 +90,15 @@ assert L.get(11)["title"] == "Мамочка"
 ok("dialogs from the search")
 
 # --- the list is there at once on the next start ----------------------------------------
+L.saving.join()
 L3 = bm.ChatList(LIST, PREFS)
 assert {s["id"] for s in L3.chats.values()} == {11, 12, 13, -31, -32, 41}
 assert oct(os.stat(LIST).st_mode & 0o777) == "0o600"
 ok("kept list")
+
+# --- one chat at a time, as the window asks: the same answers as entries() -----------------
+for tab in ("chats", "channels"):
+    want = ids(L.entries(tab))
+    assert sorted((i for i in L.chats if L.shown(i, tab)), key=L.order) == want, tab
+assert L.entry(12) == (L.get(12), L.is_pinned(12), L.quiet(12)) and L.entry(999) is None
+ok("one chat's place")
