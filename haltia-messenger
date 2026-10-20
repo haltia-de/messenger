@@ -2143,11 +2143,15 @@ class Libmpv:
 
         self.awake = Awake(NAME, "plays a voice message")
 
-        self.mpv = mpv.MPV(video=False, ytdl=False, load_unsafe_playlists=False,
-                           input_default_bindings=False, input_vo_keyboard=False,
-                           log_handler=lambda level, prefix, text: log_line(
-                               "voice %s %s: %s" % (level, prefix, text.strip())),
-                           loglevel="warn")
+        opts = dict(video=False, load_unsafe_playlists=False, input_default_bindings=False,
+                    input_vo_keyboard=False, loglevel="warn",
+                    log_handler=lambda level, prefix, text: log_line(
+                        "voice %s %s: %s" % (level, prefix, text.strip())))
+        try:
+            self.mpv = mpv.MPV(ytdl=False, **opts)
+        except Exception as exc:  # a libmpv without Lua (the Flatpak's) has no ytdl at all
+            log_line("voice: libmpv without ytdl (%r)" % exc)
+            self.mpv = mpv.MPV(**opts)
         self.duration = None  # of what plays, once libmpv knows it (files carry none)
         self.mpv.observe_property("duration", lambda _n, v: setattr(self, "duration", v))
         self.told = None  # the half second last told: the bar needs no more
@@ -2691,6 +2695,8 @@ class Media:
         """The command line that plays url full screen."""
         # No youtube-dl and no playlists: the link is played as it is.
         opts = {"ytdl": "no", "load-unsafe-playlists": "no", "user-agent": self.agent}
+        if FLATPAK:
+            del opts["ytdl"]  # its mpv is built without Lua: no ytdl, which it refuses to be told
         player = next(filter(None, map(shutil.which, PLAYERS)), None)  # /usr/bin (ADR 0002)
         if player:
             opts.update({"terminal": "yes", "msg-level": "all=warn"})  # libmpv: to the log

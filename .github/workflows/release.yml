@@ -12,12 +12,14 @@ jobs:
     with:
       arch: noarch
     secrets: inherit
-  # Debian 13 and Ubuntu 24.04, and Flatpak: for Haltia's own repositories.
+  # Debian 13, Ubuntu 24.04 and 26.04, and Flatpak: for Haltia's own repositories.
   deb:
     needs: apk
     uses: haltia-de/ci/.github/workflows/deb.yml@v1
+    secrets: inherit
   flatpak:
     needs: apk
     uses: haltia-de/ci/.github/workflows/flatpak.yml@v1
+    secrets: inherit
     with:
       manifest: packaging/flatpak/io.github.haltia_de.Messenger.yml
