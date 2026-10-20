@@ -136,7 +136,12 @@ programs are found on `PATH` (`haltia-vplay`, `b8k-vplay` before 2.0: `shutil.wh
   in memory, on the same entities: `common.load()` registers the script as `haltia_messenger`); `Max(link=...)`/`Backend(ui, link)` take one. A PyMax upgrade is checked in
   `PyMaxLink` only. Don't name a fake's attributes after link operations (`chats`, `users`).
 - **Login.** `PyMaxLink` is PyMax's QR provider; `Backend.on_qr` renders the QR code to scan with
-  MAX on a phone. The session lives in `~/.local/share/haltia-messenger/web.db` (chmod 600).
+  MAX on a phone. The session lives in the keyring: `secrets()` is haltia-kit's `Vault`
+  (`app=APP_ID`, `account=max`; libsecret, the Secret portal in Flatpak; `DATA/max-session.json`,
+  600, only where no Secret Service answers — never as a fallback of a refused unlock, which
+  raises `Locked`), reached by PyMax through `VaultStore` (its `ExtraConfig.store`; blocking
+  calls in a thread). 2.4's `web.db` moves in once (`take_old`) and is removed. Tests put a
+  `FakeKeyring` in `KEYRING` (`common.load`).
 - **Telemetry.** PyMax's own (a random simulation of browsing) stays off in `ExtraConfig`. The
   `Telemetry` class sends MAX-app-style events built from real UI actions instead: `NAV GO` on
   every screen change (`moved()`, driven by the stack page and window map/unmap), `PERF login`

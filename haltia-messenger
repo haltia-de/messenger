@@ -14,8 +14,9 @@ over at the first start (move_old_home).
 PyMax (MIT, unpacked in PREFIX/lib/haltia-messenger) speaks MAX's web
 protocol over a WebSocket, as web.max.ru does, so no web engine is loaded:
 about 55 MB in all instead of a second browser. The first start shows a QR
-code to scan in MAX on a phone; the session is then kept in
-~/.local/share/haltia-messenger/web.db (mode 600). PyMax's simulated telemetry is
+code to scan in MAX on a phone; the session is then kept in the keyring
+(the Secret Service; where there is none, ~/.local/share/haltia-messenger/
+max-session.json, mode 600). PyMax's simulated telemetry is
 off: a person is typing here.
 
 Telemetry of our own instead, as MAX's app reports it, so that the server
@@ -137,6 +138,7 @@ from gi.repository import Gdk, GdkPixbuf, Gio, Gtk, Pango  # noqa: E402
 from haltia_kit import dialogs, paths, photos  # noqa: E402
 from haltia_kit.awake import Awake  # noqa: E402
 from haltia_kit.settings import Settings  # noqa: E402
+from haltia_kit.vault import AUTO, Locked, Vault  # noqa: E402
 
 
 # The XDG folders by GLib, not by ~: inside Flatpak they are the sandbox's
@@ -200,6 +202,17 @@ def move_old_home():
 
 move_old_home()
 SETTINGS = Settings("messenger", CONFIG)  # ~/.config/haltia/messenger.conf, [messenger]
+KEYRING = AUTO  # the Secret Service if one answers; tests put a fake here
+_vault = []
+
+
+def secrets():
+    """The logins (each account's session) in the keyring, else in DATA as
+    <account>-session.json, 600 (haltia-kit's Vault; made at the first use)."""
+    if not _vault:
+        _vault.append(Vault(APP_ID, DATA, key="account", file="%s-session.json", label=NAME,
+                            keyring=KEYRING))
+    return _vault[0]
 KNOWN = os.path.join(DATA, "known.json")  # people whose messages are shown (contacts_only)
 ALIASES = os.path.join(DATA, "names.json")  # user id -> the name given here
 PREFS = os.path.join(DATA, "chats.json")  # pinned chats, notifications switched per chat
@@ -728,6 +741,70 @@ def forward_payload(chat_id, msg_id, from_chat_id, cid):
                                  "chatId": from_chat_id}}}
 
 
+class VaultStore:
+    """PyMax's session store (its StoreProtocol) in the Vault: the session,
+    as JSON, under the account's name. Vault's calls are blocking (a locked
+    keyring asks the desktop to unlock it): they go to a thread."""
+
+    def __init__(self, vault, name):
+        self.vault, self.name = vault, name
+
+    async def load_session(self):
+        from pymax.session.models import SessionInfo
+
+        text = await asyncio.to_thread(self.vault.get, self.name)
+        return SessionInfo.model_validate_json(text) if text else None
+
+    async def save_session(self, info):
+        await asyncio.to_thread(self.vault.put, self.name, info.model_dump_json())
+
+    async def update_token(self, old_token, new_token, /):
+        info = await self.load_session()
+        if info is not None and info.token == old_token:
+            await self.save_session(info.model_copy(update={"token": new_token}))
+
+    async def load_session_by_device_id(self, device_id):
+        info = await self.load_session()
+        return info if info is not None and info.device_id == device_id else None
+
+    async def load_session_by_phone(self, phone):
+        info = await self.load_session()
+        return info if info is not None and info.phone == phone else None
+
+    async def delete_session(self, token, /):
+        info = await self.load_session()
+        if info is not None and info.token == token:
+            await asyncio.to_thread(self.vault.drop, self.name)
+
+    async def close(self):
+        pass
+
+    async def take_old(self, work_dir, db="web.db"):
+        """The session PyMax kept in its SQLite file before 2.5 moves in once;
+        the file goes only when it is in."""
+        old = os.path.join(work_dir, db)
+        if not os.path.exists(old):
+            return
+        if await self.load_session() is None:
+            from pymax.session.store import SessionStore
+
+            store = SessionStore(work_dir, db)
+            try:
+                info = await store.load_session()
+            except Exception as exc:  # not PyMax's file after all: left, a new login comes
+                log_line("old session %s: %r" % (db, exc))
+                return
+            finally:
+                await store.close()
+            if info is not None:
+                await self.save_session(info)
+        for junk in (old, old + "-journal", old + "-wal", old + "-shm"):
+            try:
+                os.remove(junk)
+            except OSError:
+                pass
+
+
 class PyMaxLink:
     """The link to MAX (CONTEXT.md: Связь с MAX) through PyMax's web client:
     every request this program makes, and the events it gets, in one place.
@@ -758,8 +835,9 @@ class PyMaxLink:
         theirs (so the other one is found the same way)."""
         return me ^ user
 
-    def __init__(self, work_dir):
+    def __init__(self, work_dir, vault=None):
         self.work_dir = work_dir
+        self.vault = vault  # secrets() unless given
         self.client = None
         self.events = None
         self.settings = {}  # the account's own settings, from the last login
@@ -770,11 +848,13 @@ class PyMaxLink:
         from pymax.config import ExtraConfig
 
         self.events = events
+        store = VaultStore(self.vault or secrets(), self.account)  # the login in the keyring
+        await store.take_old(self.work_dir)
         # PyMax's own telemetry (a random simulation) stays off: Telemetry
         # sends what really happens instead.
         self.client = WebClient(session_name="web.db", work_dir=self.work_dir,
                                 extra_config=ExtraConfig(telemetry=False, log_level="WARNING",
-                                                         reconnect_delay=3.0),
+                                                         reconnect_delay=3.0, store=store),
                                 qr_provider=self)
         self._watch_login()
         self.client.on_start()(self._started)
@@ -853,10 +933,6 @@ class PyMaxLink:
         await self.events.on_qr(qr_url)
 
     async def _started(self, client):
-        try:
-            os.chmod(os.path.join(self.work_dir, "web.db"), 0o600)
-        except OSError:
-            pass
         self._watch_deletions(client)
         device = client._app.config.device
         try:  # the browser PyMax presents itself as; media links want the same

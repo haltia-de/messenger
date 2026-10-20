@@ -10,7 +10,7 @@ Rules-Requires-Root: no
 Package: haltia-messenger
 Architecture: any
 Depends: ${misc:Depends}, ${shlibs:Depends}, ${haltia:Depends}, python3, python3-gi, gir1.2-gtk-3.0,
- python3-haltia-kit (>= 2), python3-mpv, libmpv2, python3-aiohttp, python3-aiofiles,
+ python3-haltia-kit (>= 2.2.0), gir1.2-secret-1, python3-mpv, libmpv2, python3-aiohttp, python3-aiofiles,
  python3-aiosqlite, python3-msgpack, python3-zstandard, python3-qrcode,
  python3-python-socks
 Recommends: mpv, fonts-noto-color-emoji

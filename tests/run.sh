@@ -3,7 +3,7 @@
 # Copyright (C) 2026 Mikhail Nevskiy
 # Run the tests: sh tests/run.sh [test_backend.py test_window.py ...]
 # The first run makes .cache/venv (the system's PyGObject, plus the PyMax
-# wheel install.sh pins, by the same name and sha256, and haltia-kit 2.1.0,
+# wheel install.sh pins, by the same name and sha256, and haltia-kit 2.2.0,
 # or HALTIA_KIT=path/to/a/checkout); the window tests get
 # a display of their own from broadwayd, stopped again at the end.
 # HALTIA_SHOTS=dir keeps screenshots of the window there. HALTIA_PYTHON=python3
@@ -35,8 +35,8 @@ elif [ ! -x "$venv/bin/python" ]; then
 fi
 
 # The kit, Haltia's shared library (a dependency of this one).
-if [ -z "${HALTIA_PYTHON:-}" ] && ! "$venv/bin/python" -c "import haltia_kit.paths" 2>/dev/null; then
-	compat=${HALTIA_KIT:-git+https://github.com/haltia-de/kit@v2.1.0}
+if [ -z "${HALTIA_PYTHON:-}" ] && ! "$venv/bin/python" -c "import haltia_kit.vault" 2>/dev/null; then
+	compat=${HALTIA_KIT:-git+https://github.com/haltia-de/kit@v2.2.0}
 	if command -v uv >/dev/null; then
 		VIRTUAL_ENV=$venv uv pip install -q "$compat"
 	else

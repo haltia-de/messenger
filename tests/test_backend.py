@@ -385,6 +385,49 @@ link._watch_login()  # a second run does not wrap twice
 assert auth.require_payload_model.haltia_real.__module__ == "pymax.api.response"
 ok("the link's start and login settings")
 
+# --- the login in the keyring: PyMax's session through the Vault, web.db moved in once -----------
+from haltia_kit.testing import FakeKeyring  # noqa: E402
+from pymax.session.models import SessionInfo  # noqa: E402
+from pymax.session.store import SessionStore  # noqa: E402
+
+ring = FakeKeyring()
+vault = bm.Vault(bm.APP_ID, bm.DATA, key="account", file="%s-session.json", keyring=ring)
+store = bm.VaultStore(vault, "max")
+old_dir = os.path.join(bm.PHOTOS, "old-session")
+
+
+async def keyring_story():
+    old = SessionStore(old_dir, "web.db")
+    await old.save_session(SessionInfo(token="T1", device_id="D1", phone=""))
+    await old.close()
+    await store.take_old(old_dir)
+    assert not os.path.exists(os.path.join(old_dir, "web.db"))  # moved in: gone
+    info = await store.load_session()
+    assert info.token == "T1" and info.device_id == "D1" and "T1" in ring.kept["max"]
+    await store.update_token("T1", "T2")
+    assert (await store.load_session()).token == "T2"
+    assert (await store.load_session_by_device_id("D1")).token == "T2"
+    assert await store.load_session_by_phone("+7") is None
+    await store.delete_session("T2")
+    assert await store.load_session() is None and "max" not in ring.kept
+    ring.locked = True  # the person refused to unlock it: said, never a file instead
+    try:
+        await store.save_session(SessionInfo(token="T3", device_id="D1", phone=""))
+        raise AssertionError("not refused")
+    except bm.Locked:
+        pass
+    assert vault.state == "locked" and not os.path.exists(os.path.join(bm.DATA, "max-session.json"))
+    ring.locked = False
+    await store.save_session(SessionInfo(token="T3", device_id="D1", phone=""))
+    assert vault.state == "keyring"
+    files = bm.Vault(bm.APP_ID, bm.DATA, key="account", file="%s-session.json", keyring=None)
+    await bm.VaultStore(files, "max").save_session(SessionInfo(token="T4", device_id="D", phone=""))
+    path = os.path.join(bm.DATA, "max-session.json")  # no Secret Service at all (the tablet): a file
+    assert oct(os.stat(path).st_mode & 0o777) == "0o600" and "T4" in open(path).read()
+    os.remove(path)
+asyncio.run(keyring_story())
+ok("the login in the keyring")
+
 # --- the connection: lost, given up, started again; every request answered ------------------
 import time  # noqa: E402
 

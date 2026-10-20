@@ -24,6 +24,8 @@ def load():
     module = importlib.util.module_from_spec(spec)
     sys.modules["haltia_messenger"] = module  # tests/fake_link.py takes the link's entities from it
     loader.exec_module(module)
+    from haltia_kit.testing import FakeKeyring
+    module.KEYRING = FakeKeyring()  # never the real keyring
     return module
 
 
