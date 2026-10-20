@@ -190,7 +190,11 @@ programs are found on `PATH` (`haltia-vplay`, `b8k-vplay` before 2.0: `shutil.wh
   `SETTLE`), older pages (`fetch_older` as the reader nears the top, `PREFETCH` in the background,
   a spinner while one comes), the place (`anchor`; the first `enter()` goes to the bottom, later
   ones stay; the own message scrolls down, another's only if already there), photos loaded only
-  near the screen, and `leave()` cutting it to `BUBBLES`. Its interface is `newest(msgs, gap,
+  near the screen, and `leave()` cutting it to `BUBBLES` (also when the reader comes back down to
+  the newest from far above). Every reason to look at the place (a scroll, a size change, bubbles
+  built) goes through `_soon()`: one idle `_pass` decides the down button, the spinner, an older
+  page (on a scroll only, and only after `newest()` came: `fresh`), the photos and the cut; one
+  `anchor_timer` drops the anchor 400 ms after the last chunk above. Its interface is `newest(msgs, gap,
   done)`, `add`, `reacted`, `message`, `enter`/`leave`/`destroy`, `empty`; what it needs comes in at
   creation (cached messages and `fetch_older`/`on_hold`/`on_media`/`on_react`). `Max` only keeps
   up to `VIEWS` of them, puts the open one's widget on the chat page and answers the callbacks.

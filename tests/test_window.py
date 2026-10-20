@@ -416,15 +416,28 @@ for _ in range(15):
         spin(0.1)
         spinner_seen = spinner_seen or any(isinstance(w, Gtk.Spinner) and w.get_mapped()
                                            and w.props.active for w in walk(v.widget))
-    if len(holds_of(v)) >= 180:
+    if len(holds_of(v)) > bm.BUBBLES + bm.PAGE:
         break
-assert len(holds_of(v)) >= 180, len(holds_of(v))
+assert len(holds_of(v)) > bm.BUBBLES + bm.PAGE, len(holds_of(v))
 assert spinner_seen
 ids = [w.msg_id for w in holds_of(v)]
 assert ids == sorted(ids, key=lambda i: [m.id for m in fake.msgs[big]].index(i))
 col = column(v)
 assert col[0] == "day" and all(not (a == b == "day") for a, b in zip(col, col[1:]))
 shot("older.png")
+passes = []
+real_pass = v._pass
+v._pass = lambda: passes.append(1) or real_pass()
+for _ in range(20):  # many reasons at once (sizes changing, a scroll): one pass
+    adj_of(v).emit("changed")
+spin(0.1)
+assert len(passes) == 1, passes
+del v._pass
+down_of(v).clicked()  # back down from far above, still in the chat: the top goes
+wait(lambda: len(holds_of(v)) == bm.BUBBLES, what="cut at the bottom")
+assert at_bottom(v) and app.stack.get_visible_child_name() == "chat" and column(v)[0] == "day"
+adj_of(v).set_value(adj_of(v).get_upper() / 3)  # up again, to be found there next time
+spin(0.3)
 app.show_list()
 spin(0.1)
 assert len(holds_of(v)) == bm.BUBBLES and column(v)[0] == "day"

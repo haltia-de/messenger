@@ -2320,6 +2320,10 @@ class ChatView:
         self.pending_new, self.pending_old = [], []
         self.active = self.entered = self.building = False
         self.gone = False  # destroyed: answers on their way (Backend.run) are not given
+        self.due = False  # a pass (_pass) is coming: more reasons wait for it
+        self.scrolled = False  # among them a scroll
+        self.fresh = False  # the newest page came (newest()): older ones may be asked for
+        self.anchor_timer = None  # drops the anchor 400 ms after the last chunk above
         self.at_bottom = True  # stays at the newest while things come in
         self.anchor = None  # distance from the bottom kept while bubbles go in above
         self.moving = False  # the place is being set here, not by the reader
@@ -2381,6 +2385,7 @@ class ChatView:
         """The newest page fetched on opening. If more came than a screen
         (or MAX says there is a gap after the cache), what was built is not
         continuous with it: start again from these. done() runs once drawn."""
+        self.fresh = True
         if msgs:  # within the page, what MAX no longer has was deleted meanwhile
             fetched = {m["id"] for m in msgs}
             self.remove([i for i, (m, _b) in self.msgs.items()
@@ -2509,7 +2514,7 @@ class ChatView:
             self.entered = True
             self._to_bottom()
         self._start()
-        GLib.idle_add(self._load_visible)
+        self._soon()
 
     def leave(self):
         """No longer shown: nothing more is built or fetched, and only the
@@ -2747,7 +2752,7 @@ class ChatView:
             self.building = False
             self._show_busy()
             if self.active:
-                GLib.idle_add(self._load_visible)
+                self._soon()
                 if self.prefetch > 0:  # all built: the next older page
                     GLib.timeout_add(300, lambda: self._load_older(background=True) and False)
             return False
@@ -2769,7 +2774,9 @@ class ChatView:
             if not self.at_bottom:  # keep the place being read
                 self.anchor = adj.get_upper() - adj.get_value()
             self._prepend(chunk)
-            GLib.timeout_add(400, self._drop_anchor)
+            if self.anchor_timer is not None:  # one timer: the last chunk's
+                GLib.source_remove(self.anchor_timer)
+            self.anchor_timer = GLib.timeout_add(400, self._drop_anchor)
         return True
 
     def _queue_older(self, msgs):
@@ -2788,6 +2795,8 @@ class ChatView:
         stop when the chat is left."""
         if self.loading or self.done or self.oldest is None or self.pending_old:
             return False  # one page at a time, after the built ones
+        if not self.fresh:
+            return False  # the newest page first: an older one meanwhile would cross it
         if not self.active or background and self.prefetch <= 0:
             return False
         self.loading = True
@@ -2826,17 +2835,40 @@ class ChatView:
         elif self.anchor is not None:  # older messages came in above: stay put
             adj.set_value(adj.get_upper() - self.anchor)
         self.moving = False
-        GLib.idle_add(self._load_visible)
+        self._soon()
 
     def _moved(self, adj):
         if not self.moving:
             self.scrolled_at = time.monotonic()
         self.at_bottom = adj.get_value() + adj.get_page_size() >= adj.get_upper() - 60
+        self.scrolled = True  # an older page is asked for on a scroll only
+        self._soon()
+
+    def _soon(self):
+        """One pass for every reason come meanwhile (a scroll, a size change,
+        bubbles built): many reasons, one pass."""
+        if not self.due and not self.gone:
+            self.due = True
+            GLib.idle_add(self._pass)
+
+    def _pass(self):
+        """Everything the place decides, at once: the down button, the
+        spinner, an older page when near the top, the photos near the
+        screen, and back at the newest, the top cut to BUBBLES."""
+        self.due = False
+        if self.gone:
+            return False
         self._show_down()
-        if self.active and adj.get_value() < adj.get_page_size() * 0.5:
+        adj = self.scroll.get_vadjustment()
+        if self.scrolled and self.active and adj.get_value() < adj.get_page_size() * 0.5:
             self._load_older()
+        self.scrolled = False
         self._show_busy()
         self._load_visible()
+        if self.active and self.at_bottom and not self.pending_new and \
+                len(self.msgs) > BUBBLES + PAGE:
+            self._trim()  # read back down from far above: what is up there goes
+        return False
 
     def _to_bottom(self):
         self.at_bottom = True
@@ -2850,11 +2882,13 @@ class ChatView:
         """The down button: only away from the newest message."""
         if self.at_bottom:
             self.unseen = 0
-        self.down.set_label("↓ %d" % self.unseen if self.unseen else "↓")
+        text = "↓ %d" % self.unseen if self.unseen else "↓"
+        if self.down.get_label() != text:
+            self.down.set_label(text)
         self.down.set_visible(not self.at_bottom and bool(self.shown))
 
     def _drop_anchor(self):
-        self.anchor = None
+        self.anchor = self.anchor_timer = None
         return False
 
     def _load_visible(self):
