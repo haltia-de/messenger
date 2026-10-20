@@ -672,6 +672,7 @@ def user_name(user):
 
 # Files sent as photos, by their name (MAX takes these as photos); others go as files.
 PHOTO_FILES = (".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp")
+PHOTO_TYPES = ("image/jpeg", "image/png", "image/gif", "image/webp", "image/bmp")
 
 
 def attachment(path):
@@ -6139,11 +6140,13 @@ class Max(Gtk.Application):
         for ext in PHOTO_FILES:
             photos.add_pattern("*" + ext)
             photos.add_pattern("*" + ext.upper())
+        for mime in PHOTO_TYPES:  # a chooser may start in the pictures by them
+            photos.add_mime_type(mime)
         everything = Gtk.FileFilter()
         everything.set_name("Все файлы")
         everything.add_pattern("*")
+        dialog.add_filter(photos)  # the first one is chosen: photos, with their previews
         dialog.add_filter(everything)
-        dialog.add_filter(photos)
         chosen = dialog.run() == Gtk.ResponseType.ACCEPT
         paths = [p for p in dialog.get_filenames() if os.path.isfile(p)] if chosen else []
         dialog.destroy()
