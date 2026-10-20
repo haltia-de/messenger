@@ -12,6 +12,7 @@ incoming() or reaction(), from any thread. Load haltia-messenger first
 import asyncio
 import dataclasses
 import itertools
+import os
 import time
 
 from haltia_messenger import Chat, Message, Person
@@ -243,12 +244,26 @@ class FakeLink:
         if chat_id in self.rooms:
             self.rooms[chat_id].unread = 0
 
-    async def send(self, chat_id, text):
-        self._call("send", chat_id=chat_id, text=text)
+    async def send(self, chat_id, text, files=()):
+        if files:  # as MAX would show them back: a photo by a link of its own
+            self._call("send", chat_id=chat_id, text=text,
+                       files=[(f["kind"], os.path.basename(f["path"]), f.get("duration"))
+                              for f in files])
+        else:
+            self._call("send", chat_id=chat_id, text=text)
         if chat_id not in self.rooms:  # a dialog's first message starts it
             peer = self.dialog_of(self.me.id, chat_id)
             self._chat(chat_id, "DIALOG", None, {self.me.id: 0, peer: 0}, 0)
-        return self.say(chat_id, text, self.me.id)
+        attaches = []
+        for f in files:
+            name = os.path.basename(f["path"])
+            if f["kind"] == "photo":
+                attaches.append(photo("https://i.oneme.ru/sent/" + name))
+            elif f["kind"] == "voice":
+                attaches.append(audio("https://vd.okcdn.ru/sent/" + name, f["duration"] // 1000))
+            else:
+                attaches.append(file(next(self.ids), f.get("name") or name, os.path.getsize(f["path"])))
+        return self.say(chat_id, text, self.me.id, attaches=attaches)
 
     async def forward(self, chat_id, msg_id, from_chat_id):
         self._call("forward", chat_id=chat_id, msg_id=msg_id, from_chat_id=from_chat_id)

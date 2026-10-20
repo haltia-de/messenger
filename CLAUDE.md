@@ -312,6 +312,19 @@ programs are found on `PATH` (`haltia-vplay`, `b8k-vplay` before 2.0: `shutil.wh
   files asked of MAX first; `Media.save` into `load_text("folder", default_folder())`, set in the
   settings, under `safe_name`, numbered when taken, via `.part`). A forwarded message's text and
   attachments are inside `msg.link.message` (`Backend.carried`); its dict has `forwarded`.
+- **Sending attachments.** The paperclip (`clip`, left of the entry) picks files
+  (`choose_files`: `FileChooserNative`, several; tests replace it); `attachment(path)` makes
+  them what links take — `{"kind": "photo"|"file", "path", "name"}`, a photo by its name
+  (`PHOTO_FILES`, what MAX takes as photos), video goes as a file — and they wait in
+  `attached`, drawn above the entry (`show_attached`: a small photo or the name, each with its
+  ✕). `send()` sends the text with them (`Backend.send(chat, text, files)` → the link's
+  `send(chat, text, files)`; PyMaxLink makes PyMax's `Photo`/`File`/`Voice`); what could not be
+  sent stays. A voice message: the microphone button held (`GestureMultiPress` pressed /
+  released; `record_start`/`record_stop`) records by `Recorder` — `RECORDERS`' first on `PATH`:
+  ffmpeg from pulse to Ogg/Opus (in the tablet's image), gst-launch, parecord's Ogg/Vorbis;
+  stopped by SIGINT so the file is finished, in a thread — into `PHOTOS/voice-*.ogg`, sent as
+  `{"kind": "voice", "duration": ms}` and removed; shorter than `SHORTEST` is not sent.
+  `Max(recorder=…)` takes a recorder with fake hands (`popen`, `which`) in tests.
 - **Emoji in messages.** The «😊» toggle left of the entry opens a non-modal popover (`EMOJI`
   groups, the recent ones first from `EMOJI_RECENT`, `emoji.json`); a tap inserts at the cursor
   (`put_emoji`). Non-modal on purpose: the entry keeps the focus, so the on-screen keyboard

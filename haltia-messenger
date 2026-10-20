@@ -98,6 +98,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -374,6 +375,21 @@ button.smile {
   font-size: 34px;
 }
 button.smile:checked { background-color: #c4dcf7; }
+button.clip, button.mic {
+  background-image: none;
+  background-color: #f2f2f0;
+  border: 1px solid #c0bfbc;
+  box-shadow: none;
+  border-radius: 16px;
+  min-width: 72px;
+  min-height: 72px;
+}
+button.clip image, button.mic image { -gtk-icon-transform: scale(1.6); }
+button.mic.recording { background-color: #e01b24; border-color: #a51d2d; }
+button.mic.recording image { color: #ffffff; }
+.attachment { background-color: #f2f2f0; border-radius: 14px; padding: 6px 6px 6px 12px; }
+label.attachment-name { font-size: 20px; }
+label.recording { font-size: 22px; color: #a51d2d; }
 label.emoji-group { font-size: 18px; color: #77767b; }
 .viewer { background-color: #000000; }
 .found .bubble { background-color: #fff3bf; }
@@ -618,6 +634,23 @@ def user_name(user):
         if full:
             return full
     return "Пользователь %s" % getattr(user, "id", "")
+
+
+# Files sent as photos, by their name (MAX takes these as photos); others go as files.
+PHOTO_FILES = (".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp")
+
+
+def attachment(path):
+    """A file to be sent, as the links take it: a photo or a file."""
+    name = os.path.basename(path)
+    kind_ = "photo" if name.lower().endswith(PHOTO_FILES) else "file"
+    return {"kind": kind_, "path": path, "name": name}
+
+
+def attachment_words(files):
+    """The attachments in words, for the list's preview of what was sent."""
+    words = {"photo": "фото", "voice": "голосовое сообщение"}
+    return ", ".join(words.get(f["kind"], "файл «%s»" % f.get("name", "")) for f in files).capitalize()
 
 
 # Files played in the bubble like voice messages, by their name.
@@ -1032,8 +1065,21 @@ class PyMaxLink:
     async def read(self, chat_id, msg_id):
         await self._api.messages.read_message(msg_id, chat_id)
 
-    async def send(self, chat_id, text):
-        msg = await self._api.messages.send_message(chat_id, text)
+    async def send(self, chat_id, text, files=()):
+        """A message, with files (attachment(): photos, files; voice with
+        its duration in ms) if any."""
+        from pymax.files import File, Photo, Voice
+
+        sent = []
+        for f in files:
+            if f["kind"] == "photo":
+                sent.append(Photo(path=f["path"]))
+            elif f["kind"] == "voice":
+                sent.append(Voice(path=f["path"], duration=int(f["duration"])))
+            else:
+                sent.append(File(path=f["path"], name=f.get("name")))
+        msg = await self._api.messages.send_message(chat_id, text or None,
+                                                    attachments=sent or None)
         return max_message(msg) if msg else None
 
     async def forward(self, chat_id, msg_id, from_chat_id):
@@ -1251,8 +1297,8 @@ class Backend:
     async def forward(self, chat_id, msg_id, from_chat_id):
         return await self.of(chat_id).forward(chat_id, msg_id, from_chat_id)
 
-    async def send(self, chat_id, text):
-        return await self.of(chat_id).send(chat_id, text)
+    async def send(self, chat_id, text, files=()):
+        return await self.of(chat_id).send(chat_id, text, files)
 
     async def add_contact(self, user_id):
         return await self.of(user_id).add_contact(user_id)
@@ -1663,13 +1709,14 @@ class Account:
             chat.last = msg
         return out, self.summary(chat) if chat is not None else None
 
-    async def send(self, chat_id, text):
+    async def send(self, chat_id, text, files=()):
         self.ask()
         chat = self.chats.get(chat_id)
         # A dialog not started yet is numbered own id XOR theirs.
         self.remember(self.peer(chat) if chat else self.link.dialog_of(self.me, chat_id)
                       if self.me else None)
-        msg = await self.link.send(chat_id, text)
+        msg = await self.link.send(chat_id, text, list(files)) if files else \
+            await self.link.send(chat_id, text)
         out = self.message(msg) if msg else None
         if out:
             self.cache.add(chat_id, [out])
@@ -2132,6 +2179,96 @@ class Libmpv:
     def stop(self):
         self.mpv.command("stop")
         self.awake.release()
+
+
+# How a voice message is recorded: Ogg/Opus, as MAX's apps send it, by ffmpeg
+# (in the tablet's image) or GStreamer; else parecord's Ogg/Vorbis.
+RECORDERS = (
+    ("ffmpeg", lambda path: [
+        "ffmpeg", "-nostdin", "-loglevel", "error", "-y", "-f", "pulse", "-i", "default",
+        "-ac", "1", "-c:a", "libopus", "-b:a", "32k", "-application", "voip", path]),
+    ("gst-launch-1.0", lambda path: [
+        "gst-launch-1.0", "-q", "-e", "autoaudiosrc", "!", "audioconvert", "!", "audioresample",
+        "!", "opusenc", "!", "oggmux", "!", "filesink", "location=" + path]),
+    ("parecord", lambda path: ["parecord", "--file-format=oga", path]),
+)
+SHORTEST = 1000  # ms: a press shorter than this was not a message
+
+
+class Recorder:
+    """A voice message from the microphone into an Ogg file in PHOTOS (the
+    first of RECORDERS there is). start() begins; stop(done, keep) ends it
+    (SIGINT: the recorder finishes its file) by a thread and gives done
+    ((path, duration ms) or None) on the GTK side: None when not kept,
+    shorter than SHORTEST, or nothing written. Its hands (popen, which)
+    come in at creation; tests give their own."""
+
+    def __init__(self, popen=subprocess.Popen, which=shutil.which):
+        self.popen, self.which = popen, which
+        self.proc = self.path = None
+        self.began = 0.0
+
+    def available(self):
+        return any(self.which(name) for name, _cmd in RECORDERS)
+
+    def start(self):
+        """True if recording now."""
+        for name, cmd in RECORDERS:
+            if self.which(name):
+                break
+        else:
+            log_line("voice recording: no recorder")
+            return False
+        os.makedirs(PHOTOS, mode=0o700, exist_ok=True)
+        fd, self.path = tempfile.mkstemp(dir=PHOTOS, prefix="voice-", suffix=".ogg")
+        os.close(fd)
+        try:
+            self.proc = self.popen(cmd(self.path), stdin=subprocess.DEVNULL,
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except OSError as exc:
+            log_line("voice recording: %r" % exc)
+            os.remove(self.path)
+            self.proc = self.path = None
+            return False
+        self.began = time.monotonic()
+        return True
+
+    def recording(self):
+        return self.proc is not None
+
+    def seconds(self):
+        return time.monotonic() - self.began if self.proc else 0
+
+    def stop(self, done, keep=True):
+        proc, path, self.proc, self.path = self.proc, self.path, None, None
+        if proc is None:
+            GLib.idle_add(lambda: done(None) and False)
+            return
+        ms = int((time.monotonic() - self.began) * 1000)
+
+        def finish():
+            try:
+                proc.send_signal(signal.SIGINT)
+                proc.wait(timeout=5)
+            except Exception:  # it hangs: its file is not to be trusted
+                proc.kill()
+                ms_kept = 0
+            else:
+                ms_kept = ms
+            got = None
+            if keep and ms_kept >= SHORTEST and os.path.exists(path) and os.path.getsize(path) > 0:
+                got = (path, ms_kept)
+            else:
+                remove_file(path)
+            GLib.idle_add(lambda: done(got) and False)
+        threading.Thread(target=finish, daemon=True).start()
+
+
+def remove_file(path):
+    try:
+        os.remove(path)
+    except OSError:
+        pass
 
 
 def spawn_player(cmd):
@@ -3570,9 +3707,10 @@ class Mpris:
 
 # --- the window -------------------------------------------------------------
 class Max(Gtk.Application):
-    def __init__(self, link=None, media=None):
+    def __init__(self, link=None, media=None, recorder=None):
         super().__init__(application_id=APP_ID)
         self.win = None
+        self.recorder = recorder or Recorder()  # voice messages from the microphone
         self.backend = Backend(self, link)  # link: PyMaxLink unless given (tests, demo)
         self.telemetry = Telemetry(self.backend)
         self.came_from = "chats"  # the page the settings go back to
@@ -3842,9 +3980,40 @@ class Max(Gtk.Application):
         self.emoji_built = None  # (popover, the recent ones' box, what they show), once built
         self.recent = None  # the emoji used last, read once
         self.recent_saved = None
+        # Files to send: the paperclip chooses them, they wait above the
+        # entry (a photo small, a file by its name, each with its ✕).
+        self.clip = Gtk.Button.new_from_icon_name("mail-attachment-symbolic", Gtk.IconSize.BUTTON)
+        self.clip.get_style_context().add_class("clip")
+        self.clip.set_can_focus(False)
+        self.clip.set_focus_on_click(False)
+        self.clip.set_tooltip_text("Прикрепить фото или файл")
+        self.clip.connect("clicked", lambda _b: self.attach())
+        self.attached = []  # attachment()s waiting to be sent with the message
+        self.attachbar = Gtk.Box(spacing=10)
+        self.attachbar.set_margin_start(16)
+        self.attachbar.set_margin_end(16)
+        self.attachbar.set_no_show_all(True)
+        # A voice message: held to speak, let go to send.
+        self.mic = Gtk.Button.new_from_icon_name("audio-input-microphone-symbolic",
+                                                 Gtk.IconSize.BUTTON)
+        self.mic.get_style_context().add_class("mic")
+        self.mic.set_can_focus(False)
+        self.mic.set_focus_on_click(False)
+        self.mic.set_tooltip_text("Держите, пока говорите; отпустите — уйдёт")
+        self.mic.hold = Gtk.GestureMultiPress.new(self.mic)
+        self.mic.hold.connect("pressed", lambda *_a: self.record_start())
+        self.mic.hold.connect("released", lambda *_a: self.record_stop(True))
+        self.mic.hold.connect("cancel", lambda *_a: self.record_stop(False))
+        self.record_label = label("", "recording")
+        self.record_label.set_no_show_all(True)
+        self.record_timer = None
         self.inputbar.pack_start(self.smile, False, False, 0)
+        self.inputbar.pack_start(self.clip, False, False, 0)
         self.inputbar.pack_start(self.entry, True, True, 0)
+        self.inputbar.pack_start(self.record_label, True, True, 0)
+        self.inputbar.pack_start(self.mic, False, False, 0)
         self.inputbar.pack_start(self.sendb, False, False, 0)
+        chat.pack_start(self.attachbar, False, False, 0)
         chat.pack_start(self.inputbar, False, False, 0)
         self.stack.add_named(chat, "chat")
 
@@ -5290,8 +5459,10 @@ class Max(Gtk.Application):
     # emoji in the message
     def emoji_panel(self, show):
         if not show:
-            if self.emoji_pop:
-                self.emoji_pop.popdown()
+            pop = self.emoji_pop
+            if pop:
+                pop.popdown()
+                self.emoji_closed(pop)  # now: its "closed" comes after the animation, if at all
             return
         if self.recent is None:
             self.recent = [e for e in load_json(EMOJI_RECENT, []) if isinstance(e, str)]
@@ -5355,10 +5526,14 @@ class Max(Gtk.Application):
         self.entry.set_position(pos)
         self.recent = ([emoji] + [e for e in self.recent or [] if e != emoji])[:RECENT]
 
-    def send(self):
-        text = self.entry.get_text().strip()
+    def send(self, voice=None):
+        """The entry's text and the files waiting above it (or a voice
+        message just recorded: voice) into the open chat. What could not
+        be sent stays where it was."""
+        text = "" if voice else self.entry.get_text().strip()
+        files = [voice] if voice else list(self.attached)
         chat_id = self.open_chat
-        if not text or chat_id is None:
+        if not (text or files) or chat_id is None:
             return
         self.sendb.set_sensitive(False)
 
@@ -5367,17 +5542,130 @@ class Max(Gtk.Application):
             if err:
                 self.sub.set_text("Нет связи — сообщение не отправлено"
                                   if isinstance(err, Offline) else "не отправлено, попробуйте ещё раз")
+                if voice:
+                    remove_file(voice["path"])
                 return
-            self.entry.set_text("")
+            if voice:
+                remove_file(voice["path"])
+            else:
+                self.entry.set_text("")
+                self.attached = []
+                self.show_attached()
             self.sub.set_text("")
             self.smile.set_active(False)
             view = self.views.get(chat_id)
             if msg and view:
                 view.add(msg)
-            self.chatlist.wrote(chat_id, text)  # a dialog from the search is in the list now
+            # a dialog from the search is in the list now
+            self.chatlist.wrote(chat_id, text or attachment_words(files))
             self.edit.set_visible(self.open_chat == chat_id and self.chatlist.listed(chat_id))
 
-        self.backend.run(self.backend.send(chat_id, text), done)
+        if files:
+            self.backend.run(self.backend.send(chat_id, text, files), done)
+        else:
+            self.backend.run(self.backend.send(chat_id, text), done)
+
+    # --- attachments ------------------------------------------------------------
+    def attach(self):
+        for path in self.choose_files():
+            if not any(f["path"] == path for f in self.attached):
+                self.attached.append(attachment(path))
+        self.show_attached()
+
+    def choose_files(self):
+        """Files picked to send (the portal's dialog in Flatpak and KDE);
+        [] when cancelled. Tests replace it."""
+        dialog = Gtk.FileChooserNative.new("Прикрепить", self.win, Gtk.FileChooserAction.OPEN,
+                                           "Прикрепить", "Отмена")
+        dialog.set_select_multiple(True)
+        photos = Gtk.FileFilter()
+        photos.set_name("Фото")
+        for ext in PHOTO_FILES:
+            photos.add_pattern("*" + ext)
+            photos.add_pattern("*" + ext.upper())
+        everything = Gtk.FileFilter()
+        everything.set_name("Все файлы")
+        everything.add_pattern("*")
+        dialog.add_filter(everything)
+        dialog.add_filter(photos)
+        chosen = dialog.run() == Gtk.ResponseType.ACCEPT
+        paths = [p for p in dialog.get_filenames() if os.path.isfile(p)] if chosen else []
+        dialog.destroy()
+        return paths
+
+    def show_attached(self):
+        """The files waiting to be sent, above the entry."""
+        for child in self.attachbar.get_children():
+            child.destroy()
+        for f in self.attached:
+            chip = Gtk.Box(spacing=8)
+            chip.get_style_context().add_class("attachment")
+            chip.attachment = f
+            if f["kind"] == "photo":
+                try:
+                    pix = GdkPixbuf.Pixbuf.new_from_file_at_scale(f["path"], 96, 96, True)
+                    chip.pack_start(Gtk.Image.new_from_pixbuf(pix), False, False, 0)
+                except GLib.Error:
+                    chip.pack_start(label(f["name"], "attachment-name", ellipsize=True),
+                                    False, False, 0)
+            else:
+                chip.pack_start(label("📄 " + f["name"], "attachment-name", ellipsize=True),
+                                False, False, 0)
+            drop = Gtk.Button.new_from_icon_name("window-close-symbolic", Gtk.IconSize.BUTTON)
+            drop.get_style_context().add_class("plain")
+            drop.set_can_focus(False)
+            drop.set_tooltip_text("Не отправлять")
+            drop.connect("clicked", lambda _b, f=f: self.unattach(f))
+            chip.pack_start(drop, False, False, 0)
+            self.attachbar.pack_start(chip, False, False, 0)
+            chip.show_all()  # not the bar's show_all: its no-show-all stops it
+        self.attachbar.set_visible(bool(self.attached))
+
+    def unattach(self, f):
+        self.attached = [a for a in self.attached if a is not f]
+        self.show_attached()
+
+    # --- a voice message --------------------------------------------------------
+    def record_start(self):
+        if self.open_chat is None or self.recorder.recording():
+            return
+        self.stop_sound()  # no voice played into the microphone
+        if not self.recorder.start():
+            self.sub.set_text("Запись голоса здесь недоступна")
+            return
+        self.mic.get_style_context().add_class("recording")
+        self.entry.hide()
+        self.record_label.show()
+        self.show_recording()
+        self.record_timer = GLib.timeout_add(250, self.show_recording)
+
+    def show_recording(self):
+        self.record_label.set_text("● %s — отпустите, чтобы отправить"
+                                   % mmss(self.recorder.seconds()))
+        return self.recorder.recording()
+
+    def record_stop(self, keep):
+        if not self.recorder.recording():
+            return
+        if self.record_timer is not None:
+            GLib.source_remove(self.record_timer)
+            self.record_timer = None
+        self.mic.get_style_context().remove_class("recording")
+        self.record_label.hide()
+        self.entry.show()
+        chat_id = self.open_chat
+
+        def done(got):
+            if got is None:
+                if keep:
+                    self.sub.set_text("Держите кнопку, пока говорите")
+                return
+            path, ms = got
+            if self.open_chat != chat_id:
+                remove_file(path)  # the chat left meanwhile: not sent elsewhere
+                return
+            self.send({"kind": "voice", "path": path, "duration": ms, "name": "voice.ogg"})
+        self.recorder.stop(done, keep)
 
 
 if __name__ == "__main__":

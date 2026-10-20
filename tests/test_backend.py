@@ -324,6 +324,22 @@ assert c.kind == "DIALOG" and c.members == [1, 5] and c.count == 2 and c.unread 
 assert c.title is None and c.time == 2000 and c.last.text == "Привет"
 assert bm.max_person(PyUser.model_validate({"id": 5, "names": [{"name": "Анна", "type": "CUSTOM"}]})) \
     == bm.Person(5, "Анна")
+sent_to_max = []
+
+
+class Messages:
+    async def send_message(self, chat_id, text, attachments=None):
+        sent_to_max.append((chat_id, text, attachments))
+
+
+link = bm.PyMaxLink("/nonexistent")
+link.client = SimpleNamespace(_app=SimpleNamespace(api=SimpleNamespace(messages=Messages())))
+asyncio.run(link.send(11, "", [bm.attachment("/x/Дача.JPG"), bm.attachment("/x/Счёт.pdf"),
+                               {"kind": "voice", "path": "/x/v.ogg", "duration": 3200}]))
+chat, text, files = sent_to_max[-1]
+assert chat == 11 and text is None and [type(f).__name__ for f in files] == ["Photo", "File", "Voice"]
+assert files[1].name == "Счёт.pdf" and files[2].duration == 3200
+assert bm.attachment_words([bm.attachment("/x/a.png"), bm.attachment("/x/b.pdf")]) == "Фото, файл «b.pdf»"
 ok("PyMax's objects as the link's own")
 
 # --- search, contacts, joining, removing, renaming, invites ----------------------------

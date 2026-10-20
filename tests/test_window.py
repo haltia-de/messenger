@@ -133,8 +133,31 @@ fake.say(news, "Перекрытие улицы", t=t0 + 4000)
 
 bm.save_json(bm.KNOWN, [MAMA, PETYA])  # not the first run: the stranger is not known
 hands = FakeHands()
+
+
+class FakeRecording:
+    """A recorder's process (Recorder's popen): its file written when it is
+    told to stop, as ffmpeg finishes its file on SIGINT."""
+    started = []
+
+    def __init__(self, cmd, **_kw):
+        self.cmd, self.path = cmd, cmd[-1]
+        FakeRecording.started.append(cmd)
+
+    def send_signal(self, _sig):
+        with open(self.path, "wb") as fh:
+            fh.write(b"OggS voice")
+
+    def wait(self, timeout=None):
+        return 0
+
+    def kill(self):
+        pass
+
+
+recorder = bm.Recorder(popen=FakeRecording, which=lambda n: "/usr/bin/ffmpeg" if n == "ffmpeg" else None)
 app = bm.Max(link=fake, media=bm.Media(hands.spawn, hands.open_uri, hands.fetch, hands.player,
-                                       hands.download))
+                                       hands.download), recorder=recorder)
 def no_dialog(*_a):  # a real save dialog would wait for a person: never in a test
     raise AssertionError("an unexpected save dialog")
 
@@ -357,7 +380,7 @@ assert [w.get_text() for w in walk(app.emoji_pop) if isinstance(w, Gtk.Label)
 app.send()
 wait(lambda: app.entry.get_text() == "", what="sent with emoji")
 assert fake.asked("send")[-1] == {"chat_id": mama, "text": "😀Привет 😀❤️"}
-assert not app.smile.get_active() and app.emoji_pop is None
+wait(lambda: not app.smile.get_active() and app.emoji_pop is None, what="the panel closed")
 ok("emoji")
 
 # --- search: a person by phone, then a channel by link -----------------------------------------
@@ -843,3 +866,63 @@ fake.incoming(dacha, "Огурцы взошли", PETYA)
 wait(lambda: rows()[0] == dacha, what="dacha on top")
 assert len(badges) == told + 1 and badges[-1] == app.chatlist.counts()["loud"]
 ok("only the row that changed")
+
+# --- sending: photos and files by the paperclip, a voice message held -----------------------------
+from gi.repository import GdkPixbuf  # noqa: E402
+home = os.environ["HOME"]
+pic, doc = os.path.join(home, "Дача.JPG"), os.path.join(home, "Счёт.pdf")
+GdkPixbuf.Pixbuf.new(GdkPixbuf.Colorspace.RGB, False, 8, 40, 30).savev(pic, "jpeg", [], [])
+with open(doc, "wb") as fh:
+    fh.write(b"%PDF-1.4")
+app.open(mama)
+spin(0.3)
+app.choose_files = lambda: [pic, doc]
+app.clip.clicked()
+chips = app.attachbar.get_children()
+assert app.attachbar.get_visible() and [c.attachment["kind"] for c in chips] == ["photo", "file"]
+assert any(isinstance(w, Gtk.Image) for w in chips[0].get_children())  # the photo, small
+spin(0.1)
+assert all(c.get_visible() for c in chips) and app.attachbar.get_allocated_height() > 50
+[b for b in chips[1].get_children() if isinstance(b, Gtk.Button)][0].clicked()  # its ✕
+assert [c.attachment["name"] for c in app.attachbar.get_children()] == ["Дача.JPG"]
+app.clip.clicked()  # both again: the photo not twice
+assert [c.attachment["name"] for c in app.attachbar.get_children()] == ["Дача.JPG", "Счёт.pdf"]
+shot("attachments.png")
+fake.drop()  # no connection: nothing lost
+wait(lambda: app.offline.get_visible(), what="the bar")
+app.entry.set_text("Вот счёт")
+app.send()
+wait(lambda: app.sendb.get_sensitive(), what="the send answered")
+assert len(app.attachbar.get_children()) == 2 and app.entry.get_text() == "Вот счёт"
+fake.back()
+wait(lambda: not app.offline.get_visible(), what="the bar gone")
+app.send()
+wait(lambda: not app.attachbar.get_visible(), what="sent")
+assert fake.asked("send")[-1] == {"chat_id": mama, "text": "Вот счёт",
+                                  "files": [("photo", "Дача.JPG", None), ("file", "Счёт.pdf", None)]}
+assert app.entry.get_text() == "" and app.chatlist.get(mama)["last"] == "Вы: Вот счёт"
+sent = app.backend.cache.read(mama)[-1]
+assert sent["photos"] == ["https://i.oneme.ru/sent/Дача.JPG"] and sent["media"][0]["name"] == "Счёт.pdf"
+# a voice message: held, let go
+assert app.recorder.available()
+app.record_start()
+assert app.mic.get_style_context().has_class("recording") and app.record_label.get_visible()
+assert not app.entry.get_visible() and FakeRecording.started[-1][0] == "ffmpeg"
+recorded = FakeRecording.started[-1][-1]
+app.recorder.began -= 3  # three seconds said
+spin(0.3)
+assert "0:03" in app.record_label.get_text()
+shot("recording.png")
+app.record_stop(True)
+wait(lambda: "files" in fake.asked("send")[-1] and fake.asked("send")[-1]["files"][0][0] == "voice",
+     what="the voice sent")
+kind_, name, ms = fake.asked("send")[-1]["files"][0]
+assert ms >= 3000 and fake.asked("send")[-1]["text"] == ""
+wait(lambda: not os.path.exists(recorded), what="the recording removed")
+assert app.entry.get_visible() and not app.mic.get_style_context().has_class("recording")
+n = len(fake.asked("send"))
+app.record_start()  # a tap, not a message: nothing sent
+app.record_stop(True)
+wait(lambda: app.sub.get_text() == "Держите кнопку, пока говорите", what="the hint")
+assert len(fake.asked("send")) == n
+ok("sending photos, files and voice")
