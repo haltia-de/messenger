@@ -78,9 +78,11 @@ repositories, never on Flathub (an unofficial client):
 Releases (ADR 0002 in device-lenovo-b8000h): SemVer, always `vX.Y.Z` — X incompatible (commands,
 file formats, `X-B8K-…` keys), Y features, Z fixes and packaging-only changes. The tag must equal
 `pkgver` in `packaging/alpine/APKBUILD` (`pkgrel=0`), the newest `<release version>` in
-`data/*.metainfo.xml` and the version in `debian/changelog`; CI fails otherwise. From 2.1.2 on every `<release>` has a short Russian
-`<description>` (`<p>` or `<ul><li>`) of what the person will notice: the shell's updater shows it
-as «Что нового» before installing. Pushing the tag runs `.github/workflows/release.yml`
+`data/*.metainfo.xml` and the version in `debian/changelog`; CI fails otherwise. The notes are written in `NEWS.md` (`## X.Y.Z (YYYY-MM-DD)`, then `### Русский` and
+`### English`: what the person will notice), both languages, before tagging; haltia-de/ci's
+`news.py metainfo NEWS.md data/*.metainfo.xml` writes them into the metainfo's `<releases>`
+(English the text, Russian `xml:lang="ru"`), and `apk.yml` checks they match (`--check`). The
+shell's updater shows the Russian as «Что нового» before installing. Pushing the tag runs `.github/workflows/release.yml`
 (haltia-de/ci's `apk.yml`; the APKBUILD's `builddir` is GitHub's tarball folder, named
 after the repository): a signed noarch Alpine 3.24 package (`abuild`, `options="net"`
 for the PyMax wheel in `source=`) in the GitHub release. Push the commit first and the tag in a

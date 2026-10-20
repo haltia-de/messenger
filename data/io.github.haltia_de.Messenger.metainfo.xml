@@ -30,11 +30,11 @@
           <li>Photos load a couple at a time, the ones on screen first.</li>
         </ul>
         <p xml:lang="ru">Быстрее и надёжнее, особенно на планшете:</p>
-        <ul xml:lang="ru">
-          <li>Новые сообщения и прокрутка больше не подтормаживают окно.</li>
-          <li>Когда нет связи, это видно по жёлтой полосе; программа сама переподключается, а вы остаётесь там, где были. Неотправленное сообщение остаётся в поле ввода.</li>
-          <li>Кнопки больше не остаются серыми навсегда после обрыва связи.</li>
-          <li>Фото загружаются по два, сначала те, что на экране.</li>
+        <ul>
+          <li xml:lang="ru">Новые сообщения и прокрутка больше не подтормаживают окно.</li>
+          <li xml:lang="ru">Когда нет связи, это видно по жёлтой полосе; программа сама переподключается, а вы остаётесь там, где были. Неотправленное сообщение остаётся в поле ввода.</li>
+          <li xml:lang="ru">Кнопки больше не остаются серыми навсегда после обрыва связи.</li>
+          <li xml:lang="ru">Фото загружаются по два, сначала те, что на экране.</li>
         </ul>
       </description>
     </release>
@@ -52,30 +52,43 @@
     </release>
     <release version="2.3.1" date="2026-10-19">
       <description>
-        <p>Пакеты для Debian 13 и Ubuntu 24.04 теперь есть в выпуске.</p>
+        <p>Packages for Debian 13 and Ubuntu 24.04 are now part of the release.</p>
+        <p xml:lang="ru">Пакеты для Debian 13 и Ubuntu 24.04 теперь есть в выпуске.</p>
       </description>
     </release>
     <release version="2.3.0" date="2026-10-19">
       <description>
         <ul>
-          <li>Программу можно поставить во Flatpak и пакетом для Debian 13 и Ubuntu 24.04 из репозиториев Haltia.</li>
-          <li>QR-код для входа показывается и там, где нет библиотеки Pillow.</li>
+          <li>The program can be installed as a Flatpak and as a package for Debian 13 and Ubuntu 24.04 from Haltia's repositories.</li>
+          <li>The login QR code is shown where the Pillow library is missing too.</li>
+        </ul>
+        <ul>
+          <li xml:lang="ru">Программу можно поставить во Flatpak и пакетом для Debian 13 и Ubuntu 24.04 из репозиториев Haltia.</li>
+          <li xml:lang="ru">QR-код для входа показывается и там, где нет библиотеки Pillow.</li>
         </ul>
       </description>
     </release>
     <release version="2.2.1" date="2026-10-19">
       <description>
         <ul>
-          <li>Пока играет голосовое сообщение, компьютер не засыпает и на обычных рабочих столах, не только на планшете.</li>
-          <li>Во Flatpak сеанс, настройки и кэш хранятся в папке программы.</li>
+          <li>While a voice message plays, the computer does not fall asleep on ordinary desktops either, not only on the tablet.</li>
+          <li>In Flatpak the session, settings and cache are kept in the program's own folder.</li>
+        </ul>
+        <ul>
+          <li xml:lang="ru">Пока играет голосовое сообщение, компьютер не засыпает и на обычных рабочих столах, не только на планшете.</li>
+          <li xml:lang="ru">Во Flatpak сеанс, настройки и кэш хранятся в папке программы.</li>
         </ul>
       </description>
     </release>
     <release version="2.2.0" date="2026-10-19">
       <description>
         <ul>
-          <li>Окна «Сохранить как» и «Папка для файлов» — системные: в KDE и во Flatpak открывается выбор файлов рабочего стола.</li>
-          <li>Во Flatpak программа сама просит разрешения запускаться с сеансом и работать в фоне.</li>
+          <li>The «Save as» and «Folder for files» windows are the system's: in KDE and in Flatpak the desktop's file chooser opens.</li>
+          <li>In Flatpak the program asks by itself for permission to start with the session and run in the background.</li>
+        </ul>
+        <ul>
+          <li xml:lang="ru">Окна «Сохранить как» и «Папка для файлов» — системные: в KDE и во Flatpak открывается выбор файлов рабочего стола.</li>
+          <li xml:lang="ru">Во Flatpak программа сама просит разрешения запускаться с сеансом и работать в фоне.</li>
         </ul>
       </description>
     </release>
