@@ -1155,6 +1155,16 @@ class Backend:
     async def join(self, link):
         return await self._by_link(link).join(link)
 
+    def download(self, ref, path, timeout=600):
+        """From a worker thread (Media's): an attachment a messenger's link
+        fetches itself (a ref it gave, not a link) into path; raises what
+        failed (Offline with no connection)."""
+        if self.loop is None or self.loop.is_closed():
+            raise Offline()
+        account = self.of(ref)
+        account.ask()
+        asyncio.run_coroutine_threadsafe(account.link.download(ref, path), self.loop).result(timeout)
+
     async def log(self, events):
         """Telemetry events to the messengers that take them (MAX's)."""
         for account in self.accounts.values():
@@ -1833,9 +1843,19 @@ def photo_ok(url):
 
 
 def where(url):
-    """A link for the log: host and path, not the signature in its query."""
+    """A link for the log: host and path, not the signature in its query
+    (an attachment of a messenger fetched by its link, as it is)."""
+    if is_ref(url):
+        return url[:60]
     parts = urllib.parse.urlsplit(url or "")
     return "%s%s" % (parts.hostname or "?", parts.path[:60])
+
+
+def is_ref(text):
+    """An attachment a messenger's link fetches itself ("tg:…" as its link
+    gave it), not a link: no scheme of the web or of files."""
+    return isinstance(text, str) and ":" in text and "://" not in text and \
+        text.split(":", 1)[0] not in ("http", "https", "file", "data", "javascript")
 
 
 def secs(duration):
@@ -2094,6 +2114,11 @@ class Media:
     It also saves what a message carries into a folder (save()), one at a
     time, under a harmless name that never overwrites another.
 
+    What another messenger carries has no link: its link fetches it (own,
+    set by the window: Backend.download(ref, path), from a worker thread),
+    into the same cache; voice, video and files are played or opened from
+    there once fetched.
+
     Its hands come in at creation, the real ones by default: spawn(cmd),
     open_uri(url) -> bool, fetch(url, headers) -> bytes, player(on_time,
     on_end) -> an object with play(url, agent), toggle(), stop(), and
@@ -2103,6 +2128,8 @@ class Media:
                  player=Libmpv, download=download_file):
         self.spawn, self.open_uri, self.fetch, self.player = spawn, open_uri, fetch, player
         self.download = download
+        self.own = None  # own(ref, path): a messenger's own attachment fetched by its link
+        self.wanted = None  # the voice asked for last: one fetched late plays only if still it
         self.agent = "Mozilla/5.0"  # PyMax's browser user agent, once logged in
         self.on_time = self.on_end = lambda *_a: None
         self._sound = None  # the voice player, made at the first voice message
@@ -2117,12 +2144,28 @@ class Media:
     def headers(self):
         return {"User-Agent": self.agent}
 
+    def how(self, ref):
+        """"http" for a link on MEDIA_HOSTS, "own" for an attachment a
+        messenger's link fetches (is_ref), None for what is not to be
+        fetched at all."""
+        if media_ok(ref):
+            return "http"
+        return "own" if self.own is not None and is_ref(ref) else None
+
+    def _later(self, ref, then):
+        """An own attachment into the cache by a thread; then(path or None)
+        on the GTK side."""
+        def work():
+            path = self._photo_file(ref)
+            GLib.idle_add(lambda: then(path) and False)
+        threading.Thread(target=work, daemon=True).start()
+
     # --- photos ---------------------------------------------------------------
     def photo(self, url, done, size=460, owner=None):
         """A photo, from the cache or fetched (see the queue above), fitted
         within size × size; done(pixbuf or None) on the GTK side, unless
         owner is gone by then. Nothing at all for a link not to be fetched."""
-        if not media_ok(url):
+        if not self.how(url):
             log_line("photo refused: %s" % where(url))
             return
         with self.cond:
@@ -2173,21 +2216,32 @@ class Media:
         return False
 
     def _photo_file(self, url):
-        """The photo's file in the cache, fetched if not there yet; None if it can't be."""
+        """The file in the cache (a photo; another messenger's voice, video,
+        file too), fetched if not there yet; None if it can't be."""
         path = os.path.join(PHOTOS, hashlib.sha1(url.encode()).hexdigest()[:20] + ".img")
+        part = None
         try:
             if os.path.exists(path):
                 os.utime(path)  # in use: kept by prune()
                 return path
-            data = self.fetch(url, self.headers())
             os.makedirs(PHOTOS, mode=0o700, exist_ok=True)
             fd, part = tempfile.mkstemp(dir=PHOTOS, suffix=".new")
-            with os.fdopen(fd, "wb") as out:
-                out.write(data)
+            if self.how(url) == "own":
+                os.close(fd)
+                self.own(url, part)
+            else:
+                data = self.fetch(url, self.headers())
+                with os.fdopen(fd, "wb") as out:
+                    out.write(data)
             os.replace(part, path)
             return path
         except Exception as exc:
             log_line("photo %s: %r" % (where(url), exc))
+            if part:
+                try:
+                    os.remove(part)
+                except OSError:
+                    pass
             return None
 
     @staticmethod
@@ -2219,7 +2273,8 @@ class Media:
         or None) on the GTK side. The name is made harmless and, if taken,
         numbered: «песня (2).mp3», unless replace (the person chose to write
         over it)."""
-        if not media_ok(url):
+        how = self.how(url)
+        if not how:
             log_line("save refused: %s" % where(url))
             GLib.idle_add(lambda: done(None) and False)
             return
@@ -2239,7 +2294,10 @@ class Media:
                         break
                     except FileExistsError:
                         continue
-                self.download(url, self.headers(), path + ".part")
+                if how == "own":
+                    self.own(url, path + ".part")
+                else:
+                    self.download(url, self.headers(), path + ".part")
                 os.replace(path + ".part", path)
                 log_line("saved %s as %s" % (where(url), path))
             except Exception as exc:
@@ -2272,8 +2330,10 @@ class Media:
     # --- voice ----------------------------------------------------------------
     def voice(self, url):
         """Play a voice message (the one playing stops); False if it cannot
-        be: no libmpv here, or a link not to be opened."""
-        if not media_ok(url):
+        be: no libmpv here, or a link not to be opened. Another messenger's
+        is fetched first and played when there (on_end() if it can't be)."""
+        how = self.how(url)
+        if not how:
             log_line("voice refused: %s" % where(url))
             return False
         if self._sound is None and not self._no_sound:
@@ -2286,6 +2346,18 @@ class Media:
         if self._sound is None:
             return False
         log_line("voice %s" % where(url))
+        self.wanted = url
+        if how == "own":
+            def fetched(path):
+                if self.wanted != url:
+                    return  # stopped or another asked for meanwhile
+                if path is None:
+                    self.on_end()
+                else:
+                    self._sound.play(path, self.agent)
+            self._sound.stop()  # the one playing stops now, not when this one is there
+            self._later(url, fetched)
+            return True
         self._sound.play(url, self.agent)
         return True
 
@@ -2294,16 +2366,26 @@ class Media:
         return self._sound.toggle() if self._sound else False
 
     def stop(self):
+        self.wanted = None
         if self._sound:
             self._sound.stop()
 
     # --- video and files ------------------------------------------------------
     def video(self, url, title):
-        """Full screen in the shell's player; False if it cannot be."""
-        if not media_ok(url):
+        """Full screen in the shell's player; False if it cannot be.
+        Another messenger's is fetched first (it plays when there)."""
+        how = self.how(url)
+        if not how:
             log_line("video refused: %s" % where(url))
             return False
         self.stop()
+        if how == "own":
+            self._later(url, lambda path: path and self._play_video(path, title))
+            return True
+        return self._play_video(url, title)
+
+    def _player_cmd(self, url, title):
+        """The command line that plays url full screen."""
         # No youtube-dl and no playlists: the link is played as it is.
         opts = {"ytdl": "no", "load-unsafe-playlists": "no", "user-agent": self.agent}
         player = next(filter(None, map(shutil.which, PLAYERS)), None)  # /usr/bin (ADR 0002)
@@ -2312,6 +2394,10 @@ class Media:
             cmd = [player, "--title", title, url] + ["%s=%s" % kv for kv in opts.items()]
         else:
             cmd = ["mpv", "--fs"] + ["--%s=%s" % kv for kv in opts.items()] + ["--", url]
+        return cmd
+
+    def _play_video(self, url, title):
+        cmd = self._player_cmd(url, title)
         log_line("video %s via %s" % (where(url), os.path.basename(cmd[0])))
         try:
             self.spawn(cmd)
@@ -2321,11 +2407,16 @@ class Media:
         return True
 
     def file(self, url):
-        """A file in the browser; False if it cannot be."""
-        if not media_ok(url):
+        """A file in the browser (another messenger's: fetched, then opened
+        as a file); False if it cannot be."""
+        how = self.how(url)
+        if not how:
             log_line("file refused: %s" % where(url))
             return False
         log_line("file %s" % where(url))
+        if how == "own":
+            self._later(url, lambda path: path and self.open_uri(GLib.filename_to_uri(path)))
+            return True
         return bool(self.open_uri(url))
 
 
@@ -3326,6 +3417,7 @@ class Max(Gtk.Application):
         self.counted = None  # (tab labels, subtitle, badge) as last shown
         self.tab = "chats"  # or "channels"
         self.media = media or Media()  # photos, voice, video, files: how MAX's CDNs are reached
+        self.media.own = self.backend.download  # what other messengers carry: through their links
         self.playing = None  # (progress bar, button, duration) of what plays
         self.playing_chat = None  # the chat it plays in
         self.playing_msg = None  # and its message

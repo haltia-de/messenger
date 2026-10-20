@@ -255,6 +255,12 @@ programs are found on `PATH` (`haltia-vplay`, `b8k-vplay` before 2.0: `shutil.wh
   Pause, Stop, Raise → `go_to_playing`); `mpris.changed()` after every change of what plays. The
   shell shows it on the program's button; the LauncherEntry count has no "playing". Play buttons use theme icons through `set_play(button, "play"|"pause"|"fail")`, whose
   `state` the tests read (⏸ is tiny in most fonts).
+  What another messenger carries has no link: its link gives a ref (`is_ref`: `"tg:…"`, never a
+  scheme of the web or of files), `Media.how(ref)` says `"own"`, and it is fetched through
+  `Media.own` — the window sets it to `Backend.download(ref, path)`, a blocking call from
+  Media's worker threads into the account's link (`link.download`) — into the photo cache;
+  voice, video and files are played or opened from there once fetched (a voice stopped or
+  switched meanwhile does not start late; one that cannot be fetched is told as `on_end`).
 - **Reactions.** Message dicts carry `reactions` ([[emoji, count]]) and `yours`; a long press on a
   bubble (`ChatView`'s `on_hold`) opens `Max.pick_reaction`, a popover of `REACTIONS`.
   `Backend.react` uses `messages.add_reaction`/`remove_reaction`; when MAX answers without counts

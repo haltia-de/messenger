@@ -54,6 +54,7 @@ class FakeLink:
         self.msgs = {}  # chat id -> [Message], oldest first
         self.links = {}  # https://max.ru/… -> Chat, not joined yet
         self.media = {}  # (chat id, msg id, kind) -> link MAX would give
+        self.files = {}  # ref -> bytes its download() writes (a messenger without links)
         self.counts = True  # react() answers with counts (MAX does not always)
         self.calls = []  # (operation, args) asked of MAX, in order
         self.ids = itertools.count(100000)
@@ -257,6 +258,11 @@ class FakeLink:
     async def media_url(self, chat_id, msg_id, item):
         self._call("media_url", chat_id=chat_id, msg_id=msg_id, kind=item["kind"])
         return self.media.get((chat_id, msg_id, item["kind"]))
+
+    async def download(self, ref, path):
+        self._call("download", ref=ref)
+        with open(path, "wb") as fh:
+            fh.write(self.files[ref])
 
     invites_value = "CONTACTS"  # CHATS_INVITE as MAX sends it at login
 

@@ -5,6 +5,7 @@ message cache and its gaps, pages, reactions, invites, renaming, removing;
 and the small helpers (phones, links, media hosts, photo pruning)."""
 import asyncio
 import os
+import threading
 
 from common import load, ok
 
@@ -477,6 +478,13 @@ back(B.log([{"event": "GO"}]))
 assert fake.asked("log") and not tg.asked("log")  # telemetry is MAX's only
 assert os.path.exists(os.path.join(bm.DATA, "telegram", "known.json"))  # its files apart
 assert "tg:77" not in bm.load_json(bm.KNOWN, [])
+tg.files["tg:voice:77:1"] = b"OggS"
+got = []  # Media's worker thread asks
+dl = os.path.join(bm.PHOTOS, "dl.part")
+t = threading.Thread(target=lambda: got.append(B.download("tg:voice:77:1", dl)))
+t.start()
+until(lambda: got)
+assert open(dl, "rb").read() == b"OggS" and tg.asked("download") == [{"ref": "tg:voice:77:1"}]
 tg.drop()  # one messenger without a connection: the other is asked all the same
 until(lambda: ("telegram", False) in said(ui, "connected"))
 got = []

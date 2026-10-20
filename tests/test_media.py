@@ -217,8 +217,61 @@ saver.save("https://fd.oneme.ru/g.pdf", folder, "g.pdf", paths.append)
 drain()
 assert paths[-1] is None and "g.pdf" not in os.listdir(folder) and "g.pdf.part" not in os.listdir(folder)
 hands.fail_download = False
+saver_downloads = list(hands.downloaded)
 assert bm.default_folder().endswith(os.sep + "MAX")
 ok("saving")
+
+# --- another messenger's attachments: no link, fetched by its link (own) --------------------
+owned = {}  # ref -> what its link fetches
+
+
+def own(ref, path):
+    if ref not in owned:
+        raise LookupError("not there")
+    with open(path, "wb") as fh:
+        fh.write(owned[ref])
+
+
+tgm = bm.Media(hands.spawn, hands.open_uri, hands.fetch, hands.player, hands.download)
+got = []
+tgm.photo("tg:photo:5:1", got.append)
+drain(0.2)
+assert not got and "photo refused: tg:photo:5:1" in log()  # no own hand: not fetched at all
+tgm.own = own
+owned.update({"tg:photo:5:1": png, "tg:voice:5:2": b"OggS", "tg:video:5:3": b"mp4",
+              "tg:file:5:4": b"%PDF"})
+for bad in ("file:///etc/passwd", "javascript:alert(1)", "http://i.oneme.ru/a", "tg"):
+    assert tgm.how(bad) is None, bad
+assert tgm.how("tg:photo:5:1") == "own" and tgm.how("https://i.oneme.ru/a") == "http"
+n = len(hands.fetched)
+tgm.photo("tg:photo:5:1", got.append)
+drain()
+assert got and got[0] is not None and len(hands.fetched) == n  # through own, not the web
+assert tgm.voice("tg:voice:5:2")
+drain()
+played = hands.sound.did[-1]
+assert played[0] == "play" and played[1].startswith(bm.PHOTOS) and open(played[1], "rb").read() == b"OggS"
+ended = []
+tgm.on_end = lambda: ended.append(1)
+assert tgm.voice("tg:voice:5:9")  # its link cannot fetch it: told as an end
+drain()
+assert ended and hands.sound.did[-1] == ("stop",)
+tgm.voice("tg:voice:5:2")
+tgm.stop()  # stopped before it was there: it does not start after
+drain()
+assert hands.sound.did[-1] == ("stop",)
+assert tgm.video("tg:video:5:3", "Мама")
+drain()
+cmd = hands.spawned[-1]
+assert any(c.startswith(bm.PHOTOS) for c in cmd) and not any(c.startswith("tg:") for c in cmd)
+assert tgm.file("tg:file:5:4")
+drain()
+assert hands.opened[-1].startswith("file://") and hands.opened[-1].endswith(".img")
+paths = []
+tgm.save("tg:file:5:4", folder, "Договор.pdf", paths.append)
+drain()
+assert paths[-1] and open(paths[-1], "rb").read() == b"%PDF" and len(hands.downloaded) == len(saver_downloads)
+ok("another messenger's attachments")
 
 # --- the log: 600, links without their signatures ----------------------------------------------
 assert oct(os.stat(bm.LOG).st_mode & 0o777) == "0o600"
