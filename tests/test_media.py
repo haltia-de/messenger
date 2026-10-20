@@ -25,7 +25,7 @@ def drain(sec=0.5):
 
 def log():
     try:
-        return open(bm.PLAYER_LOG).read()
+        return open(bm.LOG).read()
     except OSError:
         return ""
 
@@ -175,6 +175,6 @@ assert bm.default_folder().endswith(os.sep + "MAX")
 ok("saving")
 
 # --- the log: 600, links without their signatures ----------------------------------------------
-assert oct(os.stat(bm.PLAYER_LOG).st_mode & 0o777) == "0o600"
+assert oct(os.stat(bm.LOG).st_mode & 0o777) == "0o600"
 assert "SECRET" not in log() and "video vd.okcdn.ru/v.mp4 via mpv" in log()
 ok("log")

@@ -38,7 +38,8 @@ class FakeLink:
         self.counts = True  # react() answers with counts (MAX does not always)
         self.calls = []  # (operation, args) asked of MAX, in order
         self.ids = itertools.count(100000)
-        self.loop = self.events = None
+        self.loop = self.events = self.ended = None
+        self.runs = 0  # how many times the program started the link
         self.agent = "Mozilla/5.0 (X11; Linux x86_64) FakeLink"
 
     # --- building the state ---------------------------------------------------
@@ -107,6 +108,20 @@ class FakeLink:
     def reaction(self, cid, msg_id, reactions):
         self._push(self.events.on_reaction(cid, msg_id, [list(r) for r in reactions]))
 
+    def drop(self):
+        """The connection is lost for a while (PyMax connects again by itself:
+        back() is that)."""
+        self._push(self.events.on_disconnect("ConnectionError('fake')"))
+
+    def back(self):
+        self._push(self.events.on_login(self.me, list(self.rooms.values()),
+                                        [self.people[u] for u in self.contacts], self.agent, 7))
+
+    def give_up(self, why="fake: gave up"):
+        """run() raises, as PyMax's start does when it gives up for good;
+        the program starts the link again (run() once more)."""
+        self.loop.call_soon_threadsafe(self.ended.set_exception, RuntimeError(why))
+
     def _push(self, coro):
         def failed(fut):  # an event the program could not take: the test must see it
             if fut.exception() is not None:
@@ -124,9 +139,11 @@ class FakeLink:
 
     async def run(self, events):
         self.loop, self.events = asyncio.get_running_loop(), events
+        self.runs += 1
+        self.ended = self.loop.create_future()  # give_up() ends this run
         await events.on_login(self.me, list(self.rooms.values()),
                               [self.people[u] for u in self.contacts], self.agent, 7)
-        await asyncio.Event().wait()  # connected for good
+        await self.ended  # connected till then
 
     async def chats_page(self, marker=None):
         self._call("chats_page", marker=marker)

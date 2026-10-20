@@ -341,3 +341,67 @@ assert link.invites() == "ALL"
 link._watch_login()  # a second run does not wrap twice
 assert auth.require_payload_model.haltia_real.__module__ == "pymax.api.response"
 ok("the link's start and login settings")
+
+# --- the connection: lost, given up, started again; every request answered ------------------
+import time  # noqa: E402
+
+
+def until(cond, secs=5):
+    end = time.monotonic() + secs
+    while not cond():
+        assert time.monotonic() < end, "waited in vain"
+        drain()
+        time.sleep(0.01)
+
+
+bm.RETRY = (0.05, 0.05)
+fake = FakeLink()
+PETR = 40
+fake.person(PETR, "Пётр", contact=True)
+pc = fake.dialog(PETR)
+fake.say(pc, "Привет", PETR)
+ui = UI()
+B = bm.Backend(ui, fake)
+got = []
+B.run(B.send(pc, "раньше"), lambda res, err: got.append(err))  # no loop yet: answered all the same
+until(lambda: got)
+assert isinstance(got[0], bm.Offline)
+B.start()
+until(lambda: said(ui, "show_chats"))
+assert said(ui, "connected") == [(True,)] and B.online
+fake.drop()  # the Wi-Fi sleeps; PyMax connects again by itself
+until(lambda: said(ui, "connected")[-1] == (False,))
+got = []
+B.run(B.send(pc, "без связи"), lambda res, err: got.append(err))
+until(lambda: got)
+assert isinstance(got[0], bm.Offline) and not fake.asked("send")  # not sent at all
+fake.back()
+until(lambda: said(ui, "connected")[-1] == (True,))
+got = []
+B.run(B.send(pc, "снова"), lambda res, err: got.append((res, err)))
+until(lambda: got)
+assert got[0][1] is None and got[0][0]["text"] == "снова"
+fake.give_up()  # PyMax gave up: started again after a pause
+until(lambda: said(ui, "failed"))
+why, pause = said(ui, "failed")[0]
+assert "gave up" in why and pause == 0.05 and "link gave up" in open(bm.LOG).read()
+until(lambda: fake.runs == 2 and B.online)
+bm.RETRY = (30,)
+B.tries = 0
+fake.give_up()
+until(lambda: len(said(ui, "failed")) == 2)
+B.retry()  # the wait page's button: not 30 s
+until(lambda: fake.runs == 3 and B.online)
+
+
+class Gone:
+    gone = True  # a ChatView destroyed meanwhile
+
+
+got = []
+B.run(B.read(pc, 1), lambda res, err: got.append("gone"), owner=Gone())
+B.run(B.read(pc, 1), lambda res, err: got.append("here"))
+until(lambda: got)
+drain()
+assert got == ["here"]
+ok("the connection lost, given up and started again; requests always answered")

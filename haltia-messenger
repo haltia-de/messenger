@@ -167,6 +167,7 @@ PHOTO_DAYS = 30  # cached photos older than this are removed
 CHATS = os.path.join(PHOTOS, "chats")  # message cache, one file per chat
 KEEP = 80  # messages kept per chat on disk
 VIEWS = 6  # chats kept built in memory
+RETRY = (3, 10, 30, 60)  # s before the link to MAX is started again, then every last one
 
 
 def move_old_home():
@@ -225,7 +226,8 @@ EMOJI = (
 )
 RECENT = 16  # recent emoji kept
 PLAYERS = ("haltia-vplay", "b8k-vplay")  # Видео's player (b8k-vplay before 2.0) on PATH; else mpv
-PLAYER_LOG = os.path.join(PHOTOS, "player.log")  # what the players said, for when one fails
+LOG = os.path.join(PHOTOS, "haltia-messenger.log")  # what failed: the link, media, players
+OLD_LOG = os.path.join(PHOTOS, "player.log")  # the players' log before 2.4
 MONTHS = "янв фев мар апр мая июн июл авг сен окт ноя дек".split()
 COLOURS = ((0.21, 0.52, 0.89), (0.15, 0.64, 0.41), (0.90, 0.38, 0.0), (0.57, 0.25, 0.67),
            (0.75, 0.11, 0.16), (0.10, 0.58, 0.62), (0.53, 0.36, 0.24))
@@ -435,6 +437,8 @@ button.save.big { min-width: 76px; min-height: 76px; border-radius: 38px; }
 button.nowplay-chat { background-image: none; background-color: transparent; border: none;
                       box-shadow: none; min-height: 56px; }
 label.nowplay { font-size: 22px; color: #1c71d8; }
+.offline { background-color: #f6d32d; padding: 8px 12px; }
+label.offline { font-size: 22px; color: #3d3846; }
 label.saved { font-size: 22px; color: #ffffff; background-color: rgba(0, 0, 0, 0.6);
               border-radius: 14px; padding: 6px 16px; }
 button.file {
@@ -656,8 +660,9 @@ class PyMaxLink:
     events.on_qr(url) when a QR code is to be scanned, on_login(me, chats,
     contacts, agent, session_id) after every (re)login, on_message(msg),
     on_reaction(chat_id, msg_id, reactions) and on_delete(chat_id, [msg ids])
-    as they come. All of it runs in
-    the caller's asyncio loop."""
+    as they come, on_disconnect(why) when the connection is lost (PyMax
+    connects again by itself; on_login follows). run() ends, or raises,
+    only when PyMax gives up. All of it runs in the caller's asyncio loop."""
 
     def __init__(self, work_dir):
         self.work_dir = work_dir
@@ -680,6 +685,7 @@ class PyMaxLink:
         self.client.on_start()(self._started)
         self.client.on_message()(self._message)
         self.client.on_reaction_update()(self._reaction)
+        self.client.on_disconnect()(self._disconnected)
         await self.client.start()
 
     def _watch_deletions(self, client):
@@ -762,6 +768,9 @@ class PyMaxLink:
         await self.events.on_login(client.me.contact if client.me else None,
                                    list(client.chats or []), list(client.contacts or []),
                                    agent, device.client_session_id)
+
+    async def _disconnected(self, exc, _reconnect, _delay):
+        await self.events.on_disconnect(repr(exc))
 
     async def _message(self, msg, _client):
         await self.events.on_message(msg)
@@ -883,19 +892,29 @@ class PyMaxLink:
         await app.invoke(Opcode.LOG, payload, timeout=app.config.request_timeout)
 
 
+class Offline(Exception):
+    """No connection to MAX now: the request was not sent."""
+
+
 class Backend:
     """What the window asks of MAX, and what MAX tells it, on top of a link
     (PyMaxLink, or tests/fake_link.py): the chat list and its summaries,
     names, known people, the message cache and its gaps, pages, reactions.
     It runs in its own thread with an asyncio loop;
     the window calls it only through run(), and hears back through
-    GLib.idle_add. It is also the link's events object (on_qr, on_login,
-    on_message, on_reaction)."""
+    GLib.idle_add: every request is answered, with Offline while there is
+    no connection. It is also the link's events object (on_qr, on_login,
+    on_message, on_reaction, on_delete, on_disconnect). The link is started
+    again when it gives up, after RETRY's pauses (retry() cuts one short),
+    and the window told: ui.failed(why, pause), ui.connected(on)."""
 
     def __init__(self, ui, link=None):
         self.ui = ui
         self.link = link  # PyMaxLink unless given (tests)
         self.loop = None
+        self.online = False  # logged in and connected: requests go to MAX
+        self.tries = 0  # the link's starts in a row that ended without a login
+        self.wake = None  # set by retry(): the pause before the next start ends
         self.me = None
         self.names = {}
         self.chats = {}
@@ -905,35 +924,67 @@ class Backend:
         self.aliases = {int(k): v for k, v in load_json(ALIASES, {}).items()}
 
     def start(self):
+        # The loop is there before its thread runs: a request made at once waits in it.
+        self.loop = asyncio.new_event_loop()
         threading.Thread(target=self._thread, daemon=True).start()
 
     def _thread(self):
-        self.loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self.loop)
-        try:
-            self.loop.run_until_complete(self._main())
-        except Exception as exc:  # the client gave up for good
-            GLib.idle_add(self.ui.failed, repr(exc))
+        self.loop.run_until_complete(self._main())
 
-    def run(self, coro, done=None):
-        """Run a coroutine in the MAX thread; done(result, error) in the window's."""
-        if not self.loop:
+    def run(self, coro, done=None, owner=None):
+        """Run a coroutine in the MAX thread; done(result, error) in the
+        window's, always: an error (Offline) if the thread is not running.
+        Not called when owner (a ChatView) is gone by then."""
+        def answer(res, err):
+            if done and not getattr(owner, "gone", False):
+                done(res, err)
+            return False
+        if self.loop is None or self.loop.is_closed():
+            coro.close()
+            GLib.idle_add(answer, None, Offline())
             return
         fut = asyncio.run_coroutine_threadsafe(coro, self.loop)
-        if done:
-            def back(f):
-                try:
-                    res, err = f.result(), None
-                except Exception as exc:
-                    res, err = None, exc
-                GLib.idle_add(lambda: done(res, err) and False)
-            fut.add_done_callback(back)
+
+        def back(f):
+            try:
+                res, err = f.result(), None
+            except Exception as exc:
+                res, err = None, exc
+            GLib.idle_add(answer, res, err)
+        fut.add_done_callback(back)
+
+    def retry(self):
+        """Start the link again now, not after the pause (the wait page's button)."""
+        if self.loop is not None and self.wake is not None:
+            self.loop.call_soon_threadsafe(self.wake.set)
+
+    def ask(self):
+        """MAX can be asked now; else Offline, and nothing is sent."""
+        if not self.online:
+            raise Offline()
 
     async def _main(self):
         os.makedirs(DATA, mode=0o700, exist_ok=True)
         if self.link is None:
             self.link = PyMaxLink(DATA)
-        await self.link.run(self)
+        self.wake = asyncio.Event()
+        while True:  # the link lives till it gives up; then it is started again
+            try:
+                await self.link.run(self)
+                why = "соединение закрыто"
+            except Exception as exc:
+                why = repr(exc)
+            self.online = False
+            pause = RETRY[min(self.tries, len(RETRY) - 1)]
+            self.tries += 1
+            log_line("link gave up (%s); again in %s s" % (why, pause))
+            GLib.idle_add(self.ui.failed, why, pause)
+            self.wake.clear()
+            try:
+                await asyncio.wait_for(self.wake.wait(), pause)
+            except asyncio.TimeoutError:
+                pass
 
     # --- the link's events ------------------------------------------------------
     async def on_qr(self, qr_url):
@@ -948,6 +999,8 @@ class Backend:
             pass
         self.me = me.id if me else None
         self.agent = agent
+        self.online = True
+        self.tries = 0
         if me:
             self.names[self.me] = user_name(me)
         # On a reconnect the sync only brings chats that changed since the
@@ -983,6 +1036,7 @@ class Backend:
             if kind(c.type) == "DIALOG":
                 want.update(u for u in c.participants if u != self.me)
         await self.lookup(want)
+        GLib.idle_add(self.ui.connected, True)
         if self.me:
             GLib.idle_add(self.ui.logged_in, self.me, session_id)
             GLib.idle_add(self.ui.show_invites, self.link.invites())
@@ -1000,6 +1054,12 @@ class Backend:
         if msg.chat_id is not None:
             cache_add(msg.chat_id, [out])
         GLib.idle_add(self.ui.incoming, out, self.summary(chat) if chat is not None else None)
+
+    async def on_disconnect(self, why):
+        """The connection is lost; the link connects again by itself."""
+        self.online = False
+        log_line("connection lost: %s" % why)
+        GLib.idle_add(self.ui.connected, False)
 
     async def on_delete(self, chat_id, msg_ids):
         """Messages deleted (by their sender for everyone, or here): out of
@@ -1147,6 +1207,7 @@ class Backend:
         if len(cached) >= PAGE and last and not chat.new_messages and \
                 any(m["id"] == last.id for m in cached[-5:]):
             return [], False
+        self.ask()
         msgs = await self.link.history(chat_id, PAGE)
         if any(m.sender == self.me for m in msgs):
             self.remember(self.peer(chat))
@@ -1176,6 +1237,7 @@ class Backend:
     async def older(self, chat_id, before):
         """PAGE messages older than the time before (ms), oldest first; not
         cached, the cache keeps only the newest."""
+        self.ask()
         if not await self.chat(chat_id):
             return []
         msgs = await self.link.history(chat_id, PAGE, before=before)
@@ -1186,11 +1248,13 @@ class Backend:
     async def media_url(self, chat_id, msg_id, item):
         """Where a video or a file of a message can be fetched (MAX hands
         out short-lived links on request)."""
+        self.ask()
         return await self.link.media_url(chat_id, msg_id, item)
 
     async def forward(self, chat_id, msg_id, from_chat_id):
         """Forward a message into a chat; (the new message, that chat's
         summary) as the window shows them."""
+        self.ask()
         msg = await self.link.forward(chat_id, msg_id, from_chat_id)
         out = self.message(msg)
         cache_add(chat_id, [out])
@@ -1200,6 +1264,7 @@ class Backend:
         return out, self.summary(chat) if chat is not None else None
 
     async def send(self, chat_id, text):
+        self.ask()
         chat = self.chats.get(chat_id)
         # A dialog not started yet is numbered own id XOR theirs.
         self.remember(self.peer(chat) if chat else chat_id ^ self.me if self.me else None)
@@ -1211,18 +1276,21 @@ class Backend:
 
     async def find_phone(self, phone):
         """The person with this phone number, if they are in MAX."""
+        self.ask()
         user = await self.link.find_phone(phone)
         self.names[user.id] = user_name(user)
         return {"id": user.id, "name": self.name(user.id),
                 "chat": self.me ^ user.id if self.me else None}  # their dialog, as MAX numbers it
 
     async def add_contact(self, user_id):
+        self.ask()
         user = await self.link.add_contact(user_id)
         self.names[user.id] = user_name(user)
         self.remember(user.id)
 
     async def link_info(self, link):
         """The channel or group behind a link, before joining it."""
+        self.ask()
         chat = await self.link.link_info(link)
         if chat is None:
             return None
@@ -1231,6 +1299,7 @@ class Backend:
                 "joined": chat.id in self.chats}
 
     async def join(self, link):
+        self.ask()
         chat = await self.link.join(link)
         self.chats[chat.id] = chat
         return self.summary(chat)
@@ -1238,6 +1307,7 @@ class Backend:
     async def remove(self, chat_id):
         """Leave a channel or group, delete a dialog: for this account only
         (the link can do no other)."""
+        self.ask()
         chat = self.chats.get(chat_id)
         stamp = chat.last_event_time if chat else None
         if chat is not None and kind(chat.type) in ("CHAT", "CHANNEL"):
@@ -1254,6 +1324,7 @@ class Backend:
     async def react(self, chat_id, msg_id, emoji):
         """Put the account's reaction on a message (None takes it off);
         (reactions, own emoji) as MAX has them afterwards, or None."""
+        self.ask()
         info = await self.link.react(chat_id, msg_id, emoji)
         if info is None:
             return None  # taken, but MAX sent no counts: the window counts itself
@@ -1273,11 +1344,12 @@ class Backend:
         return [self.summary(c) for c in self.chats.values() if self.peer(c) == user_id]
 
     async def read(self, chat_id, msg_id):
+        self.ask()
         await self.link.read(chat_id, msg_id)
 
     async def log(self, events):
         """Telemetry events (dicts shaped as PyMax's TelemetryEvent) to MAX."""
-        if self.link is not None:
+        if self.link is not None and self.online:
             await self.link.log(events)
 
 
@@ -1530,12 +1602,12 @@ def log_open():
     """The media log, mode 600, started anew past 256 KB; None if it can't be."""
     try:
         os.makedirs(PHOTOS, mode=0o700, exist_ok=True)
-        if os.path.getsize(PLAYER_LOG) > 256 * 1024:
-            os.remove(PLAYER_LOG)
+        if os.path.getsize(LOG) > 256 * 1024:
+            os.remove(LOG)
     except OSError:
         pass
     try:
-        fd = os.open(PLAYER_LOG, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        fd = os.open(LOG, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
         return os.fdopen(fd, "a", buffering=1)
     except OSError:
         return None
@@ -1718,7 +1790,7 @@ class Media:
     GTK side), audio files too; a
     video opens full screen in haltia-vplay (mpv elsewhere) without
     youtube-dl or playlists; a file in the browser. What fails, and what
-    the players say, goes to PLAYER_LOG (600, host and path only).
+    the players say, goes to LOG (600, host and path only).
 
     It also saves what a message carries into a folder (save()), under a
     harmless name that never overwrites another.
@@ -1770,8 +1842,13 @@ class Media:
 
     @staticmethod
     def prune():
-        """Photos not shown for PHOTO_DAYS go (each one shown is touched)."""
+        """Photos not shown for PHOTO_DAYS go (each one shown is touched);
+        the players' log of before 2.4 too."""
         limit = time.time() - PHOTO_DAYS * 86400
+        try:
+            os.remove(OLD_LOG)
+        except OSError:
+            pass
         try:
             names = os.listdir(PHOTOS)
         except OSError:
@@ -2086,6 +2163,7 @@ class ChatView:
         # (oldest first) above the top, a few at a time (_step).
         self.pending_new, self.pending_old = [], []
         self.active = self.entered = self.building = False
+        self.gone = False  # destroyed: answers on their way (Backend.run) are not given
         self.at_bottom = True  # stays at the newest while things come in
         self.anchor = None  # distance from the bottom kept while bubbles go in above
         self.moving = False  # the place is being set here, not by the reader
@@ -2288,6 +2366,7 @@ class ChatView:
 
     def destroy(self):
         self.active = False
+        self.gone = True  # answers still on their way are not given to it
         self.widget.destroy()
 
     # --- building ---------------------------------------------------------------
@@ -2936,7 +3015,15 @@ class Max(Gtk.Application):
         self.nowplay.set_no_show_all(True)
         for w in (back_to, self.nowplay_label, self.nowplay_toggle, self.nowplay_stop):
             w.show()
+        # No connection to MAX: the person stays where they are, told here.
+        self.offline = Gtk.Box()
+        self.offline.get_style_context().add_class("offline")
+        self.offline.pack_start(label("Нет связи с MAX — переподключаюсь…", "offline",
+                                      xalign=0.5, wrap=True), True, True, 0)
+        self.offline.set_no_show_all(True)
+        self.offline.get_children()[0].show()
         column = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        column.pack_start(self.offline, False, False, 0)
         column.pack_start(self.nowplay, False, False, 0)
         column.pack_start(self.stack, True, True, 0)
         self.win.add(column)
@@ -2944,6 +3031,12 @@ class Max(Gtk.Application):
         wait.set_valign(Gtk.Align.CENTER)
         self.wait_text = label("Подключение к MAX…", "big", xalign=0.5)
         wait.pack_start(self.wait_text, False, False, 0)
+        self.retryb = Gtk.Button(label="Повторить")
+        self.retryb.get_style_context().add_class("suggested-action")
+        self.retryb.set_halign(Gtk.Align.CENTER)
+        self.retryb.connect("clicked", lambda _b: self.retry())
+        self.retryb.set_no_show_all(True)
+        wait.pack_start(self.retryb, False, False, 0)
         self.stack.add_named(wait, "wait")
 
         qr = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=20)
@@ -3221,10 +3314,13 @@ class Max(Gtk.Application):
 
     # called from the MAX thread through idle_add
     def show_qr(self, path):
+        """A login is needed (the first, or MAX ended the last one): from
+        any page; the cache stays."""
         self.qr_image.set_from_pixbuf(GdkPixbuf.Pixbuf.new_from_file(path))
-        if self.stack.get_visible_child_name() == "settings":
-            self.back.hide()
-            self.title.set_text(NAME)
+        self.back.hide()
+        self.title.set_text(NAME)
+        self.sub.set_text("")
+        self.offline.hide()
         self.stack.set_visible_child_name("qr")
         self.win.present()  # a login needs the person, background or not
         return False
@@ -3236,10 +3332,31 @@ class Max(Gtk.Application):
         self.moved()
         return False
 
-    def failed(self, why):
-        self.wait_text.set_text("Нет связи с MAX.\n%s" % why[:120])
-        self.stack.set_visible_child_name("wait")
+    def failed(self, _why, pause):
+        """The link gave up; Backend starts it again after pause s (the
+        reason is in the log). With a list shown the person stays where
+        they are, under the bar; else the wait page says it, with a button."""
+        self.connected(False)
+        if self.chatlist.chats:
+            return False
+        self.wait_text.set_text("Нет связи с MAX.\nПовторю через %d с." % pause)
+        self.retryb.show()
+        if self.stack.get_visible_child_name() != "settings":
+            self.stack.set_visible_child_name("wait")
         return False
+
+    def connected(self, on):
+        """The connection to MAX is there (on) or lost: the bar says so."""
+        self.offline.set_visible(not on and self.stack.get_visible_child_name() != "qr")
+        if on:
+            self.retryb.hide()
+            self.wait_text.set_text("Подключение к MAX…")
+        return False
+
+    def retry(self):
+        self.retryb.hide()
+        self.wait_text.set_text("Подключение к MAX…")
+        self.backend.retry()
 
     def show_chats(self, summaries):
         self.chatlist.replace(summaries)
@@ -4019,7 +4136,7 @@ class Max(Gtk.Application):
             view = ChatView(
                 chat_id, self.about(chat_id).get("type"), cache_read(chat_id),
                 fetch_older=lambda before, done: self.backend.run(
-                    self.backend.older(chat_id, before), done),
+                    self.backend.older(chat_id, before), done, owner=self.views.get(chat_id)),
                 on_hold=lambda msg_id, widget: self.pick_reaction(chat_id, msg_id, widget),
                 on_media=lambda m, item, ctl: self.media_tapped(chat_id, m, item, ctl),
                 on_react=lambda msg_id, emoji: self.react(chat_id, msg_id, emoji),
@@ -4080,7 +4197,7 @@ class Max(Gtk.Application):
                 self.chatlist.read(chat_id)
                 self.fill_list()
 
-        self.backend.run(self.backend.history(chat_id), done)
+        self.backend.run(self.backend.history(chat_id), done, owner=view)
 
     # voice messages, videos, files
     def media_tapped(self, chat_id, m, item, controls):
@@ -4349,7 +4466,8 @@ class Max(Gtk.Application):
         def done(msg, err):
             self.sendb.set_sensitive(True)
             if err:
-                self.sub.set_text("не отправлено, попробуйте ещё раз")
+                self.sub.set_text("Нет связи — сообщение не отправлено"
+                                  if isinstance(err, Offline) else "не отправлено, попробуйте ещё раз")
                 return
             self.entry.set_text("")
             self.sub.set_text("")

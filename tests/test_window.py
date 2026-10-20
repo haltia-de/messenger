@@ -768,3 +768,44 @@ screens += [e["params"]["screen_to"] for call in fake.asked("log") for e in call
             if e["event"] == "GO"]
 assert {bm.SCREEN_CHATS, bm.SCREEN_CHAT, bm.SCREEN_SEARCH} <= set(screens), screens
 ok("telemetry")
+
+# --- no connection: the bar, the place kept, a message not lost; a login from anywhere ---------
+bm.RETRY = (0.05,)
+app.open(mama)
+spin(0.3)
+fake.drop()  # the Wi-Fi sleeps
+wait(lambda: app.offline.get_visible(), what="the bar")
+assert app.stack.get_visible_child_name() == "chat"  # the person stays where they are
+app.entry.set_text("Позвоню вечером")
+app.send()
+wait(lambda: app.sendb.get_sensitive(), what="the send answered")
+assert app.entry.get_text() == "Позвоню вечером" and app.sub.get_text().startswith("Нет связи")
+assert not [a for a in fake.asked("send") if a.get("text") == "Позвоню вечером"]
+shot("offline.png")
+fake.back()
+wait(lambda: not app.offline.get_visible(), what="the bar gone")
+fake.give_up()  # PyMax gave up: started again, the chat still in front
+wait(lambda: fake.runs == 2 and app.backend.online, what="the link again")
+spin(0.1)
+assert app.stack.get_visible_child_name() == "chat" and not app.offline.get_visible()
+gone = app.views[mama]
+app.views.pop(mama).destroy()
+app.view = None
+assert gone.gone  # answers still coming for it are not given to it
+listed = app.chatlist.chats
+app.chatlist.chats = {}  # as before any list: the wait page tells, with a button
+app.failed("RuntimeError()", 3)
+assert app.stack.get_visible_child_name() == "wait" and app.retryb.get_visible()
+assert "3 с" in app.wait_text.get_text()
+app.retryb.clicked()
+assert not app.retryb.get_visible() and app.wait_text.get_text() == "Подключение к MAX…"
+app.chatlist.chats = listed
+qr = os.path.join(bm.DATA, "qr.png")
+bm.qr_png("https://max.ru/:auth/x", qr)
+app.open(mama)
+spin(0.2)
+app.show_qr(qr)  # MAX ended the login: the code, from the chat
+assert app.stack.get_visible_child_name() == "qr" and not app.back.get_visible()
+app.show_chats(list(listed.values()))
+assert app.stack.get_visible_child_name() == "chats"
+ok("no connection, and a login from anywhere")

@@ -93,7 +93,14 @@ programs are found on `PATH` (`haltia-vplay`, `b8k-vplay` before 2.0: `shutil.wh
 - **Two threads.** `Backend` runs in its own thread with its own asyncio loop. The GTK side calls
   into it only through `Backend.run(coro, done)`; results and events come back to GTK only via
   `GLib.idle_add`. Keep this rule: never touch GTK widgets from the MAX thread, never await the
-  link from the GTK thread.
+  link from the GTK thread. `run(coro, done, owner)` always answers: with `Offline` when there
+  is no connection (`Backend.online`: set by `on_login`, cleared by the link's `on_disconnect`;
+  requests that need MAX call `ask()` first) or no loop, and never to an `owner` that is `gone`
+  (a destroyed `ChatView`). The loop is made in `start()`. When the link's `run` ends or raises
+  (PyMax gave up), `_main` starts it again after `RETRY`'s pauses (`retry()`, the wait page's
+  «Повторить», cuts one short) and tells `ui.failed(why, pause)`; `ui.connected(on)` shows the
+  «Нет связи» bar, the person stays on their page (the wait page only before any list). A new
+  QR (MAX ended the login) shows the QR page from anywhere.
 - **The link to MAX** (`PyMaxLink`, CONTEXT.md «Связь с MAX»). Every request to MAX and every
   event from it goes through one link object: `run(events)`, `chats_page`, `chats`, `users`,
   `history`, `read`, `send`, `find_phone`, `add_contact`, `link_info`, `join`, `leave`, `delete`
@@ -188,7 +195,8 @@ programs are found on `PATH` (`haltia-vplay`, `b8k-vplay` before 2.0: `shutil.wh
   `PHOTO_DAYS` unshown), plays voice through libmpv (`voice`/`toggle`/`stop`, `on_time`/`on_end`;
   an `end-file` with reason ABORTED is a stop or a switch, not an end), starts a video in
   `haltia-vplay` (`b8k-vplay` before 2.0; on `PATH`, Видео's package) or `mpv --fs` with `ytdl=no` and `load-unsafe-playlists=no` (`video(url, title)`), and
-  gives a file to the browser (`file(url)`). What fails goes to `~/.cache/haltia-messenger/player.log`
+  gives a file to the browser (`file(url)`). What fails goes to `~/.cache/haltia-messenger/haltia-messenger.log` (`LOG`; the link's
+  losses and restarts too; `player.log` before 2.4, removed by `prune`)
   (600, host and path only; the players' own output too). Its hands come in at creation —
   `spawn`, `open_uri`, `fetch`, `player` — real by default, `tests/fake_hands.py` in tests.
   `media_of` turns AUDIO/VIDEO/FILE attachments into `media` items; a FILE named like audio
