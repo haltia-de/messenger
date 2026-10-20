@@ -809,6 +809,14 @@ screens += [e["params"]["screen_to"] for call in fake.asked("log") for e in call
 assert {bm.SCREEN_CHATS, bm.SCREEN_CHAT, bm.SCREEN_SEARCH} <= set(screens), screens
 ok("telemetry")
 
+# --- Telegram without the application's keys: its card says so, its switch cannot be turned on ---
+c = [c for c in app.settings_cards.get_children() if c.account == "telegram"][0]
+sw = [w for w in c.get_children()[0].get_children() if isinstance(w, Gtk.Switch)][0]
+assert c.state == "off" and not sw.get_sensitive() and not sw.get_active()
+assert any(isinstance(w, Gtk.Label) and "api_id" in w.get_text() for w in c.get_children())
+assert not app.tagged  # one messenger: the rows say nothing of whose
+ok("Telegram without keys")
+
 # --- no connection: the bar, the place kept, a message not lost; a login from anywhere ---------
 bm.RETRY = (0.05,)
 app.open(mama)

@@ -6,8 +6,11 @@ line: the term, its name in the code, what it is.
 - **Связь с MAX** (MAX link, `PyMaxLink`; `FakeLink` in tests): every request
   to MAX and every event from it, in the link's own Person, Chat and Message;
   nothing above it knows PyMax.
+- **Связь с Telegram** (Telegram link, `TelethonLink`): the same for
+  Telegram through Telethon; its ids are `"tg:…"` strings, and what its
+  messages carry it fetches itself (refs, not links).
 - **Аккаунт** (Account, `Account`; all of them in `Backend.accounts`): the
-  person's account in one messenger (MAX; later Telegram) on top of its
+  person's account in one messenger (MAX, Telegram) on top of its
   link: its chats, names, known people and names given here; requests go to
   it by the ids it owns.
 - **Медиа** (Media, `Media`): fetching and playing what messages carry —

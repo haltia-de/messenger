@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0
 # Copyright (C) 2026 Mikhail Nevskiy
-"""Сообщения (Messages): an unofficial client for the MAX messenger, no web
-browser, part of the Haltia desktop.
+"""Сообщения (Messages): an unofficial client for the MAX messenger (and
+Telegram, through Telethon: TelethonLink), no web browser, part of the
+Haltia desktop.
 
 io.github.haltia_de.Messenger: a desktop program of its own, on any GTK 3
 desktop; the Haltia shell meets it only through freedesktop standards (its
@@ -94,6 +95,7 @@ offers no renaming of contacts.
 import asyncio
 import dataclasses
 import hashlib
+import importlib.util
 import json
 import os
 import re
@@ -107,7 +109,8 @@ import configparser
 import time
 import urllib.parse
 import urllib.request
-from datetime import date, datetime
+import zlib
+from datetime import date, datetime, timezone
 
 # One id everywhere (ADR 0004 of haltia-de/device-lenovo-b8000h): the
 # GApplication, the .desktop file, the window, the icon, AppStream, MPRIS.
@@ -204,8 +207,34 @@ def move_old_home():
 move_old_home()
 SETTINGS = Settings("messenger", CONFIG)  # ~/.config/haltia/messenger.conf, [messenger]
 KEYRING = AUTO  # the Secret Service if one answers; tests put a fake here
-MESSENGERS = (("max", "MAX"),)  # the accounts there can be: (account, its name on the screen)
+MESSENGERS = (("max", "MAX"), ("telegram", "Telegram"))  # (account, its name on the screen)
+# This program's keys of Telegram's API (my.telegram.org); [telegram] api_id
+# and api_hash in messenger.conf take their place.
+TG_API_ID = 0
+TG_API_HASH = ""
+TG_HOSTS = ("t.me", "telegram.me")
+# Telegram's reactions for REACTIONS (it has no 😂 or 😮, and ❤ without the
+# emoji's variation selector), and back.
+TG_REACTION = {"❤️": "❤", "😂": "🤣", "😮": "😱"}
+QR_HINT = {"max": "Откройте MAX на телефоне и отсканируйте этот код",
+           "telegram": "В Telegram на телефоне: Настройки → Устройства → "
+                       "Подключить устройство, и отсканируйте этот код"}
 _vault = []
+
+
+def telegram_keys():
+    """(api_id, api_hash) of Telegram's API: [telegram] in messenger.conf,
+    else this program's own; None if there are none."""
+    conf = configparser.ConfigParser(interpolation=None)
+    try:
+        conf.read(SETTINGS.path, encoding="utf-8")
+        api_id = int(conf.get("telegram", "api_id", fallback=0) or 0)
+    except (configparser.Error, UnicodeDecodeError, ValueError):
+        api_id = 0
+    api_hash = conf.get("telegram", "api_hash", fallback="") if api_id else ""
+    if not (api_id and api_hash):
+        api_id, api_hash = TG_API_ID, TG_API_HASH
+    return (api_id, api_hash) if api_id and api_hash else None
 
 
 def secrets():
@@ -579,7 +608,7 @@ def initials_icon(name, key, size=64):
     area = Gtk.DrawingArea()
     area.set_size_request(size, size)
     letters = "".join(w[0] for w in (name or "?").split()[:2]).upper() or "?"
-    colour = COLOURS[int(key) % len(COLOURS)]
+    colour = COLOURS[(key if isinstance(key, int) else zlib.crc32(str(key).encode())) % len(COLOURS)]
 
     def draw(_w, cr):
         cr.set_source_rgb(*colour)
@@ -610,13 +639,17 @@ def phone_of(text):
 
 
 def link_of(text):
-    """A MAX link to a channel or group (max.ru/name, max.ru/join/…, @name)
-    as https://max.ru/…, or None."""
+    """A link to a channel or group: MAX's (max.ru/name, max.ru/join/…,
+    @name) as https://max.ru/…, Telegram's (t.me/name, t.me/+…) as
+    https://t.me/…; else None."""
     text = text.strip()
     if re.fullmatch(r"@[\w.]+", text):
         return "https://max.ru/" + text[1:]
     m = re.fullmatch(r"(?:https?://)?(?:web\.)?max\.ru/([\w./-]+)", text, re.I)
-    return "https://max.ru/" + m.group(1).strip("/") if m else None
+    if m:
+        return "https://max.ru/" + m.group(1).strip("/")
+    m = re.fullmatch(r"(?:https?://)?(?:t|telegram)\.me/([\w+./-]+)", text, re.I)
+    return "https://t.me/" + m.group(1).strip("/") if m else None
 
 
 def reactions_of(info):
@@ -1130,6 +1163,423 @@ class PyMaxLink:
         payload = TelemetryPayload(events=[TelemetryEvent(**e) for e in events]).to_payload()
         await app.invoke(Opcode.LOG, payload, timeout=app.config.request_timeout)
 
+# --- Telegram ----------------------------------------------------------------------
+# Its ids here are strings, "tg:" and Telethon's marked peer id: a person's
+# and their dialog's the same ("tg:42"), a group's negative, a channel's
+# -100…. What a message carries is fetched by the link: a ref "tg:<chat>/<msg>"
+# (its photo, voice, video, file), "/thumb" after it for a video's preview.
+
+TG_SERVICE = {"MessageActionChatAddUser": "добавлен участник",
+              "MessageActionChatDeleteUser": "участник вышел",
+              "MessageActionChatJoinedByLink": "вступил по ссылке",
+              "MessageActionChatJoinedByRequest": "вступил по заявке",
+              "MessageActionChatEditTitle": "новое название",
+              "MessageActionChatEditPhoto": "новое фото чата",
+              "MessageActionPinMessage": "закреплено сообщение",
+              "MessageActionChatCreate": "чат создан",
+              "MessageActionChannelCreate": "канал создан",
+              "MessageActionPhoneCall": "звонок"}
+
+
+def tg_id(peer_id):
+    return "tg:%d" % peer_id
+
+
+def tg_number(some_id):
+    """Telethon's marked peer id of a "tg:…" id."""
+    return int(some_id.split(":", 1)[1].split("/", 1)[0])
+
+
+def tg_person(entity):
+    """A Person of Telethon's user (a channel or group as a sender: its title)."""
+    from telethon import utils
+
+    if hasattr(entity, "title"):
+        name = entity.title
+    elif getattr(entity, "deleted", False):
+        name = "Удалённый аккаунт"
+    else:
+        name = " ".join(x for x in (entity.first_name, entity.last_name) if x) or \
+            (entity.username or "")
+    return Person(tg_id(utils.get_peer_id(entity)), name)
+
+
+def tg_reactions(reactions):
+    """[[emoji, count]] and the own one of Telegram's MessageReactions; its
+    custom emoji left out, its emoji as REACTIONS has them."""
+    from telethon.tl import types
+
+    back = {v: k for k, v in TG_REACTION.items()}
+    counts, yours = [], None
+    for r in getattr(reactions, "results", None) or []:
+        if isinstance(r.reaction, types.ReactionEmoji) and r.count:
+            emoji = back.get(r.reaction.emoticon, r.reaction.emoticon)
+            counts.append([emoji, r.count])
+            if r.chosen_order is not None:
+                yours = emoji
+    return counts, yours
+
+
+def tg_message(msg, me=None):
+    """A Message of Telethon's: its text, photos, voice, audio, video and
+    files as refs the link fetches, what is not shown as notes. Its sender
+    is me (the account's id) when it is outgoing: Telegram leaves it out
+    in a dialog."""
+    from telethon.tl import types
+
+    chat = tg_id(msg.chat_id)
+    ref = "%s/%d" % (chat, msg.id)
+    sender = me if msg.out and me else tg_id(msg.sender_id) if msg.sender_id else chat
+    out = Message(msg.id, chat, sender, int(msg.date.timestamp() * 1000),
+                  getattr(msg, "message", None) or "")
+    if isinstance(msg, types.MessageService):
+        out.notes.append(TG_SERVICE.get(type(msg.action).__name__, "служебное сообщение"))
+        return out
+    f = msg.file
+    if msg.photo:
+        out.photos.append(ref)
+        out.parts.append("")
+    elif msg.voice:
+        out.media.append({"kind": "audio", "url": ref, "duration": f.duration or 0})
+        out.parts.append("голосовое сообщение")
+    elif msg.video or msg.video_note or msg.gif:
+        thumbs = getattr(msg.document, "thumbs", None)
+        out.media.append({"kind": "video", "id": ref, "thumb": ref + "/thumb" if thumbs else "",
+                          "duration": f.duration or 0})
+        out.parts.append("видео")
+    elif msg.sticker:
+        out.notes.append("стикер")
+        out.parts.append("стикер")
+    elif msg.audio:
+        name = f.name or " — ".join(x for x in (f.performer, f.title) if x) or "аудио"
+        out.media.append({"kind": "audio", "url": ref, "duration": f.duration or 0,
+                          "name": name, "size": f.size or 0})
+        out.parts.append("аудио «%s»" % name)
+    elif msg.document:
+        name = f.name or "файл"
+        out.media.append({"kind": "file", "id": ref, "name": name, "size": f.size or 0})
+        out.parts.append("файл «%s»" % name)
+    elif msg.geo or msg.venue:
+        out.notes.append("место на карте")
+        out.parts.append("место на карте")
+    elif msg.contact:
+        out.notes.append("контакт")
+        out.parts.append("контакт")
+    elif msg.poll:
+        out.notes.append("опрос")
+        out.parts.append("опрос")
+    out.reactions, out.yours = tg_reactions(msg.reactions)
+    if msg.fwd_from is not None:
+        fwd = msg.forward
+        origin = getattr(fwd, "chat", None) or getattr(fwd, "sender", None)
+        name = tg_person(origin).name if origin is not None else msg.fwd_from.from_name
+        out.fwd = {"chat": name, "sender": tg_id(fwd.sender_id) if getattr(fwd, "sender_id", None)
+                   else None}
+    return out
+
+
+def tg_chat(entity, me, unread=0, last=None):
+    """A Chat of Telethon's user (a dialog with them), group or channel."""
+    from telethon import utils
+    from telethon.tl import types
+
+    cid = tg_id(utils.get_peer_id(entity))
+    if isinstance(entity, types.User):
+        kind, title = "DIALOG", None
+        members = [me] if entity.is_self else [me, cid]
+    else:
+        broadcast = isinstance(entity, types.Channel) and entity.broadcast
+        kind, title, members = "CHANNEL" if broadcast else "CHAT", entity.title, [me]
+    count = getattr(entity, "participants_count", None) or len(members)
+    chat = Chat(cid, kind, title, members, count, unread)
+    if last is not None:
+        chat.last = tg_message(last, me)
+        chat.time = chat.last.time
+    return chat
+
+
+class TelethonLink:
+    """The link to Telegram through Telethon (MTProto), as PyMaxLink is to
+    MAX: the same operations and events, the link's own Person, Chat and
+    Message (tg_person, tg_chat, tg_message), and Telethon kept to itself.
+
+    run(events) signs in by a QR code (events.on_qr(url), a new one when it
+    expires), asks the cloud password when the account has one
+    (events.on_password(wrong) answers it), keeps the login as Telethon's
+    StringSession in the keyring, and lives as long as Telethon's
+    connection (it connects again by itself; run() ends when it gives up)."""
+
+    account = "telegram"
+    label = "Telegram"
+    prefix = "tg:"
+    hosts = TG_HOSTS
+    can = frozenset({"phone", "links", "react", "forward"})
+
+    @staticmethod
+    def dialog_of(_me, user):
+        """A dialog's id is the person's."""
+        return user
+
+    def __init__(self, work_dir, vault=None):
+        self.work_dir = work_dir
+        self.vault = vault  # secrets() unless given
+        self.client = None
+        self.events = None
+        self.me = None
+        self.people = {}  # id -> Person met (the dialogs', senders'): users() asks only for others
+
+    def _met(self, msg):
+        """The sender of a message, as Telethon brought it along."""
+        sender = getattr(msg, "sender", None)
+        if sender is not None:
+            person = tg_person(sender)
+            self.people[person.id] = person
+
+    def _client(self, session):
+        from telethon import TelegramClient
+        from telethon.sessions import StringSession
+
+        keys = telegram_keys()
+        if keys is None:
+            raise RuntimeError("no Telegram API keys")
+        return TelegramClient(StringSession(session or ""), *keys, device_model="Linux",
+                              system_version="GTK", app_version="haltia-messenger", lang_code="ru",
+                              system_lang_code="ru", base_logger="haltia-messenger.telegram")
+
+    async def run(self, events):
+        from telethon import events as tev
+        from telethon.errors import PasswordHashInvalidError, SessionPasswordNeededError
+        from telethon.tl import functions, types
+
+        self.events = events
+        vault = self.vault or secrets()
+        kept = await asyncio.to_thread(vault.get, self.account)
+        client = self.client = self._client(kept)
+        try:
+            await client.connect()
+            if not await client.is_user_authorized():
+                qr = await client.qr_login()
+                while True:
+                    await events.on_qr(qr.url)
+                    try:
+                        await qr.wait()
+                        break
+                    except asyncio.TimeoutError:
+                        await qr.recreate()
+                    except SessionPasswordNeededError:
+                        wrong = False
+                        while True:
+                            password = await events.on_password(wrong)
+                            try:
+                                await client.sign_in(password=password)
+                                break
+                            except PasswordHashInvalidError:
+                                wrong = True
+                        break
+                await asyncio.to_thread(vault.put, self.account, client.session.save())
+            client.add_event_handler(self._message, tev.NewMessage())
+            client.add_event_handler(self._deleted, tev.MessageDeleted())
+            client.add_event_handler(self._reaction, tev.Raw(types.UpdateMessageReactions))
+            me = await client.get_me()
+            self.me = tg_id(me.id)
+            chats = []
+            async for d in client.iter_dialogs(limit=300):
+                chats.append(tg_chat(d.entity, self.me, d.unread_count, d.message))
+                person = tg_person(d.entity)
+                self.people[person.id] = person
+            try:
+                found = await client(functions.contacts.GetContactsRequest(hash=0))
+                contacts = [tg_person(u) for u in getattr(found, "users", [])]
+            except Exception as exc:
+                log_line("telegram contacts: %r" % exc)
+                contacts = []
+            await events.on_login(tg_person(me), chats, contacts, None, 0)
+            await client.run_until_disconnected()
+        finally:
+            await client.disconnect()
+
+    async def signed_in(self):
+        return await asyncio.to_thread((self.vault or secrets()).get, self.account) is not None
+
+    async def logout(self):
+        """Out of the account on Telegram's side too (its session ended
+        there), then forgotten here."""
+        vault = self.vault or secrets()
+        kept = await asyncio.to_thread(vault.get, self.account)
+        if kept:
+            client = self._client(kept)
+            try:
+                await asyncio.wait_for(client.connect(), 15)
+                await asyncio.wait_for(client.log_out(), 15)
+            except Exception as exc:
+                log_line("telegram logout: %r" % exc)
+            finally:
+                await client.disconnect()
+        await asyncio.to_thread(vault.drop, self.account)
+
+    # events
+    async def _message(self, event):
+        self._met(event.message)
+        await self.events.on_message(tg_message(event.message, self.me))
+
+    async def _deleted(self, event):
+        # Telegram tells the chat only for channels; Account finds the others.
+        chat = tg_id(event.chat_id) if event.chat_id else None
+        await self.events.on_delete(chat, list(event.deleted_ids))
+
+    async def _reaction(self, update):
+        from telethon import utils
+
+        counts, _yours = tg_reactions(update.reactions)
+        await self.events.on_reaction(tg_id(utils.get_peer_id(update.peer)), update.msg_id, counts)
+
+    async def _peer(self, some_id):
+        return await self.client.get_input_entity(tg_number(some_id))
+
+    # chats and people
+    async def chats_page(self, marker=None):
+        return []  # the login brings the list whole
+
+    async def chats(self, ids):
+        out = []
+        for cid in ids:
+            entity = await self.client.get_entity(tg_number(cid))
+            last = await self.client.get_messages(entity, limit=1)
+            out.append(tg_chat(entity, self.me, 0, last[0] if last else None))
+        return out
+
+    async def users(self, ids):
+        """The people of these ids: those met already as they were, the
+        others asked for."""
+        for uid in ids:
+            if uid not in self.people:
+                try:
+                    self.people[uid] = tg_person(await self.client.get_entity(tg_number(uid)))
+                except Exception as exc:  # not met by this session: no name
+                    log_line("telegram user %s: %r" % (uid, exc))
+        return [self.people[uid] for uid in ids if uid in self.people]
+
+    async def find_phone(self, phone):
+        from telethon.tl import functions
+
+        found = await self.client(functions.contacts.ResolvePhoneRequest(phone=phone.lstrip("+")))
+        if not found.users:
+            raise LookupError("not in Telegram")
+        return tg_person(found.users[0])
+
+    async def add_contact(self, user_id):
+        from telethon.tl import functions
+
+        user = await self.client.get_entity(tg_number(user_id))
+        await self.client(functions.contacts.AddContactRequest(
+            id=user, first_name=user.first_name or "", last_name=user.last_name or "",
+            phone="", add_phone_privacy_exception=False))
+        return tg_person(user)
+
+    async def link_info(self, link):
+        from telethon import utils
+        from telethon.tl import functions, types
+
+        name, invite = utils.parse_username(link)
+        if invite:
+            found = await self.client(functions.messages.CheckChatInviteRequest(hash=name))
+            if isinstance(found, (types.ChatInviteAlready, types.ChatInvitePeek)):
+                return tg_chat(found.chat, self.me)
+            return Chat(None, "CHANNEL" if found.broadcast else "CHAT", found.title, [],
+                        found.participants_count)
+        if not name:
+            return None
+        entity = await self.client.get_entity(name)
+        return None if isinstance(entity, types.User) else tg_chat(entity, self.me)
+
+    async def join(self, link):
+        from telethon import utils
+        from telethon.tl import functions
+
+        name, invite = utils.parse_username(link)
+        if invite:
+            done = await self.client(functions.messages.ImportChatInviteRequest(hash=name))
+        else:
+            done = await self.client(functions.channels.JoinChannelRequest(
+                await self.client.get_input_entity(name)))
+        return tg_chat(done.chats[0], self.me)
+
+    async def leave(self, chat_id):
+        await self.client.delete_dialog(await self._peer(chat_id))
+
+    async def delete(self, chat_id, last_event_time=None):
+        """The dialog's messages deleted for this account only."""
+        await self.client.delete_dialog(await self._peer(chat_id), revoke=False)
+
+    # messages
+    async def history(self, chat_id, backward, before=None):
+        when_ = datetime.fromtimestamp(before / 1000, timezone.utc) if before else None
+        msgs = await self.client.get_messages(await self._peer(chat_id), limit=backward,
+                                              offset_date=when_)
+        for m in msgs:
+            self._met(m)
+        return [tg_message(m, self.me) for m in msgs]
+
+    async def read(self, chat_id, msg_id):
+        await self.client.send_read_acknowledge(await self._peer(chat_id), max_id=msg_id)
+
+    async def send(self, chat_id, text, files=()):
+        """The text, or each file a message of its own (the text under the
+        first): the messages, in order."""
+        from telethon.tl import types
+
+        peer = await self._peer(chat_id)
+        if not files:
+            return tg_message(await self.client.send_message(peer, text), self.me)
+        sent, caption = [], text
+        for f in files:
+            if f["kind"] == "voice":
+                msg = await self.client.send_file(
+                    peer, f["path"], caption=caption, voice_note=True,
+                    attributes=[types.DocumentAttributeAudio(duration=f["duration"] // 1000,
+                                                             voice=True)])
+            elif f["kind"] == "photo":
+                msg = await self.client.send_file(peer, f["path"], caption=caption)
+            else:
+                msg = await self.client.send_file(
+                    peer, f["path"], caption=caption, force_document=True,
+                    attributes=[types.DocumentAttributeFilename(f.get("name") or
+                                                                os.path.basename(f["path"]))])
+            sent.append(tg_message(msg, self.me))
+            caption = ""
+        return sent
+
+    async def forward(self, chat_id, msg_id, from_chat_id):
+        msg = await self.client.forward_messages(await self._peer(chat_id), msg_id,
+                                                 await self._peer(from_chat_id))
+        return tg_message(msg, self.me)
+
+    async def react(self, chat_id, msg_id, emoji):
+        from telethon.tl import functions, types
+
+        reaction = [types.ReactionEmoji(emoticon=TG_REACTION.get(emoji, emoji))] if emoji else []
+        done = await self.client(functions.messages.SendReactionRequest(
+            peer=await self._peer(chat_id), msg_id=msg_id, reaction=reaction))
+        for update in getattr(done, "updates", []):
+            if isinstance(update, types.UpdateMessageReactions) and update.msg_id == msg_id:
+                return tg_reactions(update.reactions)[0], emoji
+        return None
+
+    async def media_url(self, _chat_id, _msg_id, item):
+        """Its ref: Media fetches it through download()."""
+        return item.get("id") or item.get("url")
+
+    async def download(self, ref, path):
+        """A message's photo, voice, video or file (its preview: /thumb)
+        into path."""
+        parts = ref.split(":", 1)[1].split("/")
+        msg = await self.client.get_messages(await self._peer(ref), ids=int(parts[1]))
+        if msg is None or not msg.media:
+            raise LookupError("no such message: %s" % ref)
+        with open(path, "wb") as out:
+            await self.client.download_media(msg, file=out,
+                                             thumb=-1 if parts[2:] == ["thumb"] else None)
+
 
 class Offline(Exception):
     """No connection to that messenger now (or no such account): the
@@ -1161,7 +1611,21 @@ class Backend:
             return self.given[name]
         if name == "max":
             return PyMaxLink(DATA)
+        if name == "telegram":
+            return TelethonLink(os.path.join(DATA, name))
         raise KeyError(name)
+
+    def missing(self, name):
+        """Why a messenger cannot be had here (its card says it), or None."""
+        if name in self.given or name == "max":
+            return None
+        if name == "telegram":
+            if importlib.util.find_spec("telethon") is None:
+                return "Для Telegram нужен пакет Telethon, он не установлен."
+            if telegram_keys() is None:
+                return "Нет ключей приложения Telegram: впишите api_id и api_hash " \
+                       "в раздел [telegram] файла %s." % SETTINGS.path
+        return None
 
     def add(self, link):
         """An account on this link, not started (begin() starts it)."""
@@ -1194,7 +1658,7 @@ class Backend:
         """Start a messenger's account: at once if a login is kept, else
         only when asked (not quiet: the person pressed «Войти»: a QR
         code comes)."""
-        if not messenger_on(name):
+        if not messenger_on(name) or self.missing(name):
             GLib.idle_add(self.ui.signin, name, {"kind": "off"})
             return
         account = self.accounts.get(name) or self.add(self.make(name))
@@ -1231,6 +1695,12 @@ class Backend:
             self.cache.drop(chat_id)
         account.chats = {}
         GLib.idle_add(self.ui.signin, name, {"kind": "out"})
+
+    async def password(self, name, text):
+        """The cloud password the sign-in asked for (Account.on_password)."""
+        account = self.accounts.get(name)
+        if account is not None:
+            account.answer(text)
 
     def run(self, coro, done=None, owner=None):
         """Run a coroutine in the messengers' thread; done(result, error) in
@@ -1275,7 +1745,7 @@ class Backend:
 
     def label(self, name):
         account = self.accounts.get(name)
-        return account.label if account else name
+        return account.label if account else dict(MESSENGERS).get(name, name)
 
     def can(self, what, some_id=None):
         """Whether the account of this id (any account, without one) can
@@ -1316,16 +1786,19 @@ class Backend:
         return await self.of(chat_id).read(chat_id, msg_id)
 
     async def find_phone(self, phone):
-        """The person with this phone number in the first messenger that has
-        them; the error of the last asked if none."""
-        error = Offline()
+        """The people with this phone number, one per messenger that has
+        them (each says whose: account, label); the error of the last asked
+        if none."""
+        error, found = Offline(), []
         for account in self.accounts.values():
-            if account.can("phone"):
+            if account.can("phone") and account.online:
                 try:
-                    return await account.find_phone(phone)
+                    found.append(await account.find_phone(phone))
                 except Exception as exc:
                     error = exc
-        raise error
+        if not found:
+            raise error
+        return found
 
     def _by_link(self, link):
         host = urllib.parse.urlsplit(link).hostname or ""
@@ -1382,6 +1855,7 @@ class Account:
         self.online = False  # logged in and connected: requests go to the messenger
         self.tries = 0  # the link's starts in a row that ended without a login
         self.wake = None  # set by retry(): the pause before the next start ends
+        self.secret = None  # a future the sign-in waits on for the cloud password
         self.me = None
         self.names = {}
         self.chats = {}
@@ -1459,6 +1933,21 @@ class Account:
         qr_png(qr_url, path)
         GLib.idle_add(self.ui.show_qr, self.id, path)
 
+    async def on_password(self, wrong=False):
+        """The sign-in needs the account's cloud password (Telegram's
+        two-step verification): the card asks; Backend.password answers."""
+        self.secret = self.loop.create_future()
+        GLib.idle_add(self.ui.signin, self.id, {"kind": "password", "wrong": wrong})
+        try:
+            return await self.secret
+        finally:
+            self.secret = None
+
+    def answer(self, text):
+        if self.secret is not None and not self.secret.done():
+            self.secret.set_result(text)
+            GLib.idle_add(self.ui.signin, self.id, {"kind": "getting"})
+
     async def on_login(self, me, chats, contacts, agent, session_id):
         try:
             os.remove(os.path.join(self.folder, "qr.png"))
@@ -1532,7 +2021,16 @@ class Account:
 
     async def on_delete(self, chat_id, msg_ids):
         """Messages deleted (by their sender for everyone, or here): out of
-        the cache and the window; the chat's last message anew if it went."""
+        the cache and the window; the chat's last message anew if it went.
+        Without the chat (Telegram tells it only for channels) the ids are
+        the account's own, and the chats that have them are looked for."""
+        if chat_id is None:
+            gone = set(msg_ids)
+            for cid, chat in list(self.chats.items()):
+                if (chat.last is not None and chat.last.id in gone) or \
+                        any(m["id"] in gone for m in self.cache.read(cid)):
+                    await self.on_delete(cid, msg_ids)
+            return
         self.cache.forget(chat_id, msg_ids)
         chat = self.chats.get(chat_id)
         summary = None
@@ -1717,6 +2215,10 @@ class Account:
                       if self.me else None)
         msg = await self.link.send(chat_id, text, list(files)) if files else \
             await self.link.send(chat_id, text)
+        if isinstance(msg, list):  # each file a message of its own (Telegram)
+            out = [self.message(m) for m in msg]
+            self.cache.add(chat_id, out)
+            return out
         out = self.message(msg) if msg else None
         if out:
             self.cache.add(chat_id, [out])
@@ -1727,7 +2229,7 @@ class Account:
         self.ask()
         user = await self.link.find_phone(phone)
         self.names[user.id] = user.name
-        return {"id": user.id, "name": self.name(user.id),
+        return {"id": user.id, "name": self.name(user.id), "account": self.id, "label": self.label,
                 "chat": self.link.dialog_of(self.me, user.id) if self.me else None}  # their dialog
 
     async def add_contact(self, user_id):
@@ -3738,13 +4240,14 @@ class Max(Gtk.Application):
         self.held = 0.0  # when a row was long-pressed: its release opens nothing
         self.open_chat = None
         self.views = {}  # chat id -> its ChatView, most recently used last
+        self.tagged = False  # rows say their messenger (retag)
         self.view = None  # the one on the chat page
         self.background = "--background" in sys.argv[1:]
 
     def do_startup(self):
         Gtk.Application.do_startup(self)
-        act = Gio.SimpleAction.new("open-chat", GLib.VariantType("x"))
-        act.connect("activate", lambda _a, v: (self.do_activate(), self.open(v.unpack())))
+        act = Gio.SimpleAction.new("open-chat", GLib.VariantType("s"))  # the id as JSON
+        act.connect("activate", lambda _a, v: (self.do_activate(), self.open(json.loads(v.unpack()))))
         self.add_action(act)
         if FLATPAK:
             ask_background(self.get_dbus_connection())
@@ -4168,6 +4671,7 @@ class Max(Gtk.Application):
             if not messenger_on(name):
                 self.chatlist.replace([], name)
         self.draw_accounts()
+        self.retag()
         cached = bool(self.chatlist.chats)
         if cached:
             self.fill_list()
@@ -4245,17 +4749,23 @@ class Max(Gtk.Application):
 
     def account_card(self, name, title):
         """One messenger's card: its switch, and the sign-in as it is."""
-        state = self.signins.get(name) or {"kind": "getting" if messenger_on(name) else "off"}
+        missing = self.backend.missing(name)
+        state = self.signins.get(name) or {"kind": "getting" if messenger_on(name) and not missing
+                                           else "off"}
         kind_ = state["kind"]
         card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
         card.get_style_context().add_class("settings")
         card.account, card.state = name, kind_  # for the tests
         row = Gtk.Box(spacing=24)
         row.pack_start(label(title, "setting", wrap=True), True, True, 0)
-        switch = Gtk.Switch(active=messenger_on(name), valign=Gtk.Align.CENTER)
+        switch = Gtk.Switch(active=messenger_on(name) and not missing, valign=Gtk.Align.CENTER)
+        switch.set_sensitive(not missing)
         switch.connect("notify::active", lambda sw, _p: self.switch_account(name, sw.get_active()))
         row.pack_end(switch, False, False, 0)
         card.pack_start(row, False, False, 0)
+        if missing:
+            card.pack_start(label(missing, "hint", wrap=True), False, False, 0)
+            return card
 
         def button(text, action, cls="act"):
             b = Gtk.Button(label=text)
@@ -4276,7 +4786,20 @@ class Max(Gtk.Application):
             image = Gtk.Image.new_from_pixbuf(GdkPixbuf.Pixbuf.new_from_file(state["qr"]))
             image.set_halign(Gtk.Align.CENTER)
             card.pack_start(image, False, False, 0)
-            hint("Откройте %s на телефоне и отсканируйте этот код" % title)
+            hint(QR_HINT.get(name, "Откройте %s на телефоне и отсканируйте этот код" % title))
+        elif kind_ == "password":
+            hint("Пароль не подошёл, попробуйте ещё раз." if state.get("wrong") else
+                 "Вход в %s защищён облачным паролем. Введите его." % title)
+            entry = Gtk.Entry(visibility=False, input_purpose=Gtk.InputPurpose.PASSWORD)
+            entry.set_placeholder_text("Облачный пароль")
+            entry.get_style_context().add_class("input")
+            card.pack_start(entry, False, False, 0)
+
+            def give():
+                if entry.get_text():
+                    self.give_password(name, entry.get_text())
+            entry.connect("activate", lambda _e: give())
+            button("Войти", give)
         elif kind_ == "out":
             hint("Вход не выполнен.")
             button("Войти по QR-коду", lambda: self.sign_in(name))
@@ -4290,6 +4813,10 @@ class Max(Gtk.Application):
             hint("Подключение…")
         return card
 
+    def give_password(self, name, text):
+        self.signin(name, {"kind": "getting"})
+        self.backend.run(self.backend.password(name, text))
+
     def sign_in(self, name):
         self.signin(name, {"kind": "getting"})
         self.backend.run(self.backend.begin(name))
@@ -4300,6 +4827,7 @@ class Max(Gtk.Application):
         if on == messenger_on(name):
             return
         SETTINGS.set("account_" + name, on)
+        self.retag()
         if on:
             self.signin(name, {"kind": "getting"})
             self.backend.run(self.backend.begin(name, quiet=True))
@@ -4433,8 +4961,8 @@ class Max(Gtk.Application):
         title, body = note_text(self.chatlist.get(msg["chat"]) or {}, msg)
         note = Gio.Notification.new(title)
         note.set_body(body)
-        note.set_default_action_and_target("app.open-chat", GLib.Variant("x", msg["chat"]))
-        self.send_notification("chat-%d" % msg["chat"], note)
+        note.set_default_action_and_target("app.open-chat", GLib.Variant("s", json.dumps(msg["chat"])))
+        self.send_notification("chat-%s" % msg["chat"], note)
 
     # the list
     def fill_list(self, only=None):
@@ -4518,7 +5046,9 @@ class Max(Gtk.Application):
         box.pack_start(mid, True, True, 0)
         right = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
         right.set_valign(Gtk.Align.CENTER)
-        top = "%s%s" % ("📌 " if pinned else "", when(s["time"]))
+        top = "%s%s%s" % ("📌 " if pinned else "",
+                          self.backend.label(s.get("account", "max")) + " · " if self.tagged else "",
+                          when(s["time"]))
         right.pack_start(label(top, "chat-time", xalign=1.0), False, False, 0)
         if s["unread"]:
             badge = label(str(s["unread"]), "badge", xalign=0.5)
@@ -4536,11 +5066,19 @@ class Max(Gtk.Application):
         self.open(row.chat_id)
 
     # tabs, pinning, notifications
-    @staticmethod
-    def look(entry):
+    def look(self, entry):
         """What a row shows: when it changes the row is redrawn."""
         s, pinned, quiet = entry
-        return (s["title"], s["last"], s["time"], s["unread"], pinned, quiet)
+        return (s["title"], s["last"], s["time"], s["unread"], pinned, quiet, self.tagged)
+
+    def retag(self):
+        """With more than one messenger switched on, each row says whose its
+        chat is (beside its time)."""
+        tagged = sum(1 for n in self.backend.names()
+                     if messenger_on(n) and not self.backend.missing(n)) > 1
+        if tagged != self.tagged:
+            self.tagged = tagged
+            self.fill_list()
 
     def show_tab(self, name):
         self.tab = name
@@ -4599,14 +5137,15 @@ class Max(Gtk.Application):
         if phone:
             self.find_hint.set_text("Ищу %s…" % phone)
 
-            def person(p, err):
+            def person(found, err):
                 if self.find_entry.get_text().strip() != text:
                     return  # asked something else meanwhile
-                if err or not p:
-                    self.find_hint.set_text("С номером %s в MAX никого не нашлось." % phone)
+                if err or not found:
+                    self.find_hint.set_text("С номером %s никого не нашлось." % phone)
                     return
                 self.find_hint.set_text("")
-                self.show_person(p)
+                for p in found:
+                    self.show_person(p)
 
             self.backend.run(self.backend.find_phone(phone), person)
         elif link:
@@ -4618,7 +5157,7 @@ class Max(Gtk.Application):
                 if err or not info:
                     # MAX told nothing about the link; joining may still work.
                     self.find_hint.set_text("Сведений по ссылке нет, но вступить можно попробовать.")
-                    info = {"id": 0, "title": link.split("max.ru/", 1)[1], "type": "",
+                    info = {"id": 0, "title": link.split("/", 3)[3], "type": "",
                             "members": 0, "joined": False}
                 else:
                     self.find_hint.set_text("")
@@ -4663,7 +5202,10 @@ class Max(Gtk.Application):
         return b
 
     def show_person(self, p):
-        buttons = self.found_card(p["name"], self.find_entry.get_text().strip(), p["id"])
+        about = self.find_entry.get_text().strip()
+        if self.tagged:
+            about += " · " + p.get("label", "")
+        buttons = self.found_card(p["name"], about, p["id"])
         if p["chat"] is not None:
             self.action(buttons, "Написать", "act", lambda _b: self.write_to(p))
 
@@ -4684,15 +5226,16 @@ class Max(Gtk.Application):
 
     def write_to(self, p):
         self.chatlist.start_dialog({"id": p["chat"], "title": p["name"], "type": "DIALOG",
+                                    "account": p.get("account", "max"),
                                     "last": "", "time": 0, "unread": 0})
         self.open(p["chat"])
 
     def show_found_chat(self, info, link):
         channel = info["type"] == "CHANNEL"
         n = info["members"]
-        about = ("канал" if channel else "группа" if info["type"] else "ссылка в MAX") + (
+        about = ("канал" if channel else "группа" if info["type"] else "ссылка") + (
             " · %s: %d" % ("подписчиков" if channel else "участников", n) if n else "")
-        buttons = self.found_card(info["title"], about, info["id"])
+        buttons = self.found_card(info["title"], about, info["id"] or 0)
         if info["joined"] and self.chatlist.listed(info["id"]):
             self.action(buttons, "Открыть", "act", lambda _b: self.open(info["id"]))
         else:
@@ -4789,8 +5332,10 @@ class Max(Gtk.Application):
         for child in self.fwd_list.get_children():
             child.destroy()
         self.fwd_found = None
+        source = (self.chatlist.get(self.forwarding[0]) or {}).get("account", "max")
         for c, _pinned, _quiet in self.chatlist.entries("chats"):
-            if c.get("type") != "CHANNEL":
+            # within its messenger (between messengers: not yet)
+            if c.get("type") != "CHANNEL" and c.get("account", "max") == source:
                 self.fwd_list.add(self.chat_row((c, False, False)))
         self.fwd_list.show_all()
         self.search_forward()
@@ -4896,9 +5441,9 @@ class Max(Gtk.Application):
         for item in items or m.get("media") or []:
             if item["kind"] == "photo":
                 jobs.append((item["url"], "фото-%s-%d.jpg" % (m["id"], item.get("n", 1))))
-            elif item["kind"] == "audio" and item["url"]:  # a voice message
+            elif item["kind"] == "audio" and item["url"]:  # a voice message (Telegram's audio file)
                 ext = os.path.splitext(urllib.parse.urlsplit(item["url"]).path)[1] or ".ogg"
-                jobs.append((item["url"], "голосовое-%s%s" % (m["id"], ext)))
+                jobs.append((item["url"], item.get("name") or "голосовое-%s%s" % (m["id"], ext)))
             elif item["kind"] == "audio":  # an audio file
                 jobs.append(({"kind": "file", "id": item["file"]}, item["name"]))
             elif item["kind"] == "video":
@@ -5560,8 +6105,9 @@ class Max(Gtk.Application):
             self.sub.set_text("")
             self.smile.set_active(False)
             view = self.views.get(chat_id)
-            if msg and view:
-                view.add(msg)
+            for one in (msg if isinstance(msg, list) else [msg] if msg else []):
+                if view:
+                    view.add(one)
             # a dialog from the search is in the list now
             self.chatlist.wrote(chat_id, text or attachment_words(files))
             self.edit.set_visible(self.open_chat == chat_id and self.chatlist.listed(chat_id))

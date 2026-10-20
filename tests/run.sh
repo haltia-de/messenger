@@ -3,8 +3,8 @@
 # Copyright (C) 2026 Mikhail Nevskiy
 # Run the tests: sh tests/run.sh [test_backend.py test_window.py ...]
 # The first run makes .cache/venv (the system's PyGObject, plus the PyMax
-# wheel install.sh pins, by the same name and sha256, and haltia-kit 2.2.0,
-# or HALTIA_KIT=path/to/a/checkout); the window tests get
+# wheel install.sh pins, by the same name and sha256, haltia-kit 2.2.0,
+# or HALTIA_KIT=path/to/a/checkout, and Telethon 1.43.2); the window tests get
 # a display of their own from broadwayd, stopped again at the end.
 # HALTIA_SHOTS=dir keeps screenshots of the window there. HALTIA_PYTHON=python3
 # runs them on that Python as it is, with no venv (an installed package's
@@ -41,6 +41,15 @@ if [ -z "${HALTIA_PYTHON:-}" ] && ! "$venv/bin/python" -c "import haltia_kit.vau
 		VIRTUAL_ENV=$venv uv pip install -q "$compat"
 	else
 		"$venv/bin/pip" install -q "$compat"
+	fi
+fi
+
+# Telethon, the link to Telegram (Alpine's py3-telethon is this version).
+if [ -z "${HALTIA_PYTHON:-}" ] && ! "$venv/bin/python" -c "import telethon" 2>/dev/null; then
+	if command -v uv >/dev/null; then
+		VIRTUAL_ENV=$venv uv pip install -q telethon==1.43.2
+	else
+		"$venv/bin/pip" install -q telethon==1.43.2
 	fi
 fi
 

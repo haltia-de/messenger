@@ -6,9 +6,9 @@ CODENAME := $(shell . /etc/os-release && echo $$VERSION_CODENAME)
 PKG := debian/haltia-messenger
 LIB := $(PKG)/usr/lib/haltia-messenger
 ifeq ($(CODENAME),noble)
-HALTIA_DEPENDS :=
+HALTIA_DEPENDS := python3-pyaes, python3-rsa
 else
-HALTIA_DEPENDS := python3-pydantic (>= 2.10), python3-websockets (>= 13)
+HALTIA_DEPENDS := python3-pydantic (>= 2.10), python3-websockets (>= 13), python3-telethon (>= 1.40)
 endif
 
 %:

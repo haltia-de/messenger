@@ -64,7 +64,14 @@ fake.person(MAMA, "Мама", contact=True)
 mama = fake.dialog(MAMA)
 fake.say(mama, "Привет", MAMA, t=now_ms())
 bm.save_json(bm.KNOWN, [MAMA])
-app = bm.Max(link=fake)
+tg = FakeLink(me="tg:1", name="Я", account="telegram", label="Telegram", prefix="tg:",
+              can={"phone", "links", "react", "forward"}, hosts=("t.me",))
+tg.kept = False
+tg.password = "секрет"  # Telegram's two-step verification
+SASHA = tg.person("tg:77", "Внук Саша", contact=True)
+sasha = tg.dialog(SASHA)
+tg.say(sasha, "Привет из Telegram", SASHA, t=now_ms())
+app = bm.Max(link=[fake, tg])
 asked = []
 bm.dialogs.ask = lambda parent, question, yes, *a: asked.append(question) or True
 app.set_flags(app.get_flags() | bm.Gio.ApplicationFlags.NON_UNIQUE)  # beside a running one
@@ -119,4 +126,49 @@ fake.refuse = None
 buttons(card(app.settings_cards))["Открыть"].clicked()
 wait(lambda: card(app.settings_cards).state == "in", what="in after unlocking")
 ok("a closed keyring")
+
+# --- Telegram: switched on, its QR code, the cloud password; the rows say whose -----------------
+
+
+def hints(c):
+    return [w.get_text() for w in c.get_children() if isinstance(w, Gtk.Label)]
+
+
+def row_time(chat):
+    box = app.rows[chat].get_child()
+    right = box.get_children()[-1]
+    return right.get_children()[0].get_text()
+
+
+c = card(app.settings_cards, "telegram")
+assert c.state == "off" and not app.tagged and not row_time(mama).startswith("MAX")
+switch(c).set_active(True)
+wait(lambda: card(app.settings_cards, "telegram").state == "out", what="Telegram signed out")
+assert app.tagged and row_time(mama).startswith("MAX · ")  # two messengers: each row says whose
+buttons(card(app.settings_cards, "telegram"))["Войти по QR-коду"].clicked()
+wait(lambda: card(app.settings_cards, "telegram").state == "waiting", what="Telegram's QR code")
+assert any("Подключить устройство" in h for h in hints(card(app.settings_cards, "telegram")))
+tg.scan()
+wait(lambda: card(app.settings_cards, "telegram").state == "password", what="the password asked")
+shot("telegram-password.png")
+
+
+def give(text):
+    entry = [w for w in card(app.settings_cards, "telegram").get_children() if isinstance(w, Gtk.Entry)][0]
+    assert not entry.get_visibility()  # dots
+    entry.set_text(text)
+    entry.activate()
+
+
+give("не тот")
+wait(lambda: any("не подошёл" in h for h in hints(card(app.settings_cards, "telegram"))),
+     what="a wrong password said")
+give("секрет")
+wait(lambda: card(app.settings_cards, "telegram").state == "in", what="in Telegram")
+assert "Вход выполнен: Я" in hints(card(app.settings_cards, "telegram"))
+wait(lambda: sasha in app.rows, what="Telegram's chat in the list")
+assert row_time(sasha).startswith("Telegram · ") and mama in app.rows
+switch(card(app.settings_cards, "telegram")).set_active(False)
+wait(lambda: sasha not in app.chatlist.chats and not app.tagged, what="Telegram off")
+ok("Telegram: the QR code, the cloud password, the rows say whose")
 app.quit()

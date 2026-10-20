@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-`haltia-messenger` («Сообщения» on the screen) is a native GTK 3 client for the MAX messenger,
+`haltia-messenger` («Сообщения» on the screen) is a native GTK 3 client for the MAX messenger (and Telegram),
 a program of the Haltia desktop (github.com/haltia-de), a desktop program of its own:
 `io.github.haltia_de.Messenger` (`APP_ID`: the GApplication id, the `.desktop` file, the Wayland
 app id via `GLib.set_prgname` before GTK is imported, the icon, AppStream, MPRIS, LauncherEntry).
@@ -43,6 +43,8 @@ sh tests/run.sh test_backend.py # one of them
 
 Runtime deps: Python 3, PyGObject/GTK 3, `haltia-kit` 2 (github.com/haltia-de/kit, module
 `haltia_kit`; Alpine `py3-haltia-kit`), PyMax's own packages (the list is `depends` in `packaging/alpine/APKBUILD`),
+Telethon 1.43.2 for Telegram (Alpine `py3-telethon`; trixie's 1.40 is enough, noble's 1.25 is not:
+`debian/vendor.list` puts the wheel there; the Flatpak builds pyaes from its sources, PyPI has no wheel),
 optionally `py3-mpv mpv-libs` (voice) and `font-noto-emoji`; `wget`/`unzip`/`sha256sum` for
 `install.sh`. `install.sh [ROOT] [PREFIX]` installs the script to `PREFIX/bin` (and the `b8k-max`
 link), `data/` (the
@@ -137,6 +139,25 @@ programs are found on `PATH` (`haltia-vplay`, `b8k-vplay` before 2.0: `shutil.wh
   deleted while away go when a fetched page no longer has them (`history`, `ChatView.newest`). `tests/fake_link.py` is the second link (a small MAX
   in memory, on the same entities: `common.load()` registers the script as `haltia_messenger`); `Max(link=...)`/`Backend(ui, link)` take one. A PyMax upgrade is checked in
   `PyMaxLink` only. Don't name a fake's attributes after link operations (`chats`, `users`).
+- **The link to Telegram** (`TelethonLink`, CONTEXT.md «Связь с Telegram»). The same operations
+  and events as `PyMaxLink`, through Telethon (in the same asyncio loop), on the same entities:
+  `tg_person`/`tg_chat`/`tg_message` make them, and nothing else imports Telethon. Its ids are
+  strings: `"tg:"` and Telethon's marked peer id (a person's and their dialog's are the same,
+  `dialog_of` gives the user; groups negative, channels `-100…`); message ids are Telegram's
+  ints. What a message carries is a ref `"tg:<chat>/<msg>"` (`/thumb` for a video's preview)
+  that `download` fetches; `media_url` gives the ref back. An outgoing message's sender is the
+  account's own id (Telegram leaves it out in dialogs, `tg_message(msg, me)`). `REACTIONS`
+  are mapped to Telegram's (`TG_REACTION`: it has no 😂/😮, its ❤ has no variation selector).
+  `send` with files sends each as a message of its own (the text under the first) and returns
+  the list (`Account.send` and the window take a list); deletions come without a chat except
+  in channels (`Account.on_delete(None, ids)` looks the ids up in the account's chats).
+  Senders and dialogs met are kept (`people`), so `users()` asks only for strangers. The
+  login: `qr_login()` (a new code when one expires), `SessionPasswordNeededError` →
+  `events.on_password(wrong)` (`Account.on_password`: the card asks, `Backend.password(name,
+  text)` answers), then the `StringSession` into the Vault (`telegram`). The application's
+  keys: `TG_API_ID`/`TG_API_HASH`, or `[telegram] api_id`/`api_hash` in `messenger.conf`
+  (`telegram_keys()`); without keys or Telethon `Backend.missing(name)` says why, and the
+  card shows it with its switch off and greyed. Telemetry and invites stay MAX's (`can`).
 - **Login.** `PyMaxLink` is PyMax's QR provider; `Backend.on_qr` renders the QR code to scan with
   MAX on a phone. The session lives in the keyring: `secrets()` is haltia-kit's `Vault`
   (`app=APP_ID`, `account=max`; libsecret, the Secret portal in Flatpak; `DATA/max-session.json`,
@@ -151,7 +172,12 @@ programs are found on `PATH` (`haltia-vplay`, `b8k-vplay` before 2.0: `shutil.wh
   (`ui.signin(account, state)`: `off`, `out` — «Войти по QR-коду» → `Backend.begin(name)` —,
   `getting`, `waiting` with its QR code, `in` with the name — «Выйти», asked first:
   `Backend.logout`, the link's `logout()` forgets the login, the account's cache goes —,
-  `locked` — «Открыть»: `retry(name)` asks the keyring again —, `failed` with the pause). At the
+  `locked` — «Открыть»: `retry(name)` asks the keyring again —, `password` — the cloud password's
+entry, `wrong` after a wrong one —, `failed` with the pause). With more than one messenger switched
+on (`Max.retag`, `tagged`) each chat row says whose before its time and the phone search's
+cards say it too; the phone is asked of every messenger online (`Backend.find_phone` gives a
+list), a link goes by its host (`link_of`: `max.ru`, `t.me`). The forward page lists only the
+chats of the message's messenger (between messengers: step 4). At the
   start (`_main`) a messenger switched on starts only if its link has a login kept
   (`link.signed_in()`); `Account.stop()` cancels its task.
 - **Telemetry.** PyMax's own (a random simulation of browsing) stays off in `ExtraConfig`. The
@@ -374,12 +400,15 @@ programs are found on `PATH` (`haltia-vplay`, `b8k-vplay` before 2.0: `shutil.wh
 ## Tests
 
 `sh tests/run.sh` makes `.cache/venv` once (system PyGObject plus the PyMax wheel `install.sh`
-pins, and haltia-kit 2.2.0 from GitHub, or `HALTIA_KIT=path/to/checkout`), starts a `broadwayd` of its own for each script (one takes no second program) and runs five plain scripts with `assert`s, each printing
+pins, haltia-kit 2.2.0 from GitHub, or `HALTIA_KIT=path/to/checkout`, and Telethon 1.43.2), starts a `broadwayd` of its own for each script (one takes no second program) and runs five plain scripts with `assert`s, each printing
 «… ok» per part: `tests/test_chatlist.py` (the chat list's rules: no MAX, no window),
 `tests/test_media.py` (Media with fake hands: hosts, the header, redirects, cache, players),
 `tests/test_backend.py` (Backend on the fake link, no window), `tests/test_window.py` (the real
 window and Backend on the fake link) and `tests/test_login.py` (the sign-in: the first start,
-the cards, switching off, the logout, a closed keyring; the fake's `kept`, `scan()`, `refuse`). Tests build MAX's state in `FakeLink` (people, dialogs,
+the cards, switching off, the logout, a closed keyring, a second fake as Telegram with its cloud
+password; the fake's `kept`, `scan()`, `refuse`, `password`, `split`). `test_backend.py` checks
+`tg_message`/`tg_chat` on Telethon's own types and `TelethonLink` on a stand-in client (no
+Telegram). Tests build MAX's state in `FakeLink` (people, dialogs,
 groups, channels, messages with attachments and reactions), drive the window as a person would,
 and check what it shows (widget trees: rows, `ChatView.widget`) and what was asked of MAX
 (`fake.asked(...)`), not private attributes. `HALTIA_SHOTS=dir` saves screenshots. `tests/demo.py`

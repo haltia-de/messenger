@@ -46,6 +46,8 @@ assert bm.link_of("@news") == "https://max.ru/news"
 assert bm.link_of("max.ru/join/AbC-d_1") == "https://max.ru/join/AbC-d_1"
 assert bm.link_of("https://web.max.ru/rbc/") == "https://max.ru/rbc"
 assert bm.link_of("https://evil.com/max.ru/x") is None
+assert bm.link_of("t.me/club") == "https://t.me/club" and bm.link_of("https://t.me/+AbC_1") == "https://t.me/+AbC_1"
+assert bm.link_of("https://evil.com/t.me/x") is None
 ok("helpers")
 
 # --- login: the chat list, names, known people ------------------------------------
@@ -342,10 +344,131 @@ assert files[1].name == "Счёт.pdf" and files[2].duration == 3200
 assert bm.attachment_words([bm.attachment("/x/a.png"), bm.attachment("/x/b.pdf")]) == "Фото, файл «b.pdf»"
 ok("PyMax's objects as the link's own")
 
+# --- Telethon's objects as the link's own; the Telegram link on a stand-in client -------------
+from datetime import datetime, timezone  # noqa: E402
+
+from telethon.tl import types as tt  # noqa: E402
+
+T0 = datetime(2026, 10, 20, 12, 0, tzinfo=timezone.utc)
+
+
+def doc(*attributes, mime="application/octet-stream", thumbs=None):
+    return tt.MessageMediaDocument(document=tt.Document(
+        id=1, access_hash=2, file_reference=b"", date=T0, mime_type=mime, size=2048, dc_id=2,
+        attributes=list(attributes), thumbs=thumbs))
+
+
+def tmsg(mid=5, peer=tt.PeerUser(77), sender=None, text="", media=None, **kw):
+    return tt.Message(id=mid, peer_id=peer, date=T0, message=text, media=media,
+                      from_id=sender, **kw)
+
+
+m = bm.tg_message(tmsg(text="Привет", sender=tt.PeerUser(77), media=tt.MessageMediaPhoto(
+    photo=tt.Photo(id=1, access_hash=2, file_reference=b"", date=T0, sizes=[], dc_id=2)),
+    reactions=tt.MessageReactions(results=[
+        tt.ReactionCount(reaction=tt.ReactionEmoji(emoticon="❤"), count=2, chosen_order=0),
+        tt.ReactionCount(reaction=tt.ReactionCustomEmoji(document_id=9), count=1)])))
+assert (m.id, m.chat, m.sender, m.text, m.time) == (5, "tg:77", "tg:77", "Привет", 1792497600000)
+assert m.photos == ["tg:77/5"] and m.reactions == [["❤️", 2]] and m.yours == "❤️"  # REACTIONS' heart
+m = bm.tg_message(tmsg(peer=tt.PeerChannel(5), media=doc(
+    tt.DocumentAttributeAudio(duration=7, voice=True), mime="audio/ogg")))
+assert m.chat == "tg:-1000000000005" and m.sender == m.chat  # a channel's post: the channel's
+assert m.media == [{"kind": "audio", "url": "tg:-1000000000005/5", "duration": 7}]
+m = bm.tg_message(tmsg(media=doc(tt.DocumentAttributeVideo(duration=42, w=640, h=480),
+                                 mime="video/mp4", thumbs=[tt.PhotoStrippedSize("i", b"x")])))
+assert m.media == [{"kind": "video", "id": "tg:77/5", "thumb": "tg:77/5/thumb", "duration": 42}]
+m = bm.tg_message(tmsg(media=doc(tt.DocumentAttributeFilename("Счёт.pdf"), mime="application/pdf")))
+assert m.media == [{"kind": "file", "id": "tg:77/5", "name": "Счёт.pdf", "size": 2048}]
+assert m.parts == ["файл «Счёт.pdf»"]
+m = bm.tg_message(tmsg(media=doc(tt.DocumentAttributeAudio(duration=200, title="Песня",
+                                                           performer="Хор"), mime="audio/mpeg")))
+assert m.media[0]["kind"] == "audio" and m.media[0]["name"] == "Хор — Песня"
+m = bm.tg_message(tmsg(text="а это", fwd_from=tt.MessageFwdHeader(date=T0, from_name="Тётя Валя")))
+assert m.fwd == {"chat": "Тётя Валя", "sender": None}
+m = bm.tg_message(tt.MessageService(id=6, peer_id=tt.PeerChat(9), date=T0,
+                                    action=tt.MessageActionPinMessage()))
+assert m.chat == "tg:-9" and m.notes == ["закреплено сообщение"]
+assert bm.tg_message(tmsg(text="моё", out=True), "tg:1").sender == "tg:1"  # Telegram leaves it out
+assert bm.tg_person(tt.User(id=77, first_name="Саша", last_name="Иванов")) == bm.Person("tg:77", "Саша Иванов")
+c = bm.tg_chat(tt.User(id=77, first_name="Саша"), "tg:1", unread=2, last=tmsg(text="Привет"))
+assert (c.id, c.kind, c.title, c.members, c.unread, c.last.text) == \
+    ("tg:77", "DIALOG", None, ["tg:1", "tg:77"], 2, "Привет")
+assert bm.tg_chat(tt.User(id=1, first_name="Я", is_self=True), "tg:1").members == ["tg:1"]
+c = bm.tg_chat(tt.Channel(id=5, title="Новости", photo=tt.ChatPhotoEmpty(), date=T0, broadcast=True,
+                          participants_count=900), "tg:1")
+assert (c.id, c.kind, c.title, c.count) == ("tg:-1000000000005", "CHANNEL", "Новости", 900)
+c = bm.tg_chat(tt.Chat(id=9, title="Семья", photo=tt.ChatPhotoEmpty(), participants_count=4,
+                       date=T0, version=1), "tg:1")
+assert (c.id, c.kind) == ("tg:-9", "CHAT")
+
+
+class Client:
+    """Telethon's client as the link meets it, without Telegram."""
+    def __init__(self):
+        self.calls = []
+
+    async def get_input_entity(self, n):
+        return ("peer", n)
+
+    async def get_messages(self, peer, ids=None, limit=None, offset_date=None):
+        self.calls.append(("get_messages", peer, ids, limit, offset_date))
+        return tmsg(mid=ids, media=doc(tt.DocumentAttributeFilename("a.pdf"))) if ids else \
+            [tmsg(mid=9, text="новое"), tmsg(mid=8, text="старое")]
+
+    async def download_media(self, msg, file, thumb=None):
+        self.calls.append(("download_media", msg.id, thumb))
+        file.write(b"data")
+
+    async def send_message(self, peer, text):
+        self.calls.append(("send_message", peer, text))
+        return tmsg(mid=20, text=text, out=True)
+
+    async def send_file(self, peer, path, caption="", **kw):
+        self.calls.append(("send_file", os.path.basename(path), caption, sorted(kw)))
+        return tmsg(mid=21 + len(self.calls), text=caption, out=True)
+
+    async def __call__(self, request):
+        self.calls.append(request)
+        return tt.Updates(updates=[tt.UpdateMessageReactions(
+            peer=tt.PeerUser(77), msg_id=5, reactions=tt.MessageReactions(results=[
+                tt.ReactionCount(reaction=tt.ReactionEmoji(emoticon="🤣"), count=1, chosen_order=0)]))],
+            users=[], chats=[], date=T0, seq=0)
+
+
+link = bm.TelethonLink(bm.DATA)
+link.client = cl = Client()
+assert (link.account, link.prefix, link.dialog_of("tg:1", "tg:77")) == ("telegram", "tg:", "tg:77")
+got = run(link.history("tg:77", 30, before=1792497600000))
+assert [m.id for m in got] == [9, 8] and cl.calls[-1][1:4] == (("peer", 77), None, 30)
+assert cl.calls[-1][4] == T0
+dl = os.path.join(bm.PHOTOS, "tg.part")
+os.makedirs(bm.PHOTOS, exist_ok=True)
+run(link.download("tg:-1000000000005/12/thumb", dl))
+assert open(dl, "rb").read() == b"data" and cl.calls[-2][2] == 12 and cl.calls[-1] == ("download_media", 12, -1)
+assert cl.calls[-2][1] == ("peer", -1000000000005)
+run(link.download("tg:77/13", dl))
+assert cl.calls[-1] == ("download_media", 13, None)
+assert run(link.send("tg:77", "Привет")).text == "Привет"
+voice = {"kind": "voice", "path": "/x/v.ogg", "duration": 3200}
+sent = run(link.send("tg:77", "Вот", [bm.attachment("/x/a.jpg"), bm.attachment("/x/b.pdf"), voice]))
+assert [m.text for m in sent] == ["Вот", "", ""]
+assert [c[1:3] for c in cl.calls[-3:]] == [("a.jpg", "Вот"), ("b.pdf", ""), ("v.ogg", "")]
+assert "force_document" in cl.calls[-2][3] and "voice_note" in cl.calls[-1][3]
+assert run(link.react("tg:77", 5, "😂")) == ([["😂", 1]], "😂")  # Telegram's 🤣, as REACTIONS has it
+assert cl.calls[-1].reaction[0].emoticon == "🤣"
+assert run(link.media_url("tg:77", 5, {"kind": "video", "id": "tg:77/5"})) == "tg:77/5"
+# The application's keys: none here, so Telegram cannot be had; [telegram] in the settings gives them.
+B0 = bm.Backend(UI())
+assert bm.telegram_keys() is None and "api_id" in B0.missing("telegram") and B0.missing("max") is None
+with open(bm.SETTINGS.path, "a") as fh:
+    fh.write("\n[telegram]\napi_id = 12345\napi_hash = abc\n")
+assert bm.telegram_keys() == (12345, "abc") and B0.missing("telegram") is None
+ok("Telethon's objects as the link's own; the Telegram link")
+
 # --- search, contacts, joining, removing, renaming, invites ----------------------------
 fake.person(40, "Ольга", phone="+79001234567")
-p = back(B.find_phone("+79001234567"))
-assert p == {"id": 40, "name": "Ольга", "chat": fake.me.id ^ 40}
+[p] = back(B.find_phone("+79001234567"))
+assert p == {"id": 40, "name": "Ольга", "account": "max", "label": "MAX", "chat": fake.me.id ^ 40}
 back(B.add_contact(40))
 assert 40 in fake.contacts and 40 in B.accounts["max"].known
 out = back(B.send(fake.me.id ^ 40, "Здравствуйте"))
@@ -516,6 +639,8 @@ fake.say(anna, "Привет из MAX", ANNA)
 tg = FakeLink(me="tg:1", name="Я", account="telegram", label="Telegram", prefix="tg:",
               can={"phone", "links", "react", "forward"}, hosts=("t.me",))
 SASHA = tg.person("tg:77", "Внук Саша", contact=True, phone="+79005556677")
+tg.person("tg:88", "Анна", phone="+79001112233")
+tg.split = True
 sasha = tg.dialog(SASHA)
 tg.say(sasha, "Привет из Telegram", SASHA)
 tg.group("tg:-5", "Клуб", kind="CHANNEL", joined=False, link="https://t.me/club")
@@ -531,8 +656,10 @@ assert B.of(anna).id == "max" and B.of(sasha).id == "telegram" and B.of(SASHA).i
 assert B.label("telegram") == "Telegram" and not B.can("telemetry", sasha) and B.can("telemetry", anna)
 assert back(B.history(sasha))[0][-1]["text"] == "Привет из Telegram" and not fake.asked("history")
 assert back(B.send(sasha, "Как дела?"))["text"] == "Как дела?" and tg.asked("send")[-1]["chat_id"] == sasha
-assert back(B.find_phone("+79005556677"))["chat"] == sasha  # not in MAX: Telegram has them
-assert back(B.find_phone("+79001112233"))["chat"] == anna
+[p] = back(B.find_phone("+79005556677"))  # not in MAX: Telegram has them
+assert p["chat"] == sasha and p["label"] == "Telegram"
+assert [(p["chat"], p["account"]) for p in back(B.find_phone("+79001112233"))] == \
+    [(anna, "max"), ("tg:88", "telegram")]  # in both: one each
 assert back(B.link_info("https://t.me/club"))["title"] == "Клуб" and not fake.asked("link_info")
 back(B.log([{"event": "GO"}]))
 assert fake.asked("log") and not tg.asked("log")  # telemetry is MAX's only
@@ -545,6 +672,16 @@ t = threading.Thread(target=lambda: got.append(B.download("tg:voice:77:1", dl)))
 t.start()
 until(lambda: got)
 assert open(dl, "rb").read() == b"OggS" and tg.asked("download") == [{"ref": "tg:voice:77:1"}]
+pic = os.path.join(bm.PHOTOS, "pic.jpg")
+with open(pic, "wb") as fh:
+    fh.write(b"jpeg")
+sent = back(B.send(sasha, "Смотри", [bm.attachment(pic), bm.attachment(pic)]))  # each a message
+assert [m["text"] for m in sent] == ["Смотри", ""] and len(B.cache.read(sasha)) == 4
+gone = sent[0]["id"]
+tg.msgs[sasha] = [m for m in tg.msgs[sasha] if m.id != gone]
+tg._push(B.accounts["telegram"].on_delete(None, [gone]))  # Telegram tells no chat but a channel's
+until(lambda: any(a[:2] == (sasha, [gone]) for a in said(ui, "deleted")))
+assert gone not in [m["id"] for m in B.cache.read(sasha)]
 tg.drop()  # one messenger without a connection: the other is asked all the same
 until(lambda: ("telegram", False) in said(ui, "connected"))
 got = []

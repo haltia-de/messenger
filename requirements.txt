@@ -13,6 +13,11 @@ python-socks[asyncio]==3.1.1
 qrcode==8.2
 websockets==17.2
 zstandard==0.25.0
+# Telegram
+telethon==1.43.2
+pyaes==1.6.1
+rsa==4.9.1
+pyasn1==0.6.4
 # voice messages (also needs libmpv)
 python-mpv==1.0.8
 haltia-kit @ git+https://github.com/haltia-de/kit@v2.1.0

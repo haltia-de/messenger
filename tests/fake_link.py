@@ -175,12 +175,19 @@ class FakeLink:
             self.scanned = self.loop.create_future()
             await events.on_qr("https://max.ru/:login/fake")
             await self.scanned
+            wrong = False
+            while self.password is not None:  # a cloud password, as Telegram's
+                if await events.on_password(wrong) == self.password:
+                    break
+                wrong = True
             self.kept = True
         await events.on_login(self.me, list(self.rooms.values()),
                               [self.people[u] for u in self.contacts], self.agent, 7)
         await self.ended  # connected till then
 
     kept = True  # a login is kept: the program starts it without a QR code
+    password = None  # the account's cloud password, asked after the QR code (Telegram's)
+    split = False  # each file sent is a message of its own (Telegram's way): send() gives a list
     refuse = None  # an exception run() raises at once (Locked: the keyring closed)
 
     async def signed_in(self):
@@ -245,6 +252,15 @@ class FakeLink:
             self.rooms[chat_id].unread = 0
 
     async def send(self, chat_id, text, files=()):
+        if self.split and files:
+            sent = []
+            for n, f in enumerate(files):
+                self.split = False
+                try:
+                    sent.append(await self.send(chat_id, text if n == 0 else "", [f]))
+                finally:
+                    self.split = True
+            return sent
         if files:  # as MAX would show them back: a photo by a link of its own
             self._call("send", chat_id=chat_id, text=text,
                        files=[(f["kind"], os.path.basename(f["path"]), f.get("duration"))
