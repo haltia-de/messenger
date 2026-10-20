@@ -98,6 +98,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import configparser
 import time
@@ -164,6 +165,7 @@ BUBBLES = 150  # a chat left keeps no more messages built than this
 # played or opened.
 MEDIA_HOSTS = ("oneme.ru", "max.ru", "okcdn.ru", "mycdn.me")
 PHOTO_DAYS = 30  # cached photos older than this are removed
+PHOTO_WORKERS = 2  # photos fetched at once; saves go one at a time beside them
 CHATS = os.path.join(PHOTOS, "chats")  # message cache, one file per chat
 KEEP = 80  # messages kept per chat on disk
 VIEWS = 6  # chats kept built in memory
@@ -1787,6 +1789,14 @@ def ask_background(bus):
              -1, None, None)
 
 
+def watched(widget):
+    """The widget, its `gone` set once destroyed: an owner for Media's queue,
+    which reads it from its workers (GTK is not asked from there)."""
+    widget.gone = False
+    widget.connect("destroy", lambda w: setattr(w, "gone", True))
+    return widget
+
+
 def fitted(path, size):
     """A picture file within size × size, turned upright; the kit's
     pixbuf_of refuses one too large or of unknown size before decoding (a
@@ -1817,8 +1827,13 @@ class Media:
     youtube-dl or playlists; a file in the browser. What fails, and what
     the players say, goes to LOG (600, host and path only).
 
-    It also saves what a message carries into a folder (save()), under a
-    harmless name that never overwrites another.
+    Photos come through a queue: PHOTO_WORKERS at a time, the one asked
+    for last first (what is on screen now), one fetch per link however many
+    wait for it, and none for whom nobody waits any more (their owner gone:
+    an object whose `gone` is set, as ChatView marks its images).
+
+    It also saves what a message carries into a folder (save()), one at a
+    time, under a harmless name that never overwrites another.
 
     Its hands come in at creation, the real ones by default: spawn(cmd),
     open_uri(url) -> bool, fetch(url, headers) -> bytes, player(on_time,
@@ -1833,37 +1848,88 @@ class Media:
         self.on_time = self.on_end = lambda *_a: None
         self._sound = None  # the voice player, made at the first voice message
         self._no_sound = False
+        self.cond = threading.Condition()
+        self.jobs = []  # photos waiting for a worker, the one wanted last at the end
+        self.busy = {}  # url -> its job, waiting or being fetched
+        self.workers = 0  # photo workers running
+        self.saves = []  # saves waiting, oldest first
+        self.saving = False  # the save worker runs
 
     def headers(self):
         return {"User-Agent": self.agent}
 
     # --- photos ---------------------------------------------------------------
-    def photo(self, url, done, size=460):
-        """A photo, from the cache or fetched in a thread, fitted within
-        size × size; done(pixbuf or None) on the GTK side. Nothing at all
-        for a link not to be fetched."""
+    def photo(self, url, done, size=460, owner=None):
+        """A photo, from the cache or fetched (see the queue above), fitted
+        within size × size; done(pixbuf or None) on the GTK side, unless
+        owner is gone by then. Nothing at all for a link not to be fetched."""
         if not media_ok(url):
             log_line("photo refused: %s" % where(url))
             return
-        os.makedirs(PHOTOS, mode=0o700, exist_ok=True)
+        with self.cond:
+            job = self.busy.get(url)
+            if job is None:
+                job = self.busy[url] = {"url": url, "waiters": [], "started": False}
+                self.jobs.append(job)
+            elif not job["started"]:
+                self.jobs.remove(job)
+                self.jobs.append(job)  # wanted again: first
+            job["waiters"].append((size, done, owner))
+            if self.workers < PHOTO_WORKERS:
+                self.workers += 1
+                threading.Thread(target=self._photo_worker, daemon=True).start()
+
+    def _photo_worker(self):
+        while True:
+            with self.cond:
+                job = None
+                while self.jobs:
+                    job = self.jobs.pop()
+                    if any(not getattr(o, "gone", False) for _s, _d, o in job["waiters"]):
+                        job["started"] = True
+                        break
+                    del self.busy[job["url"]]  # nobody waits for it any more
+                    job = None
+                if job is None:
+                    self.workers -= 1
+                    return
+            path = self._photo_file(job["url"])
+            with self.cond:
+                del self.busy[job["url"]]  # who comes now asks anew (from the cache)
+                waiters = list(job["waiters"])
+            for size, done, owner in waiters:
+                if getattr(owner, "gone", False):
+                    continue
+                try:
+                    pix = fitted(path, size) if path else None
+                except Exception as exc:
+                    log_line("photo %s: %r" % (where(job["url"]), exc))
+                    pix = None
+                GLib.idle_add(self._give, done, owner, pix)
+
+    @staticmethod
+    def _give(done, owner, value):
+        if not getattr(owner, "gone", False):
+            done(value)
+        return False
+
+    def _photo_file(self, url):
+        """The photo's file in the cache, fetched if not there yet; None if it can't be."""
         path = os.path.join(PHOTOS, hashlib.sha1(url.encode()).hexdigest()[:20] + ".img")
-
-        def work():
-            try:
-                if os.path.exists(path):
-                    os.utime(path)  # in use: kept by prune()
-                else:
-                    data = self.fetch(url, self.headers())
-                    with open(path + ".new", "wb") as out:
-                        out.write(data)
-                    os.replace(path + ".new", path)
-                pix = fitted(path, size)
-            except Exception as exc:
-                log_line("photo %s: %r" % (where(url), exc))
-                pix = None
-            GLib.idle_add(lambda: done(pix) and False)
-
-        threading.Thread(target=work, daemon=True).start()
+        try:
+            if os.path.exists(path):
+                os.utime(path)  # in use: kept by prune()
+                return path
+            data = self.fetch(url, self.headers())
+            os.makedirs(PHOTOS, mode=0o700, exist_ok=True)
+            fd, part = tempfile.mkstemp(dir=PHOTOS, suffix=".new")
+            with os.fdopen(fd, "wb") as out:
+                out.write(data)
+            os.replace(part, path)
+            return path
+        except Exception as exc:
+            log_line("photo %s: %r" % (where(url), exc))
+            return None
 
     @staticmethod
     def prune():
@@ -1890,9 +1956,10 @@ class Media:
 
     # --- saving -----------------------------------------------------------------
     def save(self, url, folder, name, done, replace=False):
-        """A file into folder, in a thread; done(path or None) on the GTK side.
-        The name is made harmless and, if taken, numbered: «песня (2).mp3»,
-        unless replace (the person chose to write over it)."""
+        """A file into folder, by the save worker (one at a time); done(path
+        or None) on the GTK side. The name is made harmless and, if taken,
+        numbered: «песня (2).mp3», unless replace (the person chose to write
+        over it)."""
         if not media_ok(url):
             log_line("save refused: %s" % where(url))
             GLib.idle_add(lambda: done(None) and False)
@@ -1928,7 +1995,20 @@ class Media:
                 path = None
             GLib.idle_add(lambda: done(path) and False)
 
-        threading.Thread(target=work, daemon=True).start()
+        with self.cond:
+            self.saves.append(work)
+            if not self.saving:
+                self.saving = True
+                threading.Thread(target=self._save_worker, daemon=True).start()
+
+    def _save_worker(self):
+        while True:
+            with self.cond:
+                if not self.saves:
+                    self.saving = False
+                    return
+                work = self.saves.pop(0)
+            work()
 
     # --- voice ----------------------------------------------------------------
     def voice(self, url):
@@ -2496,7 +2576,7 @@ class ChatView:
                 save.set_margin_bottom(8)
                 over.add_overlay(save)
             bubble.pack_start(over, False, False, 0)
-            self.photos.append((img, url))  # loaded once near the screen
+            self.photos.append((watched(img), url))  # loaded once near the screen
         for item in m.get("media") or []:
             bubble.pack_start(self._media(m, item), False, False, 0)
         if m["text"]:
@@ -2571,7 +2651,7 @@ class ChatView:
                 img = Gtk.Image.new_from_icon_name("video-x-generic", Gtk.IconSize.DIALOG)
                 img.set_size_request(460, 200)
                 box.pack_start(img, False, False, 0)
-                self.photos.append((img, item["thumb"]))  # Media.photo checks the host
+                self.photos.append((watched(img), item["thumb"]))  # Media.photo checks the host
             sec = secs(item["duration"])
             b = Gtk.Button(label="▶  Видео %s" % mmss(sec) if sec else "▶  Видео")
             b.get_style_context().add_class("file")
@@ -2737,7 +2817,7 @@ class ChatView:
             pos = img.translate_coordinates(self.box, 0, 0)
             if img.get_realized() and pos and top - page <= pos[1] <= top + 2 * page:
                 self.photo(url, lambda pix, img=img: pix and (
-                    img.set_from_pixbuf(pix), img.set_size_request(-1, -1)))
+                    img.set_from_pixbuf(pix), img.set_size_request(-1, -1)), owner=img)
             else:
                 keep.append((img, url))
         self.photos = keep

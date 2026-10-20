@@ -79,6 +79,51 @@ media.prune()
 assert not os.path.exists(old) and os.path.exists(path) and os.path.isdir(bm.CHATS)
 ok("photos")
 
+# --- the photo queue: two at a time, the last asked first, one fetch per link, none for the gone ---
+import threading  # noqa: E402
+
+
+class SlowHands(FakeHands):
+    def __init__(self, data):
+        super().__init__(photo_bytes=data)
+        self.now = self.most = 0
+        self.lock = threading.Lock()
+        self.gate = threading.Event()  # fetches wait here till the test lets them go
+
+    def fetch(self, url, headers):
+        with self.lock:
+            self.now += 1
+            self.most = max(self.most, self.now)
+        self.gate.wait(5)
+        with self.lock:
+            self.now -= 1
+        return super().fetch(url, headers)
+
+
+class Owner:
+    gone = False
+
+
+slow = SlowHands(png)
+q = bm.Media(slow.spawn, slow.open_uri, slow.fetch, slow.player)
+got = []
+for name in ("a", "b"):  # these two keep both workers busy
+    q.photo("https://i.oneme.ru/q-%s.png" % name, lambda pix, n=name: got.append(n))
+time.sleep(0.2)
+gone = Owner()
+for name in ("c", "d", "e"):
+    q.photo("https://i.oneme.ru/q-%s.png" % name, lambda pix, n=name: got.append(n),
+            owner=gone if name == "d" else None)
+q.photo("https://i.oneme.ru/q-e.png", lambda pix: got.append("e again"))  # the same link
+gone.gone = True  # its bubble went before its turn
+slow.gate.set()
+drain(1.0)
+fetched = [u.rsplit("-", 1)[1] for u, _h in slow.fetched]
+assert slow.most == 2, slow.most
+assert fetched[:2] in (["a.png", "b.png"], ["b.png", "a.png"]) and fetched[2:] == ["e.png", "c.png"]
+assert sorted(got) == ["a", "b", "c", "e", "e again"]  # d's owner gone: not fetched, not told
+ok("the photo queue")
+
 # --- voice: one player, made once, with the agent ------------------------------------------------
 assert not media.voice("https://evil.com/a.ogg") and hands.sound is None
 assert media.voice("https://vd.okcdn.ru/a.ogg")

@@ -194,7 +194,10 @@ programs are found on `PATH` (`haltia-vplay`, `b8k-vplay` before 2.0: `shutil.wh
   `photo_ok` is the same) for photos, previews, voice, video and files; one header, the
   `agent` (PyMax's browser user agent, set by `Max.logged_in`), and no `Referer`/`Origin` — the
   video CDN answers 400 to those; photos never follow a redirect off those hosts
-  (`PhotoRedirect`). It caches photos (`photo(url, done)`, touched when shown, `prune()` after
+  (`PhotoRedirect`). Photos come through its queue (`PHOTO_WORKERS` at a time, the last asked
+  first, one fetch per link, none for an `owner` that is `gone` — ChatView's images are `watched`),
+  saves through a worker of their own, one at a time. It caches photos (`photo(url, done, size,
+  owner)`, touched when shown, `prune()` after
   `PHOTO_DAYS` unshown), plays voice through libmpv (`voice`/`toggle`/`stop`, `on_time`/`on_end`;
   an `end-file` with reason ABORTED is a stop or a switch, not an end), starts a video in
   `haltia-vplay` (`b8k-vplay` before 2.0; on `PATH`, Видео's package) or `mpv --fs` with `ytdl=no` and `load-unsafe-playlists=no` (`video(url, title)`), and
