@@ -1,3 +1,9 @@
+haltia-messenger (2.6.1) unstable; urgency=medium
+
+  * Entering a chat or a channel focuses no entry: no keyboard until tapped.
+
+ -- Haltia <rensomail@gmail.com>  Tue, 20 Oct 2026 20:00:00 +0300
+
 haltia-messenger (2.6.0) unstable; urgency=medium
 
   * Photos and voice uploaded as MAX's own app does; channels found by name.

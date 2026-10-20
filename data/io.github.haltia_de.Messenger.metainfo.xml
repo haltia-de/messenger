@@ -20,6 +20,16 @@
   </content_rating>
   <requires><control>touch</control></requires>
   <releases>
+    <release version="2.6.1" date="2026-10-20">
+      <description>
+        <ul>
+          <li>Opening a chat or a channel no longer brings up the on-screen keyboard by itself: it comes when you tap the entry.</li>
+        </ul>
+        <ul>
+          <li xml:lang="ru">При входе в чат или канал экранная клавиатура больше не выскакивает сама: она появляется, когда вы касаетесь поля ввода.</li>
+        </ul>
+      </description>
+    </release>
     <release version="2.6.0" date="2026-10-20">
       <description>
         <ul>

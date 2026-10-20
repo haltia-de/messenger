@@ -1,5 +1,15 @@
 # Что нового · What's new
 
+## 2.6.1 (2026-10-20)
+
+### Русский
+
+- При входе в чат или канал экранная клавиатура больше не выскакивает сама: она появляется, когда вы касаетесь поля ввода.
+
+### English
+
+- Opening a chat or a channel no longer brings up the on-screen keyboard by itself: it comes when you tap the entry.
+
 ## 2.6.0 (2026-10-20)
 
 ### Русский
