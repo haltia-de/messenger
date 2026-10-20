@@ -1,5 +1,21 @@
 # Что нового · What's new
 
+## 2.6.0 (2026-10-20)
+
+### Русский
+
+- Фото и голосовые снова уходят в MAX: MAX изменил способ загрузки, и программа теперь загружает их так же, как его собственное приложение.
+- Поиск находит каналы и группы по названию, как поиск в самом MAX. Найденные показаны под вашими чатами, на них можно подписаться.
+- Голосовые сообщения можно выключить в настройках, тогда кнопки микрофона не будет.
+- Если файл с таким именем уже есть, программа так и говорит и предлагает заменить его, сохранить рядом копию или выбрать другое имя.
+
+### English
+
+- Photos and voice messages reach MAX again: MAX changed how uploads work, and the program now uploads them the way MAX's own app does.
+- The search finds channels and groups by name, as MAX's own search does. They are shown under your chats, ready to subscribe.
+- Voice messages can be switched off in the settings, which removes the microphone button.
+- When a file of the same name already exists, the program says so and offers to replace it, save a copy beside it or choose another name.
+
 ## 2.5.0 (2026-10-20)
 
 ### Русский
