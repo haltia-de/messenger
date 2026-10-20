@@ -3057,8 +3057,9 @@ class Max(Gtk.Application):
 
     def do_shutdown(self):
         self.backend.cache.flush()  # what the last two seconds changed
-        if self.recent is not None and self.recent != self.recent_saved:
-            save_json(EMOJI_RECENT, self.recent)  # the panel left open
+        recent = getattr(self, "recent", None)  # no window ever built: none
+        if recent is not None and recent != self.recent_saved:
+            save_json(EMOJI_RECENT, recent)  # the panel left open
         Gtk.Application.do_shutdown(self)
 
     def do_activate(self):
