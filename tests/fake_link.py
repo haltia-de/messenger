@@ -28,7 +28,24 @@ def user(uid, name):
 
 
 class FakeLink:
-    def __init__(self, me=ME, name="Я"):
+    hosts = ("max.ru",)
+    can = frozenset({"phone", "links", "react", "forward", "telemetry", "invites"})
+
+    def dialog_id(self, peer):
+        """A dialog's id: as MAX numbers it (own id XOR theirs), or, with a
+        prefix (a messenger of string ids, as Telegram's), the person's."""
+        return peer if self.prefix else self.me.id ^ peer
+
+    def dialog_of(self, me, user):  # the link's: as above, from either side
+        return user if self.prefix else me ^ user
+
+    def __init__(self, me=ME, name="Я", account="max", label="MAX", prefix=None, can=None,
+                 hosts=None):
+        self.account, self.label, self.prefix = account, label, prefix  # as PyMaxLink's
+        if can is not None:
+            self.can = frozenset(can)
+        if hosts is not None:
+            self.hosts = tuple(hosts)
         self.me = user(me, name)
         self.people = {me: self.me}  # (not self.users: the link's operation)
         self.contacts = set()  # ids
@@ -55,7 +72,7 @@ class FakeLink:
 
     def dialog(self, peer, unread=0):
         """The dialog with someone (numbered as MAX does: own id XOR theirs)."""
-        cid = self.me.id ^ peer
+        cid = self.dialog_id(peer)
         self._chat(cid, "DIALOG", None, {self.me.id: 0, peer: 0}, unread)
         return cid
 
@@ -207,7 +224,7 @@ class FakeLink:
     async def send(self, chat_id, text):
         self._call("send", chat_id=chat_id, text=text)
         if chat_id not in self.rooms:  # a dialog's first message starts it
-            peer = chat_id ^ self.me.id
+            peer = self.dialog_of(self.me.id, chat_id)
             self._chat(chat_id, "DIALOG", None, {self.me.id: 0, peer: 0}, 0)
         return self.say(chat_id, text, self.me.id)
 

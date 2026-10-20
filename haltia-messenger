@@ -744,6 +744,20 @@ class PyMaxLink:
     connects again by itself; on_login follows). run() ends, or raises,
     only when PyMax gives up. All of it runs in the caller's asyncio loop."""
 
+    account = "max"  # the account's name: settings, files, Backend.accounts
+    label = "MAX"  # on the screen
+    prefix = None  # its chat and people ids: MAX's are numbers
+    hosts = ("max.ru",)  # links of its channels and groups
+    # What it can besides messages (Account.can): find by phone, join by
+    # link, reactions, forwarding, telemetry, its own invite setting.
+    can = frozenset({"phone", "links", "react", "forward", "telemetry", "invites"})
+
+    @staticmethod
+    def dialog_of(me, user):
+        """The id of the dialog of me with user: MAX numbers it own id XOR
+        theirs (so the other one is found the same way)."""
+        return me ^ user
+
     def __init__(self, work_dir):
         self.work_dir = work_dir
         self.client = None
@@ -984,36 +998,35 @@ class PyMaxLink:
 
 
 class Offline(Exception):
-    """No connection to MAX now: the request was not sent."""
+    """No connection to that messenger now (or no such account): the
+    request was not sent."""
 
 
 class Backend:
-    """What the window asks of MAX, and what MAX tells it, on top of a link
-    (PyMaxLink, or tests/fake_link.py): the chat list and its summaries,
-    names, known people, the message cache and its gaps, pages, reactions.
-    It runs in its own thread with an asyncio loop;
-    the window calls it only through run(), and hears back through
-    GLib.idle_add: every request is answered, with Offline while there is
-    no connection. It is also the link's events object (on_qr, on_login,
-    on_message, on_reaction, on_delete, on_disconnect). The link is started
-    again when it gives up, after RETRY's pauses (retry() cuts one short),
-    and the window told: ui.failed(why, pause), ui.connected(on)."""
+    """What the window asks of the messengers, and what they tell it: one
+    Account per link (PyMaxLink, or tests/fake_link.py), all in one thread
+    with an asyncio loop. The window calls it only through run(), and hears
+    back through GLib.idle_add: every request is answered, with Offline
+    while its account has no connection. A request about a chat or a
+    person goes to the account whose id it is (of(): Account.owns); a
+    link of a channel to the one whose host it is."""
 
     def __init__(self, ui, link=None, cache=None):
         self.ui = ui
-        self.link = link  # PyMaxLink unless given (tests)
         self.cache = cache or MessageCache(CHATS)  # its own in tests that ask
         self.loop = None
-        self.online = False  # logged in and connected: requests go to MAX
-        self.tries = 0  # the link's starts in a row that ended without a login
-        self.wake = None  # set by retry(): the pause before the next start ends
-        self.me = None
-        self.names = {}
-        self.chats = {}
-        self.seeded = os.path.exists(KNOWN)
-        self.known = set(load_json(KNOWN, []))
-        self.agent = None  # PyMax's browser user agent, once logged in
-        self.aliases = {int(k): v for k, v in load_json(ALIASES, {}).items()}
+        self.accounts = {}  # name -> Account, in the order added
+        self.living = set()  # the accounts' tasks, once the loop runs
+        for one in link if isinstance(link, (list, tuple)) else [link] if link else []:
+            self.add(one)  # given (tests): else PyMaxLink, at the start
+
+    def add(self, link):
+        """An account on this link; started at once if the loop runs."""
+        folder = DATA if link.account == "max" else os.path.join(DATA, link.account)
+        account = self.accounts[link.account] = Account(self.ui, link, self.cache, folder)
+        if self.living:
+            asyncio.run_coroutine_threadsafe(self._live(account), self.loop)
+        return account
 
     def start(self):
         # The loop is there before its thread runs: a request made at once waits in it.
@@ -1024,10 +1037,25 @@ class Backend:
         asyncio.set_event_loop(self.loop)
         self.loop.run_until_complete(self._main())
 
+    async def _main(self):
+        os.makedirs(DATA, mode=0o700, exist_ok=True)
+        if not self.accounts:
+            self.add(PyMaxLink(DATA))
+        self.living.add(None)  # from now on an added account starts at once
+        await asyncio.gather(*(self._live(a) for a in list(self.accounts.values())))
+
+    async def _live(self, account):
+        task = asyncio.current_task()
+        self.living.add(task)
+        try:
+            await account.live()
+        finally:
+            self.living.discard(task)
+
     def run(self, coro, done=None, owner=None):
-        """Run a coroutine in the MAX thread; done(result, error) in the
-        window's, always: an error (Offline) if the thread is not running.
-        Not called when owner (a ChatView) is gone by then."""
+        """Run a coroutine in the messengers' thread; done(result, error) in
+        the window's, always: an error (Offline) if the thread is not
+        running. Not called when owner (a ChatView) is gone by then."""
         def answer(res, err):
             if done and not getattr(owner, "gone", False):
                 done(res, err)
@@ -1047,19 +1075,151 @@ class Backend:
         fut.add_done_callback(back)
 
     def retry(self):
-        """Start the link again now, not after the pause (the wait page's button)."""
+        """Start the links that gave up again now, not after the pause (the
+        wait page's button)."""
+        for account in self.accounts.values():
+            account.retry()
+
+    def of(self, some_id):
+        """The account whose chat or person this id is; Offline if none."""
+        for account in self.accounts.values():
+            if account.owns(some_id):
+                return account
+        raise Offline()
+
+    def label(self, name):
+        account = self.accounts.get(name)
+        return account.label if account else name
+
+    def can(self, what, some_id=None):
+        """Whether the account of this id (any account, without one) can
+        do this (PyMaxLink.can)."""
+        if some_id is not None:
+            return any(a.owns(some_id) and a.can(what) for a in self.accounts.values())
+        return any(a.can(what) for a in self.accounts.values())
+
+    # --- what the window asks, to the account it is for ---------------------------
+    async def history(self, chat_id):
+        return await self.of(chat_id).history(chat_id)
+
+    async def older(self, chat_id, before):
+        return await self.of(chat_id).older(chat_id, before)
+
+    async def media_url(self, chat_id, msg_id, item):
+        return await self.of(chat_id).media_url(chat_id, msg_id, item)
+
+    async def forward(self, chat_id, msg_id, from_chat_id):
+        return await self.of(chat_id).forward(chat_id, msg_id, from_chat_id)
+
+    async def send(self, chat_id, text):
+        return await self.of(chat_id).send(chat_id, text)
+
+    async def add_contact(self, user_id):
+        return await self.of(user_id).add_contact(user_id)
+
+    async def remove(self, chat_id):
+        return await self.of(chat_id).remove(chat_id)
+
+    async def react(self, chat_id, msg_id, emoji):
+        return await self.of(chat_id).react(chat_id, msg_id, emoji)
+
+    async def rename(self, user_id, name):
+        return await self.of(user_id).rename(user_id, name)
+
+    async def read(self, chat_id, msg_id):
+        return await self.of(chat_id).read(chat_id, msg_id)
+
+    async def find_phone(self, phone):
+        """The person with this phone number in the first messenger that has
+        them; the error of the last asked if none."""
+        error = Offline()
+        for account in self.accounts.values():
+            if account.can("phone"):
+                try:
+                    return await account.find_phone(phone)
+                except Exception as exc:
+                    error = exc
+        raise error
+
+    def _by_link(self, link):
+        host = urllib.parse.urlsplit(link).hostname or ""
+        for account in self.accounts.values():
+            if account.can("links") and any(host == h or host.endswith("." + h)
+                                            for h in account.link.hosts):
+                return account
+        raise Offline()
+
+    async def link_info(self, link):
+        return await self._by_link(link).link_info(link)
+
+    async def join(self, link):
+        return await self._by_link(link).join(link)
+
+    async def log(self, events):
+        """Telemetry events to the messengers that take them (MAX's)."""
+        for account in self.accounts.values():
+            if account.can("telemetry"):
+                await account.log(events)
+
+
+class Account:
+    """One messenger's account on top of its link (CONTEXT.md: Аккаунт): the
+    chat list and its summaries, names, known people, the message cache and
+    its gaps, pages, reactions. Its state files are in folder (DATA for
+    MAX, as before there were others). It is the link's events object
+    (on_qr, on_login, on_message, on_reaction, on_delete, on_disconnect);
+    live() keeps the link up: started again when it gives up, after RETRY's
+    pauses (retry() cuts one short), the window told ui.failed(account,
+    why, pause) and ui.connected(account, on). Requests that need the
+    messenger call ask() first: Offline while not connected."""
+
+    def __init__(self, ui, link, cache, folder):
+        self.ui = ui
+        self.link = link
+        self.id, self.label = link.account, link.label  # "max"; "MAX"
+        self.cache = cache
+        self.folder = folder
+        self.known_path = os.path.join(folder, "known.json")
+        self.aliases_path = os.path.join(folder, "names.json")
+        self.loop = None
+        self.online = False  # logged in and connected: requests go to the messenger
+        self.tries = 0  # the link's starts in a row that ended without a login
+        self.wake = None  # set by retry(): the pause before the next start ends
+        self.me = None
+        self.names = {}
+        self.chats = {}
+        self.seeded = os.path.exists(self.known_path)
+        self.known = set(load_json(self.known_path, []))
+        self.agent = None  # the browser user agent the link presents, once logged in
+        self.aliases = {self.key(k): v for k, v in load_json(self.aliases_path, {}).items()}
+
+    def key(self, text):
+        """An id from a file's key (JSON keys are strings): MAX's are numbers."""
+        return int(text) if self.link.prefix is None else text
+
+    def owns(self, some_id):
+        """Whether a chat's or a person's id is this account's."""
+        prefix = self.link.prefix
+        if prefix is None:
+            return isinstance(some_id, int) and not isinstance(some_id, bool)
+        return isinstance(some_id, str) and some_id.startswith(prefix)
+
+    def can(self, what):
+        return what in getattr(self.link, "can", ())
+
+    def retry(self):
+        """Start the link again now, not after the pause."""
         if self.loop is not None and self.wake is not None:
             self.loop.call_soon_threadsafe(self.wake.set)
 
     def ask(self):
-        """MAX can be asked now; else Offline, and nothing is sent."""
+        """The messenger can be asked now; else Offline, and nothing is sent."""
         if not self.online:
             raise Offline()
 
-    async def _main(self):
-        os.makedirs(DATA, mode=0o700, exist_ok=True)
-        if self.link is None:
-            self.link = PyMaxLink(DATA)
+    async def live(self):
+        os.makedirs(self.folder, mode=0o700, exist_ok=True)
+        self.loop = asyncio.get_running_loop()
         self.wake = asyncio.Event()
         while True:  # the link lives till it gives up; then it is started again
             try:
@@ -1070,8 +1230,8 @@ class Backend:
             self.online = False
             pause = RETRY[min(self.tries, len(RETRY) - 1)]
             self.tries += 1
-            log_line("link gave up (%s); again in %s s" % (why, pause))
-            GLib.idle_add(self.ui.failed, why, pause)
+            log_line("%s: link gave up (%s); again in %s s" % (self.id, why, pause))
+            GLib.idle_add(self.ui.failed, self.id, why, pause)
             self.wake.clear()
             try:
                 await asyncio.wait_for(self.wake.wait(), pause)
@@ -1080,13 +1240,13 @@ class Backend:
 
     # --- the link's events ------------------------------------------------------
     async def on_qr(self, qr_url):
-        path = os.path.join(DATA, "qr.png")
+        path = os.path.join(self.folder, "qr.png")
         qr_png(qr_url, path)
-        GLib.idle_add(self.ui.show_qr, path)
+        GLib.idle_add(self.ui.show_qr, self.id, path)
 
     async def on_login(self, me, chats, contacts, agent, session_id):
         try:
-            os.remove(os.path.join(DATA, "qr.png"))
+            os.remove(os.path.join(self.folder, "qr.png"))
         except OSError:
             pass
         self.me = me.id if me else None
@@ -1122,17 +1282,18 @@ class Backend:
         if not self.seeded:
             self.known.update(p for p in map(self.peer, chats) if p)
             self.seeded = True
-        save_json(KNOWN, sorted(self.known))
+        save_json(self.known_path, sorted(self.known))
         want = set()
         for c in chats:
             if c.kind == "DIALOG":
                 want.update(u for u in c.members if u != self.me)
         await self.lookup(want)
-        GLib.idle_add(self.ui.connected, True)
+        GLib.idle_add(self.ui.connected, self.id, True)
         if self.me:
-            GLib.idle_add(self.ui.logged_in, self.me, session_id)
-            GLib.idle_add(self.ui.show_invites, self.link.invites())
-        GLib.idle_add(self.ui.show_chats, [self.summary(c) for c in chats])
+            GLib.idle_add(self.ui.logged_in, self.id, self.me, session_id)
+            if self.can("invites"):
+                GLib.idle_add(self.ui.show_invites, self.link.invites())
+        GLib.idle_add(self.ui.show_chats, self.id, [self.summary(c) for c in chats])
 
     async def on_message(self, msg):
         await self.lookup({msg.sender})
@@ -1150,8 +1311,8 @@ class Backend:
     async def on_disconnect(self, why):
         """The connection is lost; the link connects again by itself."""
         self.online = False
-        log_line("connection lost: %s" % why)
-        GLib.idle_add(self.ui.connected, False)
+        log_line("%s: connection lost: %s" % (self.id, why))
+        GLib.idle_add(self.ui.connected, self.id, False)
 
     async def on_delete(self, chat_id, msg_ids):
         """Messages deleted (by their sender for everyone, or here): out of
@@ -1197,7 +1358,7 @@ class Backend:
         """Someone whose messages are welcome: a contact, or written to here."""
         if user_id and user_id != self.me and user_id not in self.known:
             self.known.add(user_id)
-            save_json(KNOWN, sorted(self.known))
+            save_json(self.known_path, sorted(self.known))
 
     def name(self, user_id, default=""):
         """The name given here, else the one in MAX."""
@@ -1228,7 +1389,7 @@ class Backend:
     def summary(self, chat):
         last = chat.last
         peer = self.peer(chat)
-        return {"id": chat.id, "title": self.title(chat), "type": chat.kind,
+        return {"id": chat.id, "account": self.id, "title": self.title(chat), "type": chat.kind,
                 "last": self.preview(last), "time": (last.time if last else 0) or chat.time,
                 "unread": chat.unread, "peer": peer,
                 "stranger": peer is not None and peer not in self.known}
@@ -1336,7 +1497,8 @@ class Backend:
         self.ask()
         chat = self.chats.get(chat_id)
         # A dialog not started yet is numbered own id XOR theirs.
-        self.remember(self.peer(chat) if chat else chat_id ^ self.me if self.me else None)
+        self.remember(self.peer(chat) if chat else self.link.dialog_of(self.me, chat_id)
+                      if self.me else None)
         msg = await self.link.send(chat_id, text)
         out = self.message(msg) if msg else None
         if out:
@@ -1349,7 +1511,7 @@ class Backend:
         user = await self.link.find_phone(phone)
         self.names[user.id] = user.name
         return {"id": user.id, "name": self.name(user.id),
-                "chat": self.me ^ user.id if self.me else None}  # their dialog, as MAX numbers it
+                "chat": self.link.dialog_of(self.me, user.id) if self.me else None}  # their dialog
 
     async def add_contact(self, user_id):
         self.ask()
@@ -1409,7 +1571,7 @@ class Backend:
             self.aliases[user_id] = name
         else:
             self.aliases.pop(user_id, None)
-        save_json(ALIASES, {str(k): v for k, v in self.aliases.items()})
+        save_json(self.aliases_path, {str(k): v for k, v in self.aliases.items()})
         return [self.summary(c) for c in self.chats.values() if self.peer(c) == user_id]
 
     async def read(self, chat_id, msg_id):
@@ -1418,7 +1580,7 @@ class Backend:
 
     async def log(self, events):
         """Telemetry events (dicts shaped as PyMax's TelemetryEvent) to MAX."""
-        if self.link is not None and self.online:
+        if self.online:
             await self.link.log(events)
 
 
@@ -1439,6 +1601,9 @@ class MessageCache:
         self.timer = None
 
     def _path(self, chat_id):
+        if isinstance(chat_id, str):  # another messenger's ("tg:…"): in a folder of its own
+            prefix, _, rest = chat_id.partition(":")
+            return os.path.join(self.folder, prefix, "%s.json" % rest)
         return os.path.join(self.folder, "%d.json" % chat_id)
 
     def _get(self, chat_id):  # under the lock
@@ -1515,8 +1680,8 @@ class MessageCache:
             dirty, self.dirty = self.dirty, set()
             for chat_id in dirty:
                 try:
-                    os.makedirs(self.folder, mode=0o700, exist_ok=True)
                     path = self._path(chat_id)
+                    os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
                     fd = os.open(path + ".new", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
                     with os.fdopen(fd, "w") as fh:
                         json.dump(self.chats.get(chat_id, []), fh, ensure_ascii=False)
@@ -2193,9 +2358,12 @@ class ChatList:
         self.unmuted = set(prefs.get("unmuted", []))  # channels with them
 
     # --- what comes in ----------------------------------------------------------
-    def replace(self, summaries):
-        """The whole list, after a login."""
-        self.chats = {s["id"]: s for s in summaries}
+    def replace(self, summaries, account="max"):
+        """An account's whole list, after its login: the others' chats stay
+        (a summary without an account is MAX's, as 2.4 kept them)."""
+        chats = {i: s for i, s in self.chats.items() if s.get("account", "max") != account}
+        chats.update((s["id"], s) for s in summaries)
+        self.chats = chats
         self.pending = {i: s for i, s in self.pending.items() if i not in self.chats}
         self._save_list()
 
@@ -3277,7 +3445,8 @@ class Max(Gtk.Application):
         # No connection to MAX: the person stays where they are, told here.
         self.offline = Gtk.Box()
         self.offline.get_style_context().add_class("offline")
-        self.offline.pack_start(label("Нет связи с MAX — переподключаюсь…", "offline",
+        self.down = set()  # the accounts with no connection now
+        self.offline.pack_start(label("Нет связи — переподключаюсь…", "offline",
                                       xalign=0.5, wrap=True), True, True, 0)
         self.offline.set_no_show_all(True)
         self.offline.get_children()[0].show()
@@ -3587,7 +3756,7 @@ class Max(Gtk.Application):
             priority=GLib.PRIORITY_LOW)
 
     # called from the MAX thread through idle_add
-    def show_qr(self, path):
+    def show_qr(self, _account, path):
         """A login is needed (the first, or MAX ended the last one): from
         any page; the cache stays."""
         self.qr_image.set_from_pixbuf(GdkPixbuf.Pixbuf.new_from_file(path))
@@ -3599,44 +3768,57 @@ class Max(Gtk.Application):
         self.win.present()  # a login needs the person, background or not
         return False
 
-    def logged_in(self, user, session):
-        if self.backend.agent:
-            self.media.agent = self.backend.agent  # media links want PyMax's browser agent
-        self.telemetry.started(user, session)
+    def logged_in(self, account, user, session):
+        agent = self.backend.accounts[account].agent
+        if agent and account == "max":
+            self.media.agent = agent  # media links want PyMax's browser agent
+        if self.backend.can("telemetry", user):
+            self.telemetry.started(user, session)
         self.moved()
         return False
 
-    def failed(self, _why, pause):
-        """The link gave up; Backend starts it again after pause s (the
+    def failed(self, account, _why, pause):
+        """A link gave up; Backend starts it again after pause s (the
         reason is in the log). With a list shown the person stays where
         they are, under the bar; else the wait page says it, with a button."""
-        self.connected(False)
+        self.connected(account, False)
         if self.chatlist.chats:
             return False
-        self.wait_text.set_text("Нет связи с MAX.\nПовторю через %d с." % pause)
+        self.wait_text.set_text("Нет связи с %s.\nПовторю через %d с."
+                                % (self.backend.label(account), pause))
         self.retryb.show()
         if self.stack.get_visible_child_name() != "settings":
             self.stack.set_visible_child_name("wait")
         return False
 
-    def connected(self, on):
-        """The connection to MAX is there (on) or lost: the bar says so."""
-        self.offline.set_visible(not on and self.stack.get_visible_child_name() != "qr")
+    def connected(self, account, on):
+        """An account's connection is there (on) or lost: the bar says so,
+        naming the messenger when there are more than one."""
+        (self.down.discard if on else self.down.add)(account)
+        text = "Нет связи — переподключаюсь…"
+        if self.down and len(self.backend.accounts) > 1 and len(self.down) == 1:
+            text = "Нет связи с %s — переподключаюсь…" % self.backend.label(next(iter(self.down)))
+        self.offline.get_children()[0].set_text(text)
+        self.offline.set_visible(bool(self.down) and self.stack.get_visible_child_name() != "qr")
         if on:
             self.retryb.hide()
-            self.wait_text.set_text("Подключение к MAX…")
+            self.wait_text.set_text(self.connecting())
         return False
+
+    def connecting(self):
+        names = " и ".join(self.backend.label(a) for a in self.backend.accounts) or "MAX"
+        return "Подключение к %s…" % names
 
     def retry(self):
         self.retryb.hide()
-        self.wait_text.set_text("Подключение к MAX…")
+        self.wait_text.set_text(self.connecting())
         self.backend.retry()
 
-    def show_chats(self, summaries):
-        """The whole list after a login: only the chats that differ from the
-        list shown are redrawn (a reconnect changes few)."""
+    def show_chats(self, account, summaries):
+        """An account's whole list after its login: only the chats that
+        differ from the list shown are redrawn (a reconnect changes few)."""
         before = dict(self.chatlist.chats)
-        self.chatlist.replace(summaries)
+        self.chatlist.replace(summaries, account)
         changed = {i for i, s in self.chatlist.chats.items() if before.get(i) != s}
         changed |= set(before) - set(self.chatlist.chats)
         page = self.stack.get_visible_child_name()

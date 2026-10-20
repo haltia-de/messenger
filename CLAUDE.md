@@ -92,15 +92,30 @@ programs are found on `PATH` (`haltia-vplay`, `b8k-vplay` before 2.0: `shutil.wh
 
 - **Two threads.** `Backend` runs in its own thread with its own asyncio loop. The GTK side calls
   into it only through `Backend.run(coro, done)`; results and events come back to GTK only via
-  `GLib.idle_add`. Keep this rule: never touch GTK widgets from the MAX thread, never await the
-  link from the GTK thread. `run(coro, done, owner)` always answers: with `Offline` when there
-  is no connection (`Backend.online`: set by `on_login`, cleared by the link's `on_disconnect`;
-  requests that need MAX call `ask()` first) or no loop, and never to an `owner` that is `gone`
-  (a destroyed `ChatView`). The loop is made in `start()`. When the link's `run` ends or raises
-  (PyMax gave up), `_main` starts it again after `RETRY`'s pauses (`retry()`, the wait page's
-  «Повторить», cuts one short) and tells `ui.failed(why, pause)`; `ui.connected(on)` shows the
-  «Нет связи» bar, the person stays on their page (the wait page only before any list). A new
-  QR (MAX ended the login) shows the QR page from anywhere.
+  `GLib.idle_add`. Keep this rule: never touch GTK widgets from the messengers' thread, never
+  await a link from the GTK thread. `run(coro, done, owner)` always answers: with `Offline` when
+  the account has no connection (`Account.online`: set by `on_login`, cleared by the link's
+  `on_disconnect`; requests that need the messenger call `ask()` first), there is no such
+  account, or no loop, and never to an `owner` that is `gone` (a destroyed `ChatView`). The loop
+  is made in `start()`.
+- **Accounts** (CONTEXT.md «Аккаунт»). `Backend` holds one `Account` per link
+  (`Backend.accounts`, by the link's `account`: `"max"`; `Backend(ui, link_or_links)`, else a
+  `PyMaxLink` at the start; `add(link)` starts one later). An account keeps its own me, names,
+  chats, known people and aliases; its files are in `DATA` for MAX (as before there were
+  others) and `DATA/<account>/` for the others; the message cache is shared, another
+  messenger's chats under `chats/<prefix>/`. A request about a chat or a person goes to the
+  account whose id it is (`Backend.of`, `Account.owns`: MAX's ids are numbers, another's
+  strings with its `prefix`, like `"tg:…"`), a channel's link to the one whose `hosts` it is on,
+  a phone to each that `can` it in turn; telemetry only to those that can. A link says what it
+  is: `account`, `label` (on the screen), `prefix`, `hosts`, `can` (`phone`, `links`, `react`,
+  `forward`, `telemetry`, `invites`) and `dialog_of(me, user)` (MAX: own id XOR theirs). Summaries
+  carry `account`, and `ChatList.replace(summaries, account)` replaces only that account's chats.
+  The window is told which account: `ui.failed(account, why, pause)`, `ui.connected(account,
+  on)` (the «Нет связи» bar, naming the messenger when only one of several is off; the person
+  stays on their page, the wait page only before any list), `show_qr`, `logged_in`,
+  `show_chats`. When a link's `run` ends or raises (PyMax gave up), `Account.live` starts it
+  again after `RETRY`'s pauses (`retry()`, the wait page's «Повторить», cuts one short). A new QR
+  (MAX ended the login) shows the QR page from anywhere.
 - **The link to MAX** (`PyMaxLink`, CONTEXT.md «Связь с MAX»). Every request to MAX and every
   event from it goes through one link object: `run(events)`, `chats_page`, `chats`, `users`,
   `history`, `read`, `send`, `find_phone`, `add_contact`, `link_info`, `join`, `leave`, `delete`

@@ -120,7 +120,8 @@ slow.gate.set()
 drain(1.0)
 fetched = [u.rsplit("-", 1)[1] for u, _h in slow.fetched]
 assert slow.most == 2, slow.most
-assert fetched[:2] in (["a.png", "b.png"], ["b.png", "a.png"]) and fetched[2:] == ["e.png", "c.png"]
+# both workers free at once take e and c together: their order is the threads'
+assert sorted(fetched[:2]) == ["a.png", "b.png"] and sorted(fetched[2:]) == ["c.png", "e.png"]
 assert sorted(got) == ["a", "b", "c", "e", "e again"]  # d's owner gone: not fetched, not told
 ok("the photo queue")
 

@@ -120,7 +120,7 @@ app.register(None)
 t0 = time.perf_counter()
 app.do_activate()
 activated = (time.perf_counter() - t0) * 1000
-wait(lambda: app.chatlist.chats and app.backend.online)
+wait(lambda: app.chatlist.chats and app.backend.accounts["max"].online)
 listed = (time.perf_counter() - t0) * 1000
 spin(0.5)
 

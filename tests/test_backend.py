@@ -59,23 +59,23 @@ fake.say(anna, "Привет", ANNA)
 fake.say(petya, "Как дела?", PETYA)
 ui = UI()
 B = bm.Backend(ui, fake)
-assert not B.seeded
-run(B.on_login(fake.me, list(fake.rooms.values()), [fake.people[ANNA]], fake.agent, 7))
-summaries = {s["id"]: s for s in said(ui, "show_chats")[-1][0]}
+assert not B.accounts["max"].seeded
+run(B.accounts["max"].on_login(fake.me, list(fake.rooms.values()), [fake.people[ANNA]], fake.agent, 7))
+summaries = {s["id"]: s for s in said(ui, "show_chats")[-1][1]}
 assert summaries[anna]["title"] == "Анна Петрова" and summaries[petya]["title"] == "Петя"
-assert B.known == {ANNA, PETYA}  # the first time: everyone already in a dialog
+assert B.accounts["max"].known == {ANNA, PETYA}  # the first time: everyone already in a dialog
 assert oct(os.stat(bm.KNOWN).st_mode & 0o777) == "0o600"
-assert said(ui, "logged_in")[-1] == (fake.me.id, 7) and B.agent == fake.agent
+assert said(ui, "logged_in")[-1] == ("max", fake.me.id, 7) and B.accounts["max"].agent == fake.agent
 assert said(ui, "show_invites")[-1] == ("CONTACTS",)  # MAX's own setting, as it said
 # a stranger's new dialog later is not known
 spam = fake.dialog(SPAM)
 fake.say(spam, "акция", SPAM)
 B2 = bm.Backend(UI(), fake)
-assert B2.seeded
-run(B2.on_login(fake.me, list(fake.rooms.values()), [], fake.agent, 7))
-assert B2.summary(fake.rooms[spam])["stranger"] and not B2.summary(fake.rooms[anna])["stranger"]
-B2.remember(SPAM)
-assert not B2.summary(fake.rooms[spam])["stranger"] and SPAM in bm.load_json(bm.KNOWN, [])
+assert B2.accounts["max"].seeded
+run(B2.accounts["max"].on_login(fake.me, list(fake.rooms.values()), [], fake.agent, 7))
+assert B2.accounts["max"].summary(fake.rooms[spam])["stranger"] and not B2.accounts["max"].summary(fake.rooms[anna])["stranger"]
+B2.accounts["max"].remember(SPAM)
+assert not B2.accounts["max"].summary(fake.rooms[spam])["stranger"] and SPAM in bm.load_json(bm.KNOWN, [])
 # the login's QR code, drawn without Pillow: a quiet border, then a finder's dark corner
 qr = os.path.join(os.environ["HOME"], "qr.png")
 bm.qr_png("https://max.ru/:login/abc", qr)
@@ -98,7 +98,7 @@ t0 = now_ms() - 10 ** 8
 for i in range(100):
     fake.say(big, "m%d" % i, PETYA, t=t0 + i * 1000)
 B = bm.Backend(UI(), fake)
-run(B.on_login(fake.me, list(fake.rooms.values()), [], fake.agent, 7))
+run(B.accounts["max"].on_login(fake.me, list(fake.rooms.values()), [], fake.agent, 7))
 msgs, gap = run(B.history(big))
 assert [m["text"] for m in msgs] == ["m%d" % i for i in range(70, 100)] and not gap
 assert fake.asked("read")[-1] == {"chat_id": big, "msg_id": fake.msgs[big][-1].id}
@@ -136,10 +136,10 @@ m = fake.say(anna, "", ANNA, attaches=[audio("https://vd.okcdn.ru/a.ogg"), video
                                        file(6, "a.pdf", 2048), photo("https://i.oneme.ru/p.jpg"),
                                        sticker()],
              reactions=[("👍", 2)])
-d = B.message(m)
+d = B.accounts["max"].message(m)
 assert [x["kind"] for x in d["media"]] == ["audio", "video", "file"] and d["photos"] == ["https://i.oneme.ru/p.jpg"]
 assert d["reactions"] == [["👍", 2]] and d["yours"] is None and d["text"] == "[стикер]"
-assert B.preview(m) == "Голосовое сообщение, видео, файл «a.pdf», фото, стикер"
+assert B.accounts["max"].preview(m) == "Голосовое сообщение, видео, файл «a.pdf», фото, стикер"
 
 
 def back(coro):
@@ -269,13 +269,13 @@ assert got == [(21, [9])], got
 bm.PyMaxLink("/nonexistent")._watch_deletions(SimpleNamespace())  # no runtime yet: nothing
 ui_del = UI()
 Bd = bm.Backend(ui_del, fake)
-run(Bd.on_login(fake.me, list(fake.rooms.values()), [], fake.agent, 7))
+run(Bd.accounts["max"].on_login(fake.me, list(fake.rooms.values()), [], fake.agent, 7))
 k1 = fake.say(anna, "первое", ANNA)
 k2 = fake.say(anna, "лишнее", ANNA)
-Bd.cache.add(anna, [Bd.message(k1), Bd.message(k2)])
-Bd.chats[anna].last = k2
+Bd.cache.add(anna, [Bd.accounts["max"].message(k1), Bd.accounts["max"].message(k2)])
+Bd.accounts["max"].chats[anna].last = k2
 fake.msgs[anna] = [m for m in fake.msgs[anna] if m.id != k2.id]  # deleted for all in MAX
-run(Bd.on_delete(anna, [k2.id]))
+run(Bd.accounts["max"].on_delete(anna, [k2.id]))
 assert k2.id not in [m["id"] for m in Bd.cache.read(anna)] and k1.id in [m["id"] for m in Bd.cache.read(anna)]
 chat_id, ids, summary = said(ui_del, "deleted")[-1]
 assert chat_id == anna and ids == [k2.id] and summary["last"] == "первое"
@@ -330,7 +330,7 @@ fake.person(40, "Ольга", phone="+79001234567")
 p = back(B.find_phone("+79001234567"))
 assert p == {"id": 40, "name": "Ольга", "chat": fake.me.id ^ 40}
 back(B.add_contact(40))
-assert 40 in fake.contacts and 40 in B.known
+assert 40 in fake.contacts and 40 in B.accounts["max"].known
 out = back(B.send(fake.me.id ^ 40, "Здравствуйте"))
 assert out["mine"] and out["text"] == "Здравствуйте" and fake.me.id ^ 40 in fake.rooms
 fake.group(-70, "Новости", kind="CHANNEL", joined=False, link="https://max.ru/news")
@@ -340,11 +340,11 @@ assert back(B.join("https://max.ru/news"))["id"] == -70 and -70 in fake.rooms
 back(B.remove(-70))
 assert fake.asked("leave")[-1] == {"chat_id": -70} and fake.asked("delete")[-1] == {"chat_id": -70}
 back(B.remove(petya))
-assert fake.asked("delete")[-1] == {"chat_id": petya} and petya not in B.chats
+assert fake.asked("delete")[-1] == {"chat_id": petya} and petya not in B.accounts["max"].chats
 renamed = back(B.rename(ANNA, "Аня"))
 assert [s["title"] for s in renamed] == ["Аня"] and bm.load_json(bm.ALIASES, {}) == {str(ANNA): "Аня"}
 back(B.rename(ANNA, ""))
-assert B.title(fake.rooms[anna]) == "Анна Петрова"
+assert B.accounts["max"].title(fake.rooms[anna]) == "Анна Петрова"
 ok("search, join, remove, rename, invites")
 
 # --- the real link up to PyMax's start, and the settings of the login answer ---------------
@@ -410,30 +410,30 @@ until(lambda: got)
 assert isinstance(got[0], bm.Offline)
 B.start()
 until(lambda: said(ui, "show_chats"))
-assert said(ui, "connected") == [(True,)] and B.online
+assert said(ui, "connected") == [("max", True)] and B.accounts["max"].online
 fake.drop()  # the Wi-Fi sleeps; PyMax connects again by itself
-until(lambda: said(ui, "connected")[-1] == (False,))
+until(lambda: said(ui, "connected")[-1] == ("max", False))
 got = []
 B.run(B.send(pc, "без связи"), lambda res, err: got.append(err))
 until(lambda: got)
 assert isinstance(got[0], bm.Offline) and not fake.asked("send")  # not sent at all
 fake.back()
-until(lambda: said(ui, "connected")[-1] == (True,))
+until(lambda: said(ui, "connected")[-1] == ("max", True))
 got = []
 B.run(B.send(pc, "снова"), lambda res, err: got.append((res, err)))
 until(lambda: got)
 assert got[0][1] is None and got[0][0]["text"] == "снова"
 fake.give_up()  # PyMax gave up: started again after a pause
 until(lambda: said(ui, "failed"))
-why, pause = said(ui, "failed")[0]
+_account, why, pause = said(ui, "failed")[0]
 assert "gave up" in why and pause == 0.05 and "link gave up" in open(bm.LOG).read()
-until(lambda: fake.runs == 2 and B.online)
+until(lambda: fake.runs == 2 and B.accounts["max"].online)
 bm.RETRY = (30,)
-B.tries = 0
+B.accounts["max"].tries = 0
 fake.give_up()
 until(lambda: len(said(ui, "failed")) == 2)
 B.retry()  # the wait page's button: not 30 s
-until(lambda: fake.runs == 3 and B.online)
+until(lambda: fake.runs == 3 and B.accounts["max"].online)
 
 
 class Gone:
@@ -447,6 +447,54 @@ until(lambda: got)
 drain()
 assert got == ["here"]
 ok("the connection lost, given up and started again; requests always answered")
+
+# --- two messengers: each its own account, requests to whose ids they are --------------------
+fake = FakeLink()
+fake.person(ANNA, "Анна", contact=True, phone="+79001112233")
+anna = fake.dialog(ANNA)
+fake.say(anna, "Привет из MAX", ANNA)
+tg = FakeLink(me="tg:1", name="Я", account="telegram", label="Telegram", prefix="tg:",
+              can={"phone", "links", "react", "forward"}, hosts=("t.me",))
+SASHA = tg.person("tg:77", "Внук Саша", contact=True, phone="+79005556677")
+sasha = tg.dialog(SASHA)
+tg.say(sasha, "Привет из Telegram", SASHA)
+tg.group("tg:-5", "Клуб", kind="CHANNEL", joined=False, link="https://t.me/club")
+ui = UI()
+B = bm.Backend(ui, [fake, tg])
+B.start()
+until(lambda: len(said(ui, "show_chats")) == 2)
+lists = {a: {s["id"]: s for s in ss} for a, ss in said(ui, "show_chats")}
+assert set(lists["max"]) == {anna} and set(lists["telegram"]) == {sasha}
+assert lists["telegram"][sasha]["account"] == "telegram" and lists["telegram"][sasha]["title"] == "Внук Саша"
+assert B.of(anna).id == "max" and B.of(sasha).id == "telegram" and B.of(SASHA).id == "telegram"
+assert B.label("telegram") == "Telegram" and not B.can("telemetry", sasha) and B.can("telemetry", anna)
+assert back(B.history(sasha))[0][-1]["text"] == "Привет из Telegram" and not fake.asked("history")
+assert back(B.send(sasha, "Как дела?"))["text"] == "Как дела?" and tg.asked("send")[-1]["chat_id"] == sasha
+assert back(B.find_phone("+79005556677"))["chat"] == sasha  # not in MAX: Telegram has them
+assert back(B.find_phone("+79001112233"))["chat"] == anna
+assert back(B.link_info("https://t.me/club"))["title"] == "Клуб" and not fake.asked("link_info")
+back(B.log([{"event": "GO"}]))
+assert fake.asked("log") and not tg.asked("log")  # telemetry is MAX's only
+assert os.path.exists(os.path.join(bm.DATA, "telegram", "known.json"))  # its files apart
+assert "tg:77" not in bm.load_json(bm.KNOWN, [])
+tg.drop()  # one messenger without a connection: the other is asked all the same
+until(lambda: ("telegram", False) in said(ui, "connected"))
+got = []
+B.run(B.send(sasha, "без связи"), lambda res, err: got.append(err))
+B.run(B.send(anna, "через MAX"), lambda res, err: got.append(err))
+until(lambda: len(got) == 2)
+assert isinstance(got[0], bm.Offline) and got[1] is None
+got = []
+B.run(B.send("wa:1", "нет такого"), lambda res, err: got.append(err))  # no such account
+until(lambda: got)
+assert isinstance(got[0], bm.Offline)
+# a login's list replaces only that account's chats
+L = bm.ChatList(os.path.join(bm.PHOTOS, "two.json"), os.path.join(bm.DATA, "two-prefs.json"))
+L.replace(list(lists["max"].values()), "max")
+L.replace(list(lists["telegram"].values()), "telegram")
+L.replace([], "telegram")
+assert set(L.chats) == {anna}
+ok("two messengers")
 
 # --- the message cache: in memory, on disk a little later, read back by a new one -----------------
 c = bm.MessageCache(os.path.join(bm.PHOTOS, "cache-test"), delay=0.05)
@@ -465,6 +513,10 @@ got = fresh.read(7)
 assert got[0]["id"] == 6 and got[0]["reactions"] == [["👍", 1]] and got[0]["yours"] == "👍"
 fresh.drop(7)
 assert fresh.read(7) == [] and not os.path.exists(c._path(7))
+c.add("tg:5", [{"id": 1, "time": 1}])  # another messenger's chat: a folder of its own
+c.flush()
+assert c._path("tg:5") == os.path.join(c.folder, "tg", "5.json") and os.path.exists(c._path("tg:5"))
+assert bm.MessageCache(c.folder).read("tg:5") == [{"id": 1, "time": 1}]
 c.add(8, [{"id": 1, "time": 1}])
 c.drop(8)  # dropped before its write: nothing comes back on disk
 time.sleep(0.15)
