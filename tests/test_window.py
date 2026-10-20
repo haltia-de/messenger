@@ -150,6 +150,7 @@ app.notify = lambda msg: buzzes.append(msg)
 badges = []  # the counts sent as Unity's LauncherEntry
 _badge = app.badge
 app.badge = lambda n: (badges.append(n), _badge(n))
+app.set_flags(app.get_flags() | bm.Gio.ApplicationFlags.NON_UNIQUE)  # beside a running one
 app.register(None)
 app.do_activate()
 wait(lambda: app.chatlist.chats and app.backend.me, what="login")
@@ -318,7 +319,7 @@ assert app.chatlist.get(mama)["last"] == "Ой, не тебе"
 fake.deleted(mama, [doomed.id])
 wait(lambda: not any(w.msg_id == doomed.id for w in holds_of(app.view)), what="deleted bubble")
 wait(lambda: app.chatlist.get(mama)["last"] != "Ой, не тебе", what="list preview")
-assert doomed.id not in [m["id"] for m in bm.cache_read(mama)]
+assert doomed.id not in [m["id"] for m in app.backend.cache.read(mama)]
 col = column(app.view)
 assert all(not (a == b == "day") for a, b in zip(col, col[1:])) and col[-1] != "day"
 ok("deleted for everyone")

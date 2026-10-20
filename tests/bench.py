@@ -104,8 +104,9 @@ for k in range(600):  # a long channel, paged up
              people[0], t=NOW - (600 - k) * 600000)
 bm.save_json(bm.KNOWN, people)
 
-bm.cache_add = timed("cache_add (MAX thread)", bm.cache_add)
 app = bm.Max(link=fake)
+app.set_flags(app.get_flags() | bm.Gio.ApplicationFlags.NON_UNIQUE)  # beside a running one
+app.backend.cache.add = timed("cache add (MAX thread)", app.backend.cache.add)
 app.notify = lambda msg: None  # no desktop notifications from a bench
 app.badge = timed("badge", app.badge)
 app.fill_list = timed("fill_list", app.fill_list)
