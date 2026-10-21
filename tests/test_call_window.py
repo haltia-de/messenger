@@ -103,6 +103,31 @@ with patch.object(app.backend, "call", side_effect=dial):
 assert app.lookup_action("quit") is not None and app.get_accels_for_action("app.quit")
 ok("mandatory dial confirmation, cancellation, reentry, changed chat and incoming-call races")
 
+# Use the real kit dialog and its nested GTK loop. A timeout cancels only
+# the broken implementation so this test fails rather than hanging.
+responses, timed_out = [], []
+def interrupt_confirmation():
+    question = next(w for w in bm.Gtk.Window.list_toplevels()
+                    if isinstance(w, bm.Gtk.Dialog) and w.get_transient_for() is app.win)
+    question.connect("response", lambda _dialog, response: responses.append(response))
+    app.call_changed({"id": "interrupt-dialog", "name": "Тестовый собеседник", "state": "ringing"})
+    def fallback():
+        timed_out.append(True)
+        question.response(bm.Gtk.ResponseType.CANCEL)
+        return False
+    fallback_timer.append(GLib.timeout_add(300, fallback))
+    return False
+fallback_timer = []
+GLib.idle_add(interrupt_confirmation)
+app.dial_call()
+if not timed_out:
+    GLib.source_remove(fallback_timer[0])
+assert not timed_out, "incoming call left the dial confirmation blocking Answer"
+assert responses == [bm.Gtk.ResponseType.CANCEL]
+assert not requests and app.call_answer.is_sensitive()
+app.call_changed({"id": "interrupt-dialog", "name": "Тестовый собеседник", "state": "ended"})
+ok("incoming call dismisses the real dial confirmation without dialling or answering")
+
 app.call_changed({"id": "synthetic-invitation", "name": "Тестовый собеседник", "state": "ringing"})
 wait(lambda: len(notifications) >= 2)
 notification = notifications[-1]

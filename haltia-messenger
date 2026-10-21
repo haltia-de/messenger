@@ -2508,6 +2508,9 @@ class Backend:
                     call.start(params)
             except BaseException:
                 await call.end(None, "failed")
+                # No ws2 task will be started after a failed dial request.
+                # Release shutdown even if it already canceled this call.
+                call.hangup_done.set()
                 raise
         else:
             call = account.call
@@ -6879,6 +6882,13 @@ class Max(Gtk.Application):
         else:
             self.call_awake.release()
         if state == "ringing":
+            if self.dial_confirming:
+                # The kit's question runs a nested GTK loop. Dismiss its
+                # modal window so it cannot cover the incoming controls.
+                for dialog in Gtk.Window.list_toplevels():
+                    if (isinstance(dialog, Gtk.Dialog) and dialog.get_modal()
+                            and dialog.get_transient_for() is self.win):
+                        dialog.response(Gtk.ResponseType.CANCEL)
             if self.call_notice != call["id"]:
                 self.call_notice = call["id"]
                 self.stop_sound()

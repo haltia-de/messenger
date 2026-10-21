@@ -407,7 +407,7 @@ async def quit_hangup():
     ok("quit waits for a delayed hangup send and releases media first")
 
 
-async def quit_during_dial():
+async def quit_during_dial(fails=False):
     from fake_link import FakeLink
     fake = FakeLink(can={"calls"})
     fake.person(10, "Тестовый собеседник")
@@ -421,6 +421,8 @@ async def quit_during_dial():
     gate = asyncio.Event()
     async def dial(*_args):
         await gate.wait()
+        if fails:
+            raise bm.Offline()
         return dict(params)
     fake.dial = dial
     pending = asyncio.create_task(backend.call("dial", peer=dialog))
@@ -432,6 +434,17 @@ async def quit_during_dial():
     await asyncio.sleep(.01)
     assert not ending.done() and call.closed
     gate.set()
+    if fails:
+        try:
+            await pending
+        except bm.Offline:
+            pass
+        else:
+            raise AssertionError("dial should fail")
+        await asyncio.wait_for(ending, .2)
+        assert call.hangup_done.is_set() and call.task is None
+        ok("failed setup releases the quit waiter without the two-second timeout")
+        return
     await pending
     await asyncio.wait_for(ending, 1)
     await call.task
@@ -452,6 +465,7 @@ async def main():
     await busy_invitation()
     await quit_hangup()
     await quit_during_dial()
+    await quit_during_dial(fails=True)
 
 
 asyncio.run(main())
