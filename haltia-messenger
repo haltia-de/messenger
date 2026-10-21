@@ -2146,6 +2146,17 @@ class CallAudio:
             return False
         if self.video_bin is None:
             raise RuntimeError("video unavailable")
+        self.camera_kind = None
+        for attempt in range(2):
+            try:
+                return self._start_camera(self.camera_kind)
+            except (RuntimeError, GLib.Error):
+                if attempt or os.environ.get("HALTIA_CAMERA_SOURCE"):
+                    raise
+                # Device re-enumeration can invalidate both discovery and source.
+                # This retries capture once, never the call or a failed RTP link.
+
+    def _start_camera(self, previous_kind):
         override = os.environ.get("HALTIA_CAMERA_SOURCE")
         if override == "videotestsrc":
             source = self.Gst.ElementFactory.make("videotestsrc", None)
@@ -2159,6 +2170,12 @@ class CallAudio:
                 raise RuntimeError("no camera")
             chosen = next((c for c in found if c.front), found[0])
             source = chosen.make()
+        if source is None:
+            raise RuntimeError("no camera source")
+        self.camera_kind = source.get_factory().get_name()
+        if previous_kind == "libcamerasrc" and self.camera_kind != "libcamerasrc":
+            # A raw Bayer V4L2 node is not a replacement for libcamera's ISP.
+            raise RuntimeError("libcamera unavailable")
         width, height, fps = self.video_size
         camera = self.Gst.parse_launch(
             "videorate name=rate drop-only=true ! video/x-raw,framerate=%d/1 "
@@ -2192,8 +2209,13 @@ class CallAudio:
 
     def _camera_bus(self, _bus, message, _data):
         if message.type == self.Gst.MessageType.ERROR:
-            self.loop.call_soon_threadsafe(self._deliver, self.status, "camera-failed")
+            self.loop.call_soon_threadsafe(self._camera_error, _bus, self.video_generation)
         return self.Gst.BusSyncReply.DROP
+
+    def _camera_error(self, bus, generation):
+        if (self.camera is not None and self.camera.get_bus() == bus
+                and generation == self.video_generation):
+            self._deliver(self.status, "camera-failed")
 
     async def _promise(self, command, *args):
         future = self.loop.create_future()

@@ -57,6 +57,73 @@ for missing in ("vp8enc", "vp8dec", "appsink", None):
 ok("video support is probed once independently of voice support")
 
 
+def camera_refresh():
+    import haltia_kit
+    # A stale discovery, link or startup must be replaced, never reused.
+    for failure in ("missing", "link", "state", "persistent", "link-twice", "state-twice", "raw-fallback"):
+        peers = []
+        for n in range(2):
+            source = Mock()
+            source.get_factory.return_value.get_name.return_value = (
+                "v4l2src" if failure == "raw-fallback" and n else "libcamerasrc")
+            source.link_filtered.return_value = not (failure == "link-twice" or
+                (n == 0 and failure in ("link", "raw-fallback")))
+            peers.append(SimpleNamespace(front=True, make=Mock(return_value=source)))
+        discoveries = [[], [peers[1]]] if failure == "missing" else [[peers[0]], [peers[1]]]
+        if failure == "persistent":
+            discoveries = [[], []]
+        camera_module = SimpleNamespace(cameras=Mock(side_effect=discoveries))
+        pipelines = []
+        scheduled, statuses = [], []
+        audio = bm.CallAudio.__new__(bm.CallAudio)
+        audio.camera, audio.closed, audio.video_generation = None, False, 0
+        audio.video_bin, audio.video_size = object(), (320, 240, 15)
+        audio.loop = SimpleNamespace(call_soon_threadsafe=lambda cb, *a: scheduled.append((cb,a)))
+        audio.status = statuses.append
+        def pipeline(*_args):
+            pipe = Mock()
+            index = len(pipelines)
+            def state(value):
+                if value == "playing" and (failure == "state-twice" or (index == 0 and failure == "state")):
+                    audio._camera_bus(pipe.get_bus(), SimpleNamespace(type="error"), None)
+                    return "failure"
+                return "success"
+            pipe.set_state.side_effect = state
+            pipelines.append(pipe)
+            return pipe
+        audio.Gst = SimpleNamespace(
+            State=SimpleNamespace(NULL="null", PLAYING="playing"),
+            StateChangeReturn=SimpleNamespace(FAILURE="failure"),
+            MessageType=SimpleNamespace(ERROR="error"), BusSyncReply=SimpleNamespace(DROP="drop"),
+            Caps=SimpleNamespace(from_string=lambda text: text), parse_launch=pipeline)
+        with patch.dict(bm.os.environ, {"HALTIA_CAMERA_SOURCE": ""}), \
+                patch.object(haltia_kit, "camera", camera_module, create=True):
+            if failure in ("persistent", "link-twice", "state-twice", "raw-fallback"):
+                try:
+                    audio.set_video(True)
+                except RuntimeError:
+                    pass
+                else:
+                    raise AssertionError("failed camera unexpectedly opened")
+                assert audio.camera is None
+            else:
+                assert audio.set_video(True) is True
+                assert audio.camera is pipelines[-1]
+                # A queued error from the discarded source cannot stop the new one.
+                for cb, args in scheduled:
+                    cb(*args)
+                assert not statuses
+            assert camera_module.cameras.call_count == 2
+            for pipe in pipelines[:-1] if audio.camera is not None else pipelines:
+                assert any(c.args == ("null",) for c in pipe.set_state.call_args_list)
+            audio.set_video(False)
+            assert audio.camera is None and not audio.closed
+    ok("stale camera discovery/link/start retries once with fresh elements; no raw Bayer fallback")
+
+
+camera_refresh()
+
+
 def literal(value):
     data = json.dumps(value).encode()
     n = len(data) - 15
