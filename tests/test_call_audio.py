@@ -65,8 +65,14 @@ async def pair(passive=False):
     states = [set(), set()]
     peers = []
     samples = [0, 0]
+    early_candidates, callback_errors = [], []
+    previous_handler = loop.get_exception_handler()
+    loop.set_exception_handler(lambda _loop, context: callback_errors.append(context))
     def candidate(n, value):
-        peers[1 - n].add_candidate(value)
+        if len(peers) < 2:
+            early_candidates.append((n, value))
+        else:
+            peers[1 - n].add_candidate(value)
     try:
         offer = None
         for n in range(2):
@@ -84,6 +90,9 @@ async def pair(passive=False):
             offer["sdp"] = offer["sdp"].replace("RTP/SAVPF 111", "RTP/SAVPF 63 111")
             offer["sdp"] = offer["sdp"].replace("a=rtpmap:111", "a=rtpmap:63 red/48000/2\r\na=fmtp:63 111/111\r\na=rtpmap:111")
             offer["sdp"] = offer["sdp"].replace("a=inactive", "a=sendrecv")
+        for n, value in early_candidates:
+            candidate(n, value)
+        early_candidates.clear()
         await peers[1].remote(offer)
         answer = await peers[1].description("answer")
         if passive:
@@ -114,6 +123,7 @@ async def pair(passive=False):
             assert all(set(c) <= {"type", "packets-received", "packets-sent", "packets-lost",
                                   "jitter", "round-trip-time", "bytes-received", "bytes-sent",
                                   "nack-count"} for c in counters)
+        assert not callback_errors, callback_errors
         ok("passive offer, active answer and two-way Opus" if passive else "outgoing offer with inactive video and two-way Opus")
     finally:
         pipelines = [peer.pipeline for peer in peers]
@@ -124,6 +134,7 @@ async def pair(passive=False):
             assert peer.pipeline is None and peer.rtc is None and peer.bus is None
         assert all(pipeline.get_state(0)[1] == peers[0].Gst.State.NULL for pipeline in pipelines)
         assert all(not rtc.handler_is_connected(handler) for rtc, ids in handlers for handler in ids)
+        loop.set_exception_handler(previous_handler)
 
 
 async def main():

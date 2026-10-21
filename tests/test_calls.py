@@ -452,6 +452,38 @@ async def quit_during_dial(fails=False):
     ok("quit waits for cancellation while outgoing setup is still pending")
 
 
+async def missed_calls():
+    from fake_link import FakeLink
+    notices = []
+    class UI:
+        def call_changed(self, _call):
+            return False
+        def missed_call(self, notice):
+            notices.append(notice)
+            return False
+    fake = FakeLink(can={"calls"})
+    account = bm.Backend(UI(), fake).accounts["max"]
+    account.me = fake.me.id
+    account.names[10] = "Тестовый собеседник"
+    for case in ("remote", "timeout", "declined", "answered", "outgoing", "elsewhere"):
+        call = account.new_call(case, 10, case != "outgoing")
+        if case == "remote":
+            await account.on_call_frame(121, {"conversationId": case})
+            await account.on_call_frame(121, {"conversationId": case})
+        elif case == "elsewhere":
+            await account.on_call_frame(120, {"conversationId": case})
+        else:
+            call.accepted = case == "answered"
+            await call.end("REJECTED" if case == "declined" else "MISSED" if case == "timeout" else None)
+        await call.end()  # A duplicate closure cannot create another notice.
+    while bm.GLib.MainContext.default().iteration(False):
+        pass
+    assert [n["id"] for n in notices] == ["remote", "timeout"]
+    assert all(n["chat"] == fake.dialog_of(fake.me.id, 10) and n["peer"] == 10
+               and n["name"] == "Тестовый собеседник" and n["time"] > 0 for n in notices)
+    ok("unanswered incoming closure and timeout are missed; decline, answer, outgoing and answer elsewhere are not")
+
+
 async def main():
     await scenario(True)
     await scenario(False)
@@ -466,6 +498,7 @@ async def main():
     await quit_hangup()
     await quit_during_dial()
     await quit_during_dial(fails=True)
+    await missed_calls()
 
 
 asyncio.run(main())

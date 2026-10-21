@@ -8,6 +8,7 @@ bm = load()
 from fake_link import FakeLink
 from fake_hands import FakeHands
 from fake_logind import FakeLogind
+from haltia_kit import awake
 from gi.repository import GLib, Gio, GdkPixbuf
 
 
@@ -20,6 +21,18 @@ def wait(check):
         time.sleep(.01)
 
 
+def shot(name):
+    folder = os.environ.get("HALTIA_SHOTS")
+    if not folder:
+        return
+    import cairo
+    app.win.check_resize()
+    allocation = app.win.get_allocation()
+    surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, allocation.width, allocation.height)
+    app.win.draw(cairo.Context(surface))
+    surface.write_to_png(os.path.join(folder, name))
+
+
 fake = FakeLink(can=FakeLink.can | {"calls"})
 fake.person(10, "Тестовый собеседник", contact=True)
 dialog = fake.dialog(10)
@@ -27,6 +40,7 @@ group = fake.group(20, "Тестовая группа")
 hands = FakeHands()
 app = bm.Max(link=fake, media=bm.Media(hands.spawn, hands.open_uri, hands.fetch, hands.player, hands.download))
 app.call_ringer = Mock()  # No real speaker, even on a host with media support.
+portal_awake = app.call_awake
 app.call_awake = Mock()
 logind = FakeLogind()
 app.call_logind.inhibit = logind.inhibit
@@ -56,6 +70,10 @@ bus_owner = Gio.bus_own_name_on_connection(connection, "org.freedesktop.Notifica
 wait(lambda: owned)
 app.do_activate()
 assert app.ring_scale.get_value() == 65
+app.ring_scale.set_value(0)
+assert app.ring_scale.get_value() == 20 and bm.ring_volume() == .2
+bm.save_setting("ring_volume", "0")
+assert bm.ring_volume() == .2  # Old saved settings cannot silence calls either.
 app.ring_scale.set_value(40)
 assert bm.ring_volume() == .4
 wait(lambda: app.backend.accounts["max"].online and dialog in app.chatlist.chats)
@@ -159,13 +177,7 @@ for width, height in ((800, 600), (1280, 800)):
         assert allocation.height >= 80
         assert allocation.y + allocation.height <= app.call_box.get_allocated_height()
     assert app.call_name.is_drawable() and app.call_photo.is_drawable()
-    shots = os.environ.get("HALTIA_SHOTS")
-    if shots:
-        import cairo
-        allocation = app.win.get_allocation()
-        surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, allocation.width, allocation.height)
-        app.win.draw(cairo.Context(surface))
-        surface.write_to_png(os.path.join(shots, "incoming-%d.png" % width))
+    shot("incoming-%d.png" % width)
 app.call_changed({"id": "synthetic-invitation", "name": "Тестовый собеседник", "state": "active"})
 assert app.call_logind.fd == held_fd and len(logind.requests) == inhibitors
 assert not logind.released()
@@ -198,8 +210,65 @@ with patch.object(app.media, "photo", side_effect=lambda url, done, **_kw: portr
     portraits[0](old)
     assert app.call_photo.get_pixbuf() == new
     app.call_changed({"id": "portrait-new", "name": "Второй", "state": "ended"})
+# A pre-call error clears the previous caller and invalidates its late photo.
+app.call_result(None, bm.Offline())
+assert app.call_name.get_text() == "" and app.call_portrait is None
+portraits[-1](new)
+assert app.call_photo.get_storage_type() == bm.Gtk.ImageType.ICON_NAME
+assert not app.call_hint.get_visible() and app.call_end.get_label() == "Закрыть"
+app.call_end.clicked()
+
+# A refused logind is tried once per call, not once per state/name update.
+logind.refuse = True
+attempts = len(logind.requests)
+portal = Mock()
+portal.inhibit.return_value = 0
+with patch.object(app, "call_awake", portal_awake), patch.object(portal_awake, "app", portal):
+    with patch.object(awake.Gio, "bus_get_sync", return_value=logind.client):
+        for count, call_id in enumerate(("refused-first", "refused-next"), 1):
+            for state in ("ringing", "ringing", "connecting", "active"):
+                app.call_changed({"id": call_id, "name": "Тестовый собеседник", "state": state})
+            assert len(logind.requests) == attempts + count and portal.inhibit.call_count == count
+            app.call_changed({"id": call_id, "name": "Тестовый собеседник", "state": "ended"})
+logind.refuse = False
+
+async def unanswered():
+    call = app.backend.accounts["max"].new_call("missed-local", 10, True)
+    await call.end()  # Signalling ended without opening a socket or microphone.
+app.backend.run(unanswered())
+wait(lambda: app.missed_calls.get(str(dialog), {}).get("id") == "missed-local")
+notice = app.missed_calls[str(dialog)]
+wait(lambda: any(n[6].get("category") == "call.missed" for n in notifications))
+missed = [n for n in notifications if n[6].get("category") == "call.missed"]
+assert missed[-1][3] == "Пропущенный звонок от Тестовый собеседник"
+assert "default" in missed[-1][5] and missed[-1][6]["urgency"] == 1
+app.missed_call(notice)
+app.open(group)
+assert not app.view.call_note.get_visible()
+app.activate_action("open-chat", GLib.Variant("s", bm.json.dumps(dialog)))
+assert app.open_chat == dialog and app.view.call_note.is_visible()
+assert app.call_pages.get_visible_child_name() == "messages"
+assert "пропущенный" in app.view.call_note.get_text().lower()
+assert app.view.message(notice["id"]) is None and not requests
+until = time.monotonic() + .3
+wait(lambda: time.monotonic() > until)
+shot("missed-call.png")
+saved = bm.load_json(app.missed_path, {})
+assert saved[str(dialog)] == notice
+assert os.stat(app.missed_path).st_mode & 0o777 == 0o600
+# Restoring an app and its view keeps the dated mark, with no server message.
+restored = bm.Max(link=FakeLink())
+assert restored.missed_calls == saved
+restored_view = restored.view_for(dialog)
+assert restored_view.call_note.get_visible()
+restored_view.destroy()
+ok("missed notification opens the chat; its dated local mark survives a restart without a fake message")
+ok("ringtone floor, clean error identity and one failed inhibitor attempt per call")
+
 app.backend.run(app.backend.stop("max"))
 wait(lambda: not app.backend.accounts["max"].online)
+app.signin("max", {"kind": "out"})
+assert not bm.load_json(app.missed_path, {}) and not app.view.call_note.get_visible()
 app.win.destroy()
 assert all(logind.released(n) for n in range(len(logind.readers)))
 logind.close()

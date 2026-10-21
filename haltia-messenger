@@ -1833,7 +1833,7 @@ def calls_supported():
 
 def ring_volume():
     try:
-        return max(0., min(1., float(load_text("ring_volume", "0.65"))))
+        return max(.2, min(1., float(load_text("ring_volume", "0.65"))))
     except ValueError:
         return .65
 
@@ -2806,6 +2806,12 @@ class Account:
                     "photo": self.portraits.get(call.peer), "state": state})
                 if call.closed:
                     self.call = None
+                    if (call.incoming and not call.accepted
+                            and call.end_reason not in ("REJECTED", "BUSY")):
+                        GLib.idle_add(self.ui.missed_call, {
+                            "id": call.id, "chat": self.link.dialog_of(self.me, call.peer),
+                            "peer": call.peer, "name": self.name(call.peer, "Собеседник"),
+                            "time": now_ms()})
         call = self.call = VoiceCall(conversation, peer, incoming, changed, self.agent)
         changed(call, call.state)
         return call
@@ -2815,6 +2821,8 @@ class Account:
             if opcode == 120 and (self.call is None or not self.call.incoming or self.call.accepted):
                 return
             if self.call is not None and self.call.id == payload.get("conversationId"):
+                if opcode == 120:
+                    self.call.accepted = True  # answered elsewhere, not missed here
                 await self.call.end()
             return
         if not self.online or not self.can("calls"):
@@ -4368,7 +4376,7 @@ class ChatView:
     photo. Everything is called on the GTK side."""
 
     def __init__(self, chat_id, kind, cached, fetch_older, on_hold, on_media, on_react,
-                 photo, on_photo=lambda url: None, on_forward=None, on_save=None):
+                 photo, on_photo=lambda url: None, on_forward=None, on_save=None, missed=None):
         self.chat_id = chat_id
         self.group = kind in ("CHAT", "CHANNEL")  # senders' names over their bubbles
         self.fetch_older, self.on_hold = fetch_older, on_hold
@@ -4416,6 +4424,8 @@ class ChatView:
             w.show()
         column = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         column.set_margin_top(12)
+        self.call_note = label("", "call-state", xalign=0.5, wrap=True)
+        self.call_note.set_no_show_all(True)
         column.pack_start(self.busy, False, False, 0)
         column.pack_start(self.box, False, False, 0)
         viewport = Gtk.Viewport()
@@ -4436,9 +4446,13 @@ class ChatView:
         self.down.set_no_show_all(True)
         self.down.connect("clicked", lambda _b: self._to_bottom())
         self.widget = Gtk.Overlay()
-        self.widget.add(self.scroll)
+        body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        body.pack_start(self.call_note, False, False, 8)
+        body.pack_start(self.scroll, True, True, 0)
+        self.widget.add(body)
         self.widget.add_overlay(self.down)
         self.widget.show_all()
+        self.missed_call(missed)
         adj = self.scroll.get_vadjustment()
         adj.connect("changed", self._keep_place)
         adj.connect("value-changed", self._moved)
@@ -4451,6 +4465,13 @@ class ChatView:
     @property
     def empty(self):
         return not self.shown
+
+    def missed_call(self, notice):
+        """A local, dated notice; not a message to read/react/forward to MAX."""
+        if notice:
+            when = datetime.fromtimestamp(notice["time"] / 1000).strftime("%d.%m.%Y %H:%M")
+            self.call_note.set_text("Последний пропущенный звонок · " + when)
+        self.call_note.set_visible(bool(notice))
 
     def newest(self, msgs, gap, done=None):
         """The newest page fetched on opening. If more came than a screen
@@ -5159,13 +5180,17 @@ class Max(Gtk.Application):
         self.win = None
         self.call_id = None
         self.dial_confirming = False
-        self.call_awake = Awake(NAME, "voice call")
+        # GTK/portal only: the independent logind attempt below owns its fd.
+        self.call_awake = Awake(NAME, "voice call", inhibit=lambda *_args: None)
         # A GTK/portal cookie may be granted without a working portal.
         # Keep an independent logind fd for haltia-sleep on the tablet.
         self.call_logind = Awake(NAME, "call", app=False)
         self.call_ringer = CallRinger()
         self.call_notice = None
         self.call_portrait = None
+        self.call_inhibited = None  # one attempt per call, even if logind refuses it
+        self.missed_path = os.path.join(DATA, "missed-calls.json")
+        self.missed_calls = load_json(self.missed_path, {})  # latest notice per MAX dialog
         self.recorder = recorder or Recorder()  # voice messages from the microphone
         self.backend = Backend(self, link)  # link: PyMaxLink unless given (tests, demo)
         self.telemetry = Telemetry(self.backend)
@@ -5657,7 +5682,7 @@ class Max(Gtk.Application):
         ring = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
         ring.get_style_context().add_class("settings")
         ring.pack_start(label("Громкость входящего звонка", "setting", wrap=True), False, False, 0)
-        self.ring_scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0, 100, 5)
+        self.ring_scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 20, 100, 5)
         self.ring_scale.set_value(ring_volume() * 100)
         self.ring_scale.set_value_pos(Gtk.PositionType.RIGHT)
         self.ring_scale.connect("value-changed", lambda scale:
@@ -5761,6 +5786,13 @@ class Max(Gtk.Application):
         (its QR code), in (with the name), locked (the keyring closed),
         failed (with the pause): its cards drawn anew. With no list yet and
         no messenger getting in, the login page asks for one."""
+        if account == "max" and state["kind"] == "out":
+            for chat in self.missed_calls:
+                self.withdraw_notification("missed-call-" + chat)
+            self.missed_calls.clear()
+            save_json(self.missed_path, self.missed_calls)
+            for view in self.views.values():
+                view.missed_call(None)
         self.signins[account] = state
         self.draw_accounts()
         page = self.stack.get_visible_child_name()
@@ -6671,6 +6703,9 @@ class Max(Gtk.Application):
                 return
             self.confirm.hide()
             self.chatlist.remove(chat_id)
+            if self.missed_calls.pop(str(chat_id), None) is not None:
+                save_json(self.missed_path, self.missed_calls)
+            self.withdraw_notification("missed-call-%s" % chat_id)
             view = self.views.pop(chat_id, None)
             if view is not None:
                 if view is self.view:
@@ -6822,7 +6857,8 @@ class Max(Gtk.Application):
                 on_react=lambda msg_id, emoji: self.react(chat_id, msg_id, emoji),
                 photo=self.media.photo, on_photo=self.show_photo,
                 on_forward=lambda msg_id: self.show_forward(chat_id, msg_id),
-                on_save=lambda m, item, b: self.save_message(chat_id, m, [item], b))
+                on_save=lambda m, item, b: self.save_message(chat_id, m, [item], b),
+                missed=self.missed_calls.get(str(chat_id)))
         self.views[chat_id] = view  # most recently used last
         while len(self.views) > VIEWS:
             old_id = next(iter(self.views))
@@ -6867,6 +6903,11 @@ class Max(Gtk.Application):
 
     def call_result(self, _result, error):
         if error and self.call_id is None:
+            self.call_name.set_text("")
+            self.call_portrait = None  # invalidate any outstanding photo callback
+            self.call_photo.set_from_icon_name("avatar-default-symbolic", Gtk.IconSize.DIALOG)
+            self.call_hint.hide()
+            self.call_button.set_sensitive(True)
             self.call_label.set_text("Не удалось соединиться. Позвоните ещё раз, когда будете готовы.")
             self.call_answer.hide()
             self.call_end.set_label("Закрыть")
@@ -6885,6 +6926,7 @@ class Max(Gtk.Application):
                 "ended": "Звонок завершён", "failed": "Связь прервалась",
                 "unsupported": "Этот вид соединения пока не поддерживается"}[state]
         self.call_name.set_text(call["name"])
+        self.call_hint.show()
         self.call_label.set_text(text)
         portrait = (call["id"], call.get("photo"))
         if portrait != self.call_portrait:
@@ -6903,11 +6945,14 @@ class Max(Gtk.Application):
         self.call_pages.set_visible_child_name("call")
         self.call_button.set_sensitive(terminal)
         if state in ("ringing", "dialling", "connecting", "active"):
-            self.call_logind.hold()
-            self.call_awake.hold()
+            if self.call_inhibited != call["id"]:
+                self.call_inhibited = call["id"]
+                self.call_logind.hold()
+                self.call_awake.hold()
         else:
             self.call_logind.release()
             self.call_awake.release()
+            self.call_inhibited = None
         if state == "ringing":
             if self.dial_confirming:
                 # The kit's question runs a nested GTK loop. Dismiss its
@@ -6936,9 +6981,34 @@ class Max(Gtk.Application):
             self.withdraw_notification("voice-call")
         return False
 
+    def missed_call(self, notice):
+        """Remember the last unanswered incoming call and open its chat on tap."""
+        key = str(notice["chat"])
+        if self.missed_calls.get(key, {}).get("id") == notice["id"]:
+            return False
+        self.missed_calls[key] = dict(notice)
+        save_json(self.missed_path, self.missed_calls)
+        view = self.views.get(notice["chat"])
+        if view is not None:
+            view.missed_call(notice)
+        note = Gio.Notification.new("Пропущенный звонок от " + notice["name"])
+        note.set_category("call.missed")
+        note.set_default_action_and_target("app.open-chat", GLib.Variant("s", json.dumps(notice["chat"])))
+        self.send_notification("missed-call-" + key, note)
+        return False
+
     def open(self, chat_id):
         start = time.monotonic()
+        if self.call_id is None:
+            self.call_box.hide()
+            self.call_pages.set_visible_child_name("messages")
         self.withdraw_notification("chat-%d" % chat_id)
+        self.withdraw_notification("missed-call-%s" % chat_id)
+        notice = self.missed_calls.get(str(chat_id))
+        if notice and not self.chatlist.get(chat_id):
+            self.chatlist.start_dialog({"id": chat_id, "account": "max", "type": "DIALOG",
+                                       "title": notice["name"], "peer": notice["peer"],
+                                       "last": "", "time": 0, "unread": 0, "stranger": True})
         s = self.about(chat_id)
         self.open_chat = chat_id
         self.confirm.hide()
