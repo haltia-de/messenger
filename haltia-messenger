@@ -1906,6 +1906,14 @@ def video_supported():
         return False
 
 
+CALL_NOTICE_SETTLE = 1.5  # s after Notify before a withdrawal surely reaches the server
+
+
+def call_notice_id(conversation):
+    """The GApplication id of a ringing call's notification: its own per call."""
+    return "voice-call-%s" % conversation
+
+
 REMOTE_STALE = 3.0  # s without the peer's frames: their video is gone
 REMOTE_MAX = 480  # px, the longer side of the peer's frames handed to GTK
 CAMERA_THREAD = concurrent.futures.ThreadPoolExecutor(1, thread_name_prefix="camera")
@@ -2693,24 +2701,28 @@ class VoiceCall:
             label = "failed"
         log_line("voice call: ended reason=%s by=%s state=%s" %
                  (label, "remote" if remote else "local", state))
-        if self.audio:
-            self.audio.close()
         current = asyncio.current_task()
-        for task in list(self.jobs):
-            if task is not current:
-                task.cancel()
-        for future in list(self.pending.values()):
-            if not future.done():
-                future.cancel()
-        if self.socket:
-            await self.send_hangup()
-            try:
-                await self.socket.close()
-            except Exception:
-                pass
-        if self.socket and self.task and self.task is not current:
-            self.task.cancel()
-        self.changed(self, state)
+        try:
+            if self.audio:
+                self.audio.close()
+            for task in list(self.jobs):
+                if task is not current:
+                    task.cancel()
+            for future in list(self.pending.values()):
+                if not future.done():
+                    future.cancel()
+            if self.socket:
+                await self.send_hangup()
+                try:
+                    await self.socket.close()
+                except Exception:
+                    pass
+            if self.socket and self.task and self.task is not current:
+                self.task.cancel()
+        finally:
+            # Always told, whatever the teardown did: the window takes the
+            # ringing, its notification and the inhibitors away on this.
+            self.changed(self, state)
 
 
 class Offline(Exception):
@@ -5526,7 +5538,8 @@ class Max(Gtk.Application):
         # Keep an independent logind fd for haltia-sleep on the tablet.
         self.call_logind = Awake(NAME, "call", app=False)
         self.call_ringer = CallRinger()
-        self.call_notice = None
+        self.call_notice = None  # the ringing call whose notification is up
+        self.call_notice_at = 0.0  # monotonic time it was sent
         self.call_portrait = None
         self.call_inhibited = None  # one attempt per call, even if logind refuses it
         self.missed_path = os.path.join(DATA, "missed-calls.json")
@@ -5586,6 +5599,7 @@ class Max(Gtk.Application):
         self.call_awake.release()
         self.call_logind.release()
         self.call_ringer.stop()
+        self.withdraw_call_notice(now=True)  # no later: the program is going
         self.backend.cache.flush()  # what the last two seconds changed
         recent = getattr(self, "recent", None)  # no window ever built: none
         if recent is not None and recent != self.recent_saved:
@@ -7422,12 +7436,27 @@ class Max(Gtk.Application):
                 notification.set_category("call.incoming")
                 notification.set_default_action("app.show-call")
                 # GIO supplies desktop-entry=APP_ID on freedesktop desktops.
-                self.send_notification("voice-call", notification)
+                self.send_notification(call_notice_id(call["id"]), notification)
+                self.call_notice_at = time.monotonic()
         else:
-            self.call_notice = None
             self.call_ringer.stop()
-            self.withdraw_notification("voice-call")
+            self.withdraw_call_notice()
         return False
+
+    def withdraw_call_notice(self, now=False):
+        """Take the ringing call's notification away (a critical one stays in
+        mako till closed). GIO's freedesktop backend sends CloseNotification
+        only once Notify has answered with the server's id, and drops a
+        withdrawal made before: one that soon waits till CALL_NOTICE_SETTLE.
+        Each call has its own id, so a later call's notification stays."""
+        if self.call_notice is None:
+            return
+        key, self.call_notice = call_notice_id(self.call_notice), None
+        wait = CALL_NOTICE_SETTLE - (time.monotonic() - self.call_notice_at)
+        if now or wait <= 0:
+            self.withdraw_notification(key)
+        else:
+            GLib.timeout_add(int(wait * 1000), lambda: self.withdraw_notification(key) and False)
 
     def missed_call(self, notice):
         """Remember the last unanswered incoming call and open its chat on tap."""

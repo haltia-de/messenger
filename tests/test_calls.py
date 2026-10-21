@@ -536,9 +536,10 @@ async def quit_during_dial(fails=False):
 
 async def missed_calls():
     from fake_link import FakeLink
-    notices = []
+    notices, states = [], {}
     class UI:
-        def call_changed(self, _call):
+        def call_changed(self, call):
+            states.setdefault(call["id"], []).append(call["state"])
             return False
         def missed_call(self, notice):
             notices.append(notice)
@@ -547,9 +548,21 @@ async def missed_calls():
     account = bm.Backend(UI(), fake).accounts["max"]
     account.me = fake.me.id
     account.names[10] = "Тестовый собеседник"
-    for case in ("remote", "timeout", "declined", "answered", "outgoing", "elsewhere"):
-        call = account.new_call(case, 10, case != "outgoing")
-        if case == "remote":
+    class Broken(Audio):
+        def close(self):
+            raise RuntimeError("synthetic teardown failure")
+    cases = ("remote", "timeout", "declined", "answered", "outgoing", "elsewhere", "stopped", "broken")
+    for video, case in ((v, c) for v in (False, True) for c in cases):
+        call = account.new_call(case, 10, case != "outgoing", video=video)
+        if case == "broken":
+            call.audio = Broken(None, None, None, None)
+            try:
+                await call.end("REJECTED")
+            except RuntimeError:
+                pass
+        elif case == "stopped":
+            await account.stop()
+        elif case == "remote":
             await account.on_call_frame(121, {"conversationId": case})
             await account.on_call_frame(121, {"conversationId": case})
         elif case == "elsewhere":
@@ -558,12 +571,15 @@ async def missed_calls():
             call.accepted = case == "answered"
             await call.end("REJECTED" if case == "declined" else "MISSED" if case == "timeout" else None)
         await call.end()  # A duplicate closure cannot create another notice.
-    while bm.GLib.MainContext.default().iteration(False):
-        pass
-    assert [n["id"] for n in notices] == ["remote", "timeout"]
+        while bm.GLib.MainContext.default().iteration(False):
+            pass
+        # Every way a call ends tells the window (which closes the ringing
+        # call's notification on it), for voice and video invitations alike.
+        assert states.pop(case)[-1] in ("ended", "failed"), case
+    assert [n["id"] for n in notices] == ["remote", "timeout"] * 2
     assert all(n["chat"] == fake.dialog_of(fake.me.id, 10) and n["peer"] == 10
                and n["name"] == "Тестовый собеседник" and n["time"] > 0 for n in notices)
-    ok("unanswered incoming closure and timeout are missed; decline, answer, outgoing and answer elsewhere are not")
+    ok("every end tells the window, even a failed teardown; unanswered closure and timeout are missed, not decline, answer, outgoing, answer elsewhere or stop")
 
 
 async def video_dial_flag():
