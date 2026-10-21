@@ -637,7 +637,35 @@ async def video_consent():
     ok("video consent, audio-only answer, camera failure, overload downgrade and peer isolation")
 
 
+async def end_logging():
+    for remote in (False, True):
+        for reason in ("HUNGUP", "REJECTED", "CANCELED", "BUSY", "MISSED", "NETWORK_ERROR", "FAILED"):
+            call = bm.VoiceCall("private-conversation", "private-person", True, lambda *_a: None)
+            with patch.object(bm, "log_line") as log:
+                if remote:
+                    await call.event({"notification": "hungup", "reason": reason})
+                    assert call.end_reason is None  # Do not echo a remote hangup.
+                else:
+                    await call.end(reason)
+                    assert call.end_reason == reason
+                await call.end()  # Finally/duplicate frames cannot overwrite the reason.
+                label = "failed" if reason == "FAILED" else reason
+                log.assert_called_once_with("voice call: ended reason=%s by=%s state=ended" %
+                                            (label, "remote" if remote else "local"))
+    for reason in (None, "private-token\nHUNGUP", {"id": "private"}, ["HUNGUP"]):
+        call = bm.VoiceCall("private-conversation", "private-person", True, lambda *_a: None)
+        with patch.object(bm, "log_line") as log:
+            await call.event({"notification": "closed-conversation", "reason": reason})
+            log.assert_called_once_with("voice call: ended reason=unknown by=remote state=ended")
+    call = bm.VoiceCall("private-conversation", "private-person", False, lambda *_a: None)
+    with patch.object(bm, "log_line") as log:
+        await call.end(None, "failed")
+        log.assert_called_once_with("voice call: ended reason=failed by=local state=failed")
+    ok("terminal logs contain only allowed reasons and local/remote origin, once, without identifiers")
+
+
 async def main():
+    await end_logging()
     await video_dial_flag()
     await video_consent()
     await scenario(True)

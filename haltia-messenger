@@ -2518,7 +2518,7 @@ class VoiceCall:
                 self.remote_video = bool((event.get("mediaSettings") or {}).get("isVideoEnabled"))
                 self.show(self.state)
         elif name in ("hungup", "closed-conversation"):
-            await self.end(None, "ended")
+            await self.end(remote=True, remote_reason=event.get("reason"))
         elif name == "topology-changed" and event.get("topology") != "DIRECT":
             self.job(self.end("FAILED", "unsupported"))
 
@@ -2644,7 +2644,7 @@ class VoiceCall:
         if not self.closed and self.state != "active":
             await self.end("TIMEOUT", "failed")
 
-    async def end(self, reason=None, state="ended"):
+    async def end(self, reason=None, state="ended", *, remote=False, remote_reason=None):
         if self.closed:
             return
         self.closed = True
@@ -2653,7 +2653,21 @@ class VoiceCall:
             self.disconnect_timer.cancel()
             self.disconnect_timer = None
         self.state = state
-        log_line("voice call: " + state)
+        # Reasons received from the service are untrusted. Never log raw fields,
+        # and keep them separate from end_reason (which sends a local hangup).
+        reported = remote_reason if remote else reason
+        known = {"HUNGUP", "REJECTED", "CANCELED", "BUSY", "MISSED", "NETWORK_ERROR",
+                 "FAILED", "failed", "TIMEOUT", "ANOTHER_DEVICE", "REMOVED", "KILLED",
+                 "BANNED", "HAS_ACTIVE_CALL", "CALLER_IS_BLOCKED", "NOT_FRIENDS",
+                 "CALLEE_IS_OFFLINE", "CALLEE_UNAVAILABLE", "CALLER_IS_REJECTED",
+                 "SERVICE_UNAVAILABLE", "SOCKET_CLOSED", "ENDED", "NOT_FOUND",
+                 "CALL_TIMEOUT", "OBSOLETE_CLIENT"}
+        label = reported if isinstance(reported, str) and reported in known else (
+            "failed" if state in ("failed", "unsupported") else "unknown")
+        if label == "FAILED":
+            label = "failed"
+        log_line("voice call: ended reason=%s by=%s state=%s" %
+                 (label, "remote" if remote else "local", state))
         if self.audio:
             self.audio.close()
         current = asyncio.current_task()
@@ -3123,7 +3137,8 @@ class Account:
             if self.call is not None and self.call.id == payload.get("conversationId"):
                 if opcode == 120:
                     self.call.accepted = True  # answered elsewhere, not missed here
-                await self.call.end()
+                await self.call.end(remote=True, remote_reason=
+                                    "ANOTHER_DEVICE" if opcode == 120 else payload.get("reason"))
             return
         if not self.online or not self.can("calls"):
             return
