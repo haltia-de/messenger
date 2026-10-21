@@ -15,6 +15,7 @@ async def video_pair():
     peers, early = [], []
     states = [set(), set()]
     frames = [{False: 0, True: 0}, {False: 0, True: 0}]
+    pictures = [{}, {}]
     errors = []
     loop.set_exception_handler(lambda _l, c: errors.append(c))
     def candidate(n, value):
@@ -36,6 +37,7 @@ async def video_pair():
                 w,h,data = picture
                 assert w > 0 and h > 0 and len(data) == w*h*4
                 frames[n][own] += 1
+                pictures[n][own] = (w, h)
             peer.frame = frame
             assert peer.camera is None
         offer = await peers[0].description("offer")
@@ -51,6 +53,14 @@ async def video_pair():
         for peer in peers:
             assert peer.set_video(True)
         await wait(lambda: all(f[False] > 10 and f[True] > 10 for f in frames))
+        for peer in peers:
+            peer.video_size = (160, 120, 10)
+            peer.set_video(True)
+        await wait(lambda: all(p.get(True) == (160, 120) for p in pictures))
+        await asyncio.sleep(.5)
+        for peer in peers:
+            counters = await peer.stats()
+            assert any(c.get("packets-received", 0) > 20 for c in counters)
         cameras = [p.camera for p in peers]
         for peer in peers:
             assert peer.set_video(False) is False

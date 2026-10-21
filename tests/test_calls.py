@@ -3,7 +3,7 @@
 import asyncio
 import base64
 import json
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, Mock, patch
 from types import SimpleNamespace
 from common import load, ok
 
@@ -42,6 +42,19 @@ def media_probe():
 
 
 media_probe()
+
+
+# A missing video plugin must not withdraw working audio calls.
+for missing in ("vp8enc", "vp8dec", "appsink", None):
+    bm.video_supported.cache_clear()
+    gst = SimpleNamespace(init=Mock(), ElementFactory=SimpleNamespace(
+        find=Mock(side_effect=lambda name: None if name == missing else object())))
+    with patch.object(bm, "call_media", return_value=(gst, object(), object())) as probe:
+        assert bm.video_supported() == (missing is None)
+        assert bm.video_supported() == (missing is None)
+        assert probe.call_count == 1
+    bm.video_supported.cache_clear()
+ok("video support is probed once independently of voice support")
 
 
 def literal(value):
@@ -484,6 +497,19 @@ async def missed_calls():
     ok("unanswered incoming closure and timeout are missed; decline, answer, outgoing and answer elsewhere are not")
 
 
+async def video_dial_flag():
+    link = bm.PyMaxLink.__new__(bm.PyMaxLink)
+    invoke = AsyncMock(return_value=SimpleNamespace(payload={"internalCallerParams": "{}"}))
+    link.client = SimpleNamespace(_app=SimpleNamespace(
+        session=SimpleNamespace(device_id="synthetic-device"), invoke=invoke))
+    for video in (False, True):
+        assert await link.dial("synthetic-conversation", 10, video=video) == {}
+        opcode, payload = invoke.call_args.args
+        assert opcode == 78 and payload["isVideo"] is video
+        assert payload["calleeIds"] == [10]
+    ok("video selection reaches opcode 78; voice retains isVideo=false")
+
+
 async def video_consent():
     class VideoAudio(Audio):
         def __init__(self, *args):
@@ -535,6 +561,7 @@ async def video_consent():
 
 
 async def main():
+    await video_dial_flag()
     await video_consent()
     await scenario(True)
     await scenario(False)
