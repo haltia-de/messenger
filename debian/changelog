@@ -1,3 +1,18 @@
+haltia-messenger (2.7.0) unstable; urgency=medium
+
+  * You can now make voice calls to MAX contacts. An incoming call rings and
+    wakes the tablet’s screen; one big button answers it. Before calling a
+    contact, the program asks «Позвонить …?» (Call …?).
+  * During a call, the other person’s voice comes through the speaker and echo
+    is suppressed on the tablet. The tablet stays awake until the call ends.
+  * A second call during a conversation gets a busy answer. Quitting the
+    program ends the call properly.
+  * Calls are available only where the needed GStreamer components are
+    installed.
+  * The licence is now GPL-3.0-or-later.
+
+ -- Haltia <rensomail@gmail.com>  Wed, 21 Oct 2026 23:30:00 +0300
+
 haltia-messenger (2.6.1) unstable; urgency=medium
 
   * Entering a chat or a channel focuses no entry: no keyboard until tapped.
