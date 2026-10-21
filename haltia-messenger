@@ -93,6 +93,7 @@ The person of a dialog can be renamed (the edit menu): here only, kept in
 offers no renaming of contacts.
 """
 import asyncio
+import base64
 import dataclasses
 import hashlib
 import importlib.util
@@ -109,6 +110,7 @@ import configparser
 import time
 import urllib.parse
 import urllib.request
+import uuid
 import zlib
 from datetime import date, datetime, timezone
 
@@ -937,7 +939,7 @@ class PyMaxLink:
     hosts = ("max.ru",)  # links of its channels and groups
     # What it can besides messages (Account.can): find by phone, join by
     # link, reactions, forwarding, telemetry, its own invite setting.
-    can = frozenset({"phone", "links", "search", "react", "forward", "telemetry", "invites"})
+    can = frozenset({"phone", "links", "search", "react", "forward", "telemetry", "invites", "calls"})
 
     @staticmethod
     def dialog_of(me, user):
@@ -997,6 +999,11 @@ class PyMaxLink:
 
         try:
             payload = frame.payload if isinstance(frame.payload, dict) else {}
+            if int(frame.opcode) in (137, 120, 121):
+                task = asyncio.ensure_future(self.events.on_call_frame(int(frame.opcode), payload))
+                self.tasks.add(task)
+                task.add_done_callback(self.tasks.discard)
+                return
             if frame.opcode == Opcode.NOTIF_MSG_DELETE:
                 chat_id, ids = payload.get("chatId"), payload.get("messageIds") or []
             elif frame.opcode == Opcode.NOTIF_MESSAGE and \
@@ -1075,6 +1082,16 @@ class PyMaxLink:
     async def _reaction(self, event, _client):
         reactions = [[c.reaction, c.count] for c in event.counters or [] if c.count]
         await self.events.on_reaction(event.chat_id, int(event.message_id), reactions)
+
+    async def dial(self, conversation, peer):
+        device = self.client._app.session.device_id
+        internal = {"deviceId": device, "sdkVersion": "2.8.9",
+                    "clientAppKey": "CNHIJPLGDIHBABABA", "platform": "WEB",
+                    "protocolVersion": 5, "domainId": "", "capabilities": "2A03F"}
+        reply = await self.client._app.invoke(78, {
+            "conversationId": conversation, "calleeIds": [peer], "isVideo": False,
+            "internalParams": json.dumps(internal)})
+        return json.loads(reply.payload["internalCallerParams"])
 
     @property
     def _api(self):
@@ -1724,6 +1741,504 @@ class TelethonLink:
                                              thumb=-1 if parts[2:] == ["thumb"] else None)
 
 
+def call_params(vcp):
+    """Decode the bounded raw LZ4 block in MAX's incoming invitation.
+
+    No frame header or optional system library: the wire format is
+    <uncompressed length>:<base64 block>. Invitations stay in memory.
+    """
+    size, encoded = vcp.split(":", 1)
+    size = int(size)
+    if not 0 < size <= 65536 or len(encoded) > 131072:
+        raise ValueError("call invitation too large")
+    data = base64.b64decode(encoded, validate=True)
+    out, pos = bytearray(), 0
+
+    def length(n):
+        nonlocal pos
+        if n == 15:
+            while True:
+                more = data[pos]
+                pos += 1
+                n += more
+                if more != 255:
+                    break
+        return n
+
+    while pos < len(data):
+        token = data[pos]
+        pos += 1
+        n = length(token >> 4)
+        if pos + n > len(data) or len(out) + n > size:
+            raise ValueError("bad call literals")
+        out.extend(data[pos:pos + n])
+        pos += n
+        if pos == len(data):
+            break
+        offset = data[pos] | data[pos + 1] << 8
+        pos += 2
+        n = length(token & 15) + 4
+        if not 0 < offset <= len(out) or len(out) + n > size:
+            raise ValueError("bad call match")
+        for _ in range(n):
+            out.append(out[-offset])
+    if len(out) != size:
+        raise ValueError("bad call length")
+    return json.loads(out)
+
+
+def call_endpoint(params, conversation, incoming):
+    """Only the call service supplied by MAX, never an arbitrary websocket."""
+    endpoint = params.get("wse") if incoming else params.get("endpoint")
+    url = urllib.parse.urlsplit(endpoint or "")
+    if url.scheme != "wss" or not url.hostname or not \
+            (url.hostname == "okcdn.ru" or url.hostname.endswith(".okcdn.ru")) or \
+            url.path != "/ws2" or url.username or url.password or url.fragment:
+        raise ValueError("invalid call endpoint")
+    query = dict(urllib.parse.parse_qsl(url.query))
+    if incoming:
+        query.update(userId=str(params["trnu"].rsplit(":", 1)[1]),
+                     entityType="USER", conversationId=conversation, token=params["tkn"])
+    query.update(platform="WEB", appVersion="1.1", version="5", device="browser",
+                 capabilities="2A03F", clientType="ONE_ME", tgt="accept" if incoming else "start")
+    return urllib.parse.urlunsplit(url._replace(query=urllib.parse.urlencode(query)))
+
+
+class CallAudio:
+    """One Opus WebRTC peer, owned by VoiceCall in the backend loop.
+
+    Gst callbacks cross into that loop; they never touch GTK. Constructed
+    only after Answer/Call, so an invitation cannot open the microphone.
+    source/sink are replaceable for the local, account-free media test.
+    """
+
+    def __init__(self, loop, candidate, status, params, source="pulsesrc",
+                 sink="pulsesink sync=false"):
+        gi.require_version("Gst", "1.0")
+        gi.require_version("GstWebRTC", "1.0")
+        gi.require_version("GstSdp", "1.0")
+        from gi.repository import Gst, GstWebRTC, GstSdp
+        self.Gst, self.RTC, self.Sdp = Gst, GstWebRTC, GstSdp
+        Gst.init(None)
+        self.loop, self.candidate, self.status = loop, candidate, status
+        self.closed = False
+        self.remote_set = False
+        self.pending = []
+        self.sink = sink
+        self.pipeline = None
+        try:
+            # RFC 7587 section 7 requires /2 in Opus SDP even for mono.
+            # Keep it in RTP caps: without it the MAX peer never answers.
+            self.pipeline = Gst.parse_launch(
+                "webrtcbin name=rtc bundle-policy=max-bundle " + source +
+                " ! audioconvert ! audioresample ! audio/x-raw,rate=48000,channels=1 "
+                "! opusenc bitrate=32000 inband-fec=true ! rtpopuspay pt=111 "
+                "! application/x-rtp,media=audio,encoding-name=OPUS,payload=111,clock-rate=48000,"
+                "encoding-params=(string)2 ! rtc.")
+            self.rtc = self.pipeline.get_by_name("rtc")
+            self.rtc.connect("on-ice-candidate", self._candidate)
+            self.rtc.connect("pad-added", self._received)
+            self.rtc.connect("notify::connection-state", self._state)
+            # Keep the video m-line used by MAX, without a camera or video sink.
+            caps = Gst.Caps.from_string("application/x-rtp,media=video,encoding-name=VP8,payload=96,clock-rate=90000")
+            self.rtc.emit("add-transceiver", GstWebRTC.WebRTCRTPTransceiverDirection.INACTIVE, caps)
+            turn = params.get("turn") or {}
+            stun = params.get("stun") or {}
+            stuns = stun.get("urls") or params.get("stne", "").split(",")
+            turns = turn.get("urls") or params.get("trne", "").split(",")
+            if isinstance(stuns, str):
+                stuns = [stuns]
+            if isinstance(turns, str):
+                turns = [turns]
+            if stuns and stuns[0]:
+                self.rtc.set_property("stun-server", stuns[0].replace("stun:", "stun://", 1))
+            for server in filter(None, turns):
+                scheme, address = server.split(":", 1)
+                if scheme not in ("turn", "turns"):
+                    raise ValueError("invalid TURN scheme")
+                user = urllib.parse.quote(turn.get("username", params.get("trnu", "")), safe="")
+                password = urllib.parse.quote(turn.get("credential", params.get("trnp", "")), safe="")
+                if not self.rtc.emit("add-turn-server", "%s://%s:%s@%s" %
+                                     (scheme, user, password, address.removeprefix("//"))):
+                    raise ValueError("invalid TURN server")
+            if params.get("p2p_forbidden"):
+                self.rtc.set_property("ice-transport-policy", GstWebRTC.WebRTCICETransportPolicy.RELAY)
+            self.bus = self.pipeline.get_bus()
+            self.bus.set_sync_handler(self._bus, None)
+            if self.pipeline.set_state(Gst.State.PLAYING) == Gst.StateChangeReturn.FAILURE:
+                raise RuntimeError("audio pipeline failed")
+        except BaseException:
+            self.close()
+            raise
+
+    def _candidate(self, _rtc, index, candidate):
+        self.loop.call_soon_threadsafe(self._deliver, self.candidate,
+                                      {"candidate": candidate, "sdpMLineIndex": index})
+
+    def _deliver(self, callback, value):
+        if not self.closed:
+            callback(value)
+
+    def _state(self, rtc, _spec):
+        state = rtc.get_property("connection-state").value_nick
+        self.loop.call_soon_threadsafe(self._deliver, self.status, state)
+
+    def _bus(self, _bus, message, _data):
+        if message.type == self.Gst.MessageType.ERROR:
+            # Never log Gst errors: debug details can contain TURN credentials.
+            self.loop.call_soon_threadsafe(self._deliver, self.status, "failed")
+        return self.Gst.BusSyncReply.DROP
+
+    def _received(self, _rtc, pad):
+        if pad.direction != self.Gst.PadDirection.SRC or self.closed:
+            return
+        # Link on this streaming thread before its first packet arrives.
+        caps = pad.get_current_caps() or pad.query_caps(None)
+        if caps.get_structure(0).get_string("media") != "audio":
+            return
+        audio = self.Gst.parse_bin_from_description(
+            "queue ! rtpopusdepay ! opusdec ! audioconvert ! audioresample ! " + self.sink, True)
+        self.pipeline.add(audio)
+        pad.link(audio.get_static_pad("sink"))
+        audio.sync_state_with_parent()
+
+    async def _promise(self, command, *args):
+        future = self.loop.create_future()
+
+        def complete(promise, *_unused):
+            reply = promise.get_reply()
+            def deliver():
+                if not future.done():
+                    if reply is not None and reply.has_field("error"):
+                        future.set_exception(RuntimeError("WebRTC negotiation failed"))
+                    else:
+                        future.set_result(reply)
+            self.loop.call_soon_threadsafe(deliver)
+        promise = self.Gst.Promise.new_with_change_func(complete, None, None)
+        self.rtc.emit(command, *args, promise)
+        return await asyncio.wait_for(future, 10)
+
+    async def remote(self, description):
+        kind = {"offer": self.RTC.WebRTCSDPType.OFFER, "answer": self.RTC.WebRTCSDPType.ANSWER}[description["type"]]
+        result, sdp = self.Sdp.SDPMessage.new_from_text(description["sdp"])
+        if result != self.Sdp.SDPResult.OK:
+            raise ValueError("invalid remote SDP")
+        await self._promise("set-remote-description", self.RTC.WebRTCSessionDescription.new(kind, sdp))
+        self.remote_set = True
+        for candidate in self.pending:
+            self.add_candidate(candidate)
+        self.pending.clear()
+
+    async def description(self, kind):
+        reply = await self._promise("create-" + kind, None)
+        desc = reply.get_value(kind)
+        await self._promise("set-local-description", desc)
+        return {"type": kind, "sdp": desc.sdp.as_text()}
+
+    def add_candidate(self, value):
+        if not self.remote_set:
+            if len(self.pending) >= 256:
+                raise ValueError("too many ICE candidates")
+            self.pending.append(value)
+        else:
+            self.rtc.emit("add-ice-candidate", int(value.get("sdpMLineIndex", 0)), value["candidate"])
+
+    async def stats(self):
+        """Only counters, never candidate addresses, SDP or credentials."""
+        reply = await self._promise("get-stats", None)
+        result = []
+        for n in range(reply.n_fields()):
+            value = reply.get_value(reply.nth_field_name(n))
+            if not isinstance(value, self.Gst.Structure) or not value.has_field("type"):
+                continue
+            kind = getattr(value.get_value("type"), "value_nick", "")
+            if kind not in ("inbound-rtp", "outbound-rtp", "remote-inbound-rtp"):
+                continue
+            counters = {"type": kind}
+            for field in ("packets-received", "packets-sent", "packets-lost", "jitter",
+                          "round-trip-time", "bytes-received", "bytes-sent", "nack-count"):
+                if value.has_field(field):
+                    number = value.get_value(field)
+                    if isinstance(number, (int, float)):
+                        counters[field] = number
+            result.append(counters)
+        return result
+
+    def close(self):
+        self.closed = True
+        if self.pipeline is not None:
+            self.pipeline.set_state(self.Gst.State.NULL)
+
+
+class VoiceCall:
+    """One 1:1 call, from invitation/dial tap until a terminal event.
+
+    The websocket reader answers ping and routes replies independently of
+    negotiation. Commands have deadlines; there is no reconnect or retry.
+    Account owns this object and ignores every older call's callback.
+    """
+
+    SETTINGS = {"isAudioEnabled": True, "isVideoEnabled": False,
+                "isScreenSharingEnabled": False, "isFastScreenSharingEnabled": False,
+                "isAudioSharingEnabled": False}
+
+    def __init__(self, conversation, peer, incoming, changed, agent=None,
+                 audio=CallAudio, connect=None):
+        self.id, self.peer, self.incoming = conversation, peer, incoming
+        self.changed, self.agent, self.audio_factory = changed, agent, audio
+        self.connect = connect
+        self.state = "ringing" if incoming else "dialling"
+        self.closed = False
+        self.end_reason = None
+        self.accepted = False
+        self.sequence = 0
+        self.pending = {}
+        self.socket = None
+        self.audio = None
+        self.participant = None
+        self.device = 0
+        self.offer = None
+        self.candidates = []
+        self.local_candidates = []
+        self.local_sent = False
+        self.jobs = set()
+        self.ready = asyncio.Event()
+        self.offer_ready = asyncio.Event()
+        self.params = {}
+        self.task = None
+
+    def show(self, state):
+        if not self.closed:
+            log_line("voice call: " + state)
+            self.state = state
+            self.changed(self, state)
+
+    def job(self, coro):
+        if self.closed:
+            coro.close()
+            return
+        task = asyncio.create_task(coro)
+        self.jobs.add(task)
+        def done(future):
+            self.jobs.discard(future)
+            if not future.cancelled() and future.exception() is not None and not self.closed:
+                self.job(self.end("FAILED", "failed"))
+        task.add_done_callback(done)
+
+    async def command(self, name, **body):
+        if self.closed or self.socket is None:
+            raise Offline()
+        self.sequence += 1
+        sequence = self.sequence
+        future = asyncio.get_running_loop().create_future()
+        self.pending[sequence] = future
+        try:
+            await self.socket.send(json.dumps(dict(command=name, sequence=sequence, **body)))
+            return await asyncio.wait_for(future, 10)
+        finally:
+            self.pending.pop(sequence, None)
+
+    def start(self, params):
+        # Kept separately from negotiation jobs: even a cancelled invitation
+        # must finish opening ws2 long enough to deliver the person's hangup.
+        self.task = asyncio.create_task(self.run(params))
+
+    async def send_hangup(self):
+        if self.end_reason and self.socket:
+            self.sequence += 1
+            try:
+                await asyncio.wait_for(self.socket.send(json.dumps(
+                    {"command": "hangup", "sequence": self.sequence,
+                     "reason": self.end_reason})), 2)
+            except Exception:
+                pass
+
+    async def run(self, params):
+        self.task = asyncio.current_task()
+        self.params = params
+        try:
+            from websockets.asyncio.client import connect
+            factory = self.connect or connect
+            async with factory(call_endpoint(params, self.id, self.incoming),
+                               origin="https://web.max.ru", user_agent_header=self.agent,
+                               open_timeout=10, close_timeout=2, max_size=262144) as socket:
+                self.socket = socket
+                if self.closed:
+                    await self.send_hangup()
+                    return
+                self.job(self.initialize())
+                self.job(self.ring_deadline())
+                while not self.closed:
+                    raw = await asyncio.wait_for(socket.recv(), 20)
+                    if raw == "ping":
+                        await socket.send("pong")
+                        continue
+                    event = json.loads(raw)
+                    if event.get("type") in ("response", "error"):
+                        future = self.pending.get(event.get("sequence"))
+                        if future is not None and not future.done():
+                            if event["type"] == "error":
+                                future.set_exception(RuntimeError("call command refused"))
+                            else:
+                                future.set_result(event)
+                        elif event["type"] == "error":
+                            raise RuntimeError("call service error")
+                    elif event.get("type") == "notification":
+                        await self.event(event)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # Exceptions can include the endpoint token; log only the phase.
+            log_line("voice call: signalling failed")
+            await self.end(None, "failed")
+        finally:
+            await self.end(None, "ended")
+
+    async def initialize(self):
+        await asyncio.wait_for(self.ready.wait(), 10)
+        await self.command("change-media-settings", mediaSettings=dict(self.SETTINGS, isAudioEnabled=False))
+        await self.command("change-participant-state", participantState={"state": {}})
+
+    async def event(self, event):
+        name = event.get("notification")
+        if name == "connection":
+            conversation = event.get("conversation") or {}
+            if conversation.get("topology", "DIRECT") != "DIRECT":
+                self.job(self.end("FAILED", "unsupported"))
+                return
+            self.params.update(event.get("conversationParams") or {})
+            for person in conversation.get("participants", []):
+                if str((person.get("externalId") or {}).get("id")) == str(self.peer):
+                    self.participant = person["id"]
+                    self.device = person.get("deviceIdx", 0)
+            self.ready.set()
+        elif name in ("registered-peer", "accepted-call", "transmitted-data"):
+            if event.get("participantId") is None:
+                return
+            if self.participant is not None and str(self.participant) != str(event["participantId"]):
+                return
+            self.participant = event["participantId"]
+            self.device = event.get("deviceIdx", 0)
+            if name == "accepted-call" and not self.incoming and not self.accepted:
+                self.accepted = True
+                self.job(self.negotiate())
+            elif name == "transmitted-data":
+                data = event.get("data") or {}
+                if "sdp" in data:
+                    if data["sdp"]["type"] == "offer" and self.incoming:
+                        self.offer = data["sdp"]
+                        self.offer_ready.set()
+                    elif data["sdp"]["type"] == "answer" and self.audio and not self.incoming:
+                        self.job(self.audio.remote(data["sdp"]))
+                if "candidate" in data:
+                    if self.audio:
+                        self.audio.add_candidate(data["candidate"])
+                    elif len(self.candidates) < 256:
+                        self.candidates.append(data["candidate"])
+        elif name in ("hungup", "closed-conversation"):
+            await self.end(None, "ended")
+        elif name == "topology-changed" and event.get("topology") != "DIRECT":
+            self.job(self.end("FAILED", "unsupported"))
+
+    async def answer(self):
+        if self.closed or not self.incoming or self.accepted:
+            return
+        self.accepted = True
+        self.show("connecting")
+        await asyncio.wait_for(self.ready.wait(), 10)
+        await self.command("accept-call", mediaSettings=self.SETTINGS)
+        await self.negotiate()
+
+    async def transmit(self, data):
+        target = {"participantId": self.participant, "participantType": "USER", "data": data}
+        if self.device:
+            target["deviceIdx"] = self.device
+        await self.command("transmit-data", **target)
+
+    def candidate(self, value):
+        if self.local_sent:
+            self.job(self.transmit({"candidate": value}))
+        else:
+            self.local_candidates.append(value)
+
+    def audio_state(self, state):
+        if self.closed:
+            return
+        if state == "connected":
+            self.show("active")
+        elif state in ("failed", "disconnected", "closed"):
+            self.job(self.end("NETWORK_ERROR", "failed"))
+
+    async def negotiate(self):
+        self.show("connecting")
+        if self.incoming:
+            await asyncio.wait_for(self.offer_ready.wait(), 15)
+        if self.closed:
+            return
+        self.audio = self.audio_factory(asyncio.get_running_loop(), self.candidate, self.audio_state, self.params)
+        for candidate in self.candidates:
+            self.audio.add_candidate(candidate)
+        self.candidates.clear()
+        if self.incoming:
+            await self.audio.remote(self.offer)
+        description = await self.audio.description("answer" if self.incoming else "offer")
+        if self.incoming and self.offer.get("p2pRelay"):
+            description["p2pRelay"] = True
+        await self.transmit({"sdp": description})
+        self.local_sent = True
+        for candidate in self.local_candidates:
+            self.job(self.transmit({"candidate": candidate}))
+        self.local_candidates.clear()
+        await self.command("change-media-settings", mediaSettings=self.SETTINGS)
+        self.job(self.deadline())
+        self.job(self.quality())
+
+    async def quality(self):
+        while not self.closed:
+            await asyncio.sleep(15)
+            try:
+                counters = await self.audio.stats()
+                log_line("voice quality: " + json.dumps(counters))
+            except Exception:
+                pass  # statistics must never end a working call
+
+    async def ring_deadline(self):
+        await asyncio.sleep(90)
+        if not self.accepted:
+            await self.end("MISSED" if self.incoming else "CANCELED", "ended")
+
+    async def deadline(self):
+        await asyncio.sleep(30)
+        if self.state != "active":
+            await self.end("TIMEOUT", "failed")
+
+    async def end(self, reason=None, state="ended"):
+        if self.closed:
+            return
+        self.closed = True
+        self.end_reason = reason
+        self.state = state
+        log_line("voice call: " + state)
+        if self.audio:
+            self.audio.close()
+        current = asyncio.current_task()
+        for task in list(self.jobs):
+            if task is not current:
+                task.cancel()
+        for future in list(self.pending.values()):
+            if not future.done():
+                future.cancel()
+        if self.socket:
+            await self.send_hangup()
+            try:
+                await self.socket.close()
+            except Exception:
+                pass
+        if self.socket and self.task and self.task is not current:
+            self.task.cancel()
+        self.changed(self, state)
+
+
 class Offline(Exception):
     """No connection to that messenger now (or no such account): the
     request was not sent."""
@@ -1838,6 +2353,39 @@ class Backend:
             self.cache.drop(chat_id)
         account.chats = {}
         GLib.idle_add(self.ui.signin, name, {"kind": "out"})
+
+    async def call(self, action, peer=None, conversation=None):
+        account = self.accounts.get("max")
+        if account is None:
+            raise Offline()
+        account.ask()
+        if action == "dial":
+            if account.call is not None:
+                return
+            # Only an existing dialog may be called, never a group/channel.
+            chat = account.chats.get(peer)
+            if chat is None or chat.kind != "DIALOG":
+                raise ValueError("not a MAX dialog")
+            person = account.peer(chat)
+            if person is None or person == account.me:
+                raise ValueError("not another person")
+            call = account.new_call(str(uuid.uuid4()), person, False)
+            try:
+                params = await account.link.dial(call.id, person)
+                if not call.closed or call.end_reason:
+                    call.start(params)
+            except BaseException:
+                await call.end(None, "failed")
+                raise
+        else:
+            call = account.call
+            if call is None or call.id != conversation:
+                return  # a late button press must not affect a replacement call
+            if action == "answer":
+                call.job(call.answer())
+            elif action == "end":
+                reason = "HUNGUP" if call.accepted else "REJECTED" if call.incoming else "CANCELED"
+                await call.end(reason)
 
     async def password(self, name, text):
         """The cloud password the sign-in asked for (Account.on_password)."""
@@ -2015,6 +2563,7 @@ class Account:
         self.wake = None  # set by retry(): the pause before the next start ends
         self.secret = None  # a future the sign-in waits on for the cloud password
         self.me = None
+        self.call = None
         self.names = {}
         self.chats = {}
         self.seeded = os.path.exists(self.known_path)
@@ -2049,6 +2598,8 @@ class Account:
     async def stop(self):
         """Disconnected: the link's run() cancelled (PyMax closes on it)."""
         task, self.task = self.task, None
+        if self.call is not None:
+            await self.call.end("HUNGUP")
         self.online = False
         if task is not None:
             task.cancel()
@@ -2075,6 +2626,8 @@ class Account:
             except Exception as exc:
                 why = repr(exc)
             self.online = False
+            if self.call is not None:
+                await self.call.end(None, "failed")
             pause = RETRY[min(self.tries, len(RETRY) - 1)]
             self.tries += 1
             log_line("%s: link gave up (%s); again in %s s" % (self.id, why, pause))
@@ -2086,6 +2639,37 @@ class Account:
                 pass
 
     # --- the link's events ------------------------------------------------------
+    def new_call(self, conversation, peer, incoming):
+        def changed(call, state):
+            if self.call is call:
+                GLib.idle_add(self.ui.call_changed, {
+                    "id": call.id, "name": self.name(call.peer, "Собеседник"), "state": state})
+                if call.closed:
+                    self.call = None
+        call = self.call = VoiceCall(conversation, peer, incoming, changed, self.agent)
+        changed(call, call.state)
+        return call
+
+    async def on_call_frame(self, opcode, payload):
+        if opcode in (120, 121):
+            if opcode == 120 and (self.call is None or not self.call.incoming or self.call.accepted):
+                return
+            if self.call is not None and self.call.id == payload.get("conversationId"):
+                await self.call.end()
+            return
+        if not self.online or not self.can("calls") or self.call is not None:
+            return
+        log_line("voice call: invitation received")
+        try:
+            params = call_params(payload["vcp"])
+            conversation, peer = payload["conversationId"], int(payload["callerId"])
+            call_endpoint(params, conversation, True)  # validate before showing the invitation
+        except Exception:
+            log_line("voice call: invalid invitation")
+            return
+        call = self.new_call(conversation, peer, True)
+        call.start(params)
+
     async def on_qr(self, qr_url):
         path = os.path.join(self.folder, "qr.png")
         qr_png(qr_url, path)
@@ -2174,6 +2758,8 @@ class Account:
     async def on_disconnect(self, why):
         """The connection is lost; the link connects again by itself."""
         self.online = False
+        if self.call is not None:
+            await self.call.end(None, "failed")
         log_line("%s: connection lost: %s" % (self.id, why))
         GLib.idle_add(self.ui.connected, self.id, False)
 
@@ -4387,6 +4973,8 @@ class Max(Gtk.Application):
     def __init__(self, link=None, media=None, recorder=None):
         super().__init__(application_id=APP_ID)
         self.win = None
+        self.call_id = None
+        self.call_awake = Awake(NAME, "voice call")
         self.recorder = recorder or Recorder()  # voice messages from the microphone
         self.backend = Backend(self, link)  # link: PyMaxLink unless given (tests, demo)
         self.telemetry = Telemetry(self.backend)
@@ -4423,6 +5011,8 @@ class Max(Gtk.Application):
             ask_background(self.get_dbus_connection())
 
     def do_shutdown(self):
+        self.backend.run(self.backend.stop("max"))
+        self.call_awake.release()
         self.backend.cache.flush()  # what the last two seconds changed
         recent = getattr(self, "recent", None)  # no window ever built: none
         if recent is not None and recent != self.recent_saved:
@@ -4471,6 +5061,11 @@ class Max(Gtk.Application):
         self.edit.connect("clicked", lambda _b: self.chat_menu())
         self.edit.set_no_show_all(True)
         bar.pack_end(self.edit)
+        self.call_button = Gtk.Button.new_from_icon_name("call-start-symbolic", Gtk.IconSize.DIALOG)
+        self.call_button.set_tooltip_text("Позвонить")
+        self.call_button.set_no_show_all(True)
+        self.call_button.connect("clicked", lambda _b: self.dial_call())
+        bar.pack_end(self.call_button)
         # The photo shown: saved from the header, where the shell's ✕ leaves room.
         self.viewer_save = Gtk.Button.new_from_icon_name("document-save-symbolic",
                                                          Gtk.IconSize.DIALOG)
@@ -4528,6 +5123,19 @@ class Max(Gtk.Application):
         column = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         column.pack_start(self.offline, False, False, 0)
         column.pack_start(self.nowplay, False, False, 0)
+        self.call_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
+        self.call_box.set_no_show_all(True)
+        self.call_label = label("", "big", xalign=0.5, wrap=True)
+        self.call_answer = Gtk.Button(label="Ответить")
+        self.call_answer.get_style_context().add_class("suggested-action")
+        self.call_end = Gtk.Button(label="Завершить")
+        self.call_end.get_style_context().add_class("destructive-action")
+        self.call_answer.connect("clicked", lambda _b: self.call_action("answer"))
+        self.call_end.connect("clicked", lambda _b: self.call_action("end"))
+        for child in (self.call_label, self.call_answer, self.call_end):
+            self.call_box.pack_start(child, False, False, 0)
+            child.show()
+        column.pack_start(self.call_box, False, False, 16)
         column.pack_start(self.stack, True, True, 0)
         self.win.add(column)
         wait = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
@@ -5915,6 +6523,10 @@ class Max(Gtk.Application):
         self.findb.set_visible(page == "chats")
         self.edit.set_visible(page == "chat" and self.chatlist.listed(self.open_chat))
         self.viewer_save.set_visible(page == "photo")
+        summary = self.about(self.open_chat) if self.open_chat is not None else {}
+        self.call_button.set_visible(page == "chat" and summary.get("type") == "DIALOG"
+                                     and isinstance(self.open_chat, int)
+                                     and summary.get("peer") is not None)
         if page not in ("chat", "photo", "forward") and not self.keep_sound:
             self.stop_sound()  # the chat is left: its sound stops
         self.show_nowplay()
@@ -5973,6 +6585,61 @@ class Max(Gtk.Application):
             old.destroy()
         return view
 
+    def dial_call(self):
+        if self.call_id is None:
+            self.stop_sound()
+            self.record_stop(False)
+            self.backend.run(self.backend.call("dial", peer=self.open_chat), self.call_result)
+
+    def call_action(self, action):
+        if self.call_id is None:
+            self.call_box.hide()
+            return
+        self.call_answer.set_sensitive(False)
+        if action == "answer":
+            self.stop_sound()
+            self.record_stop(False)
+        self.backend.run(self.backend.call(action, conversation=self.call_id), self.call_result)
+
+    def call_result(self, _result, error):
+        if error and self.call_id is None:
+            self.call_label.set_text("Не удалось соединиться. Позвоните ещё раз, когда будете готовы.")
+            self.call_answer.hide()
+            self.call_end.set_label("Закрыть")
+            self.call_end.show()
+            self.call_box.show()
+
+    def call_changed(self, call):
+        state = call["state"]
+        if self.call_id is not None and self.call_id != call["id"]:
+            return False
+        terminal = state in ("ended", "failed", "unsupported")
+        self.call_id = None if terminal else call["id"]
+        text = {"ringing": "Входящий звонок", "dialling": "Звоним…",
+                "connecting": "Соединяемся…", "active": "Разговор · микрофон включён",
+                "ended": "Звонок завершён", "failed": "Связь прервалась",
+                "unsupported": "Этот вид соединения пока не поддерживается"}[state]
+        self.call_label.set_text(call["name"] + "\n" + text)
+        self.call_answer.set_visible(state == "ringing")
+        self.call_answer.set_sensitive(state == "ringing")
+        self.call_end.show()
+        self.call_end.set_label("Закрыть" if terminal else "Отклонить" if state == "ringing" else "Завершить")
+        self.call_box.show()
+        self.call_button.set_sensitive(terminal)
+        if state in ("connecting", "active"):
+            self.call_awake.hold()
+        else:
+            self.call_awake.release()
+        if state == "ringing":
+            self.win.present()
+            notification = Gio.Notification.new("Входящий звонок")
+            notification.set_body(call["name"])
+            notification.set_priority(Gio.NotificationPriority.URGENT)
+            self.send_notification("voice-call", notification)
+        else:
+            self.withdraw_notification("voice-call")
+        return False
+
     def open(self, chat_id):
         start = time.monotonic()
         self.withdraw_notification("chat-%d" % chat_id)
@@ -5981,6 +6648,8 @@ class Max(Gtk.Application):
         self.confirm.hide()
         self.naming.hide()
         self.edit.set_visible(self.chatlist.listed(chat_id))
+        self.call_button.set_visible(s.get("type") == "DIALOG" and isinstance(chat_id, int)
+                                     and s.get("peer") is not None)
         if self.playing and self.playing_chat != chat_id and not self.keep_sound:
             self.stop_sound()  # another chat in front: the sound of the last one stops
         GLib.idle_add(lambda: self.show_nowplay() and False)
@@ -6405,7 +7074,7 @@ class Max(Gtk.Application):
 
     # --- a voice message --------------------------------------------------------
     def record_start(self):
-        if self.open_chat is None or self.recorder.recording():
+        if self.call_id is not None or self.open_chat is None or self.recorder.recording():
             return
         self.stop_sound()  # no voice played into the microphone
         if not self.recorder.start():
