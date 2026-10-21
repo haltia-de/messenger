@@ -1,5 +1,29 @@
 # Что нового · What's new
 
+## 2.7.0 (2026-10-21)
+
+### Русский
+
+Теперь можно звонить контактам MAX. Входящий звонок звучит и будит экран планшета; ответить можно одной большой кнопкой. Перед исходящим звонком программа спрашивает «Позвонить …?».
+
+Во время разговора голос собеседника слышен через динамик, а эхо на планшете подавляется. Планшет не засыпает до конца звонка.
+
+Второй звонок во время разговора получает ответ «занято». При выходе из программы звонок завершается правильно.
+
+Звонки доступны только там, где установлены нужные компоненты GStreamer.
+
+### English
+
+You can now make voice calls to MAX contacts. An incoming call rings and wakes the tablet’s screen; one big button answers it. Before calling a contact, the program asks «Позвонить …?» (Call …?).
+
+During a call, the other person’s voice comes through the speaker and echo is suppressed on the tablet. The tablet stays awake until the call ends.
+
+A second call during a conversation gets a busy answer. Quitting the program ends the call properly.
+
+Calls are available only where the needed GStreamer components are installed.
+
+The licence is now GPL-3.0-or-later.
+
 ## 2.6.1 (2026-10-20)
 
 ### Русский
