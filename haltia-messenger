@@ -94,6 +94,7 @@ offers no renaming of contacts.
 """
 import asyncio
 import base64
+import concurrent.futures
 import dataclasses
 import functools
 import hashlib
@@ -1905,6 +1906,11 @@ def video_supported():
         return False
 
 
+REMOTE_STALE = 3.0  # s without the peer's frames: their video is gone
+REMOTE_MAX = 480  # px, the longer side of the peer's frames handed to GTK
+CAMERA_THREAD = concurrent.futures.ThreadPoolExecutor(1, thread_name_prefix="camera")
+
+
 class CallPicture(Gtk.DrawingArea):
     """A bounded decoded frame, fitted to the window without changing its size."""
 
@@ -1962,6 +1968,7 @@ class CallAudio:
         self.bus = None
         self.signals = []
         self.camera = None
+        self.camera_lock = threading.Lock()  # set_video runs on CAMERA_THREAD and at close()
         self.video_bin = None
         self.video_pad = None
         self.frame = None
@@ -1990,8 +1997,10 @@ class CallAudio:
                     "appsrc name=outgoing_video is-live=true format=time do-timestamp=true max-buffers=2 leaky-type=downstream "
                     "caps=video/x-raw,format=I420,width=320,height=240,framerate=15/1 "
                     "! queue max-size-buffers=2 leaky=downstream "
-                    "! vp8enc name=video_encoder deadline=1 cpu-used=8 threads=2 "
-                    "target-bitrate=300000 keyframe-max-dist=30 "
+                    # Real-time: constant rate for the link, the fastest speed for
+                    # the tablet's Atom, two partitions so both threads have work.
+                    "! vp8enc name=video_encoder deadline=1 cpu-used=16 threads=2 token-partitions=2 "
+                    "end-usage=cbr target-bitrate=300000 keyframe-max-dist=30 "
                     "! rtpvp8pay name=video_pay pt=%d picture-id-mode=15-bit " % video_payload +
                     '! capsfilter name=video_caps caps="application/x-rtp,media=video,encoding-name=VP8,payload=%d,clock-rate=90000"' % video_payload, True)
                 self.pipeline.add(self.video_bin)
@@ -2088,8 +2097,11 @@ class CallAudio:
             if decoder is None:
                 return
             description = ("queue max-size-time=200000000 max-size-buffers=0 max-size-bytes=1048576 leaky=downstream ! " + decoder +
-                           " ! videorate drop-only=true ! videoconvert ! videoscale add-borders=true "
-                           "! video/x-raw,format=RGBA,width=320,height=240,framerate=15/1 "
+                           " ! videorate drop-only=true ! videoconvert ! videoscale "
+                           # Within REMOTE_MAX, in the peer's own proportions (a phone
+                           # held upright stays upright); CallPicture fits it.
+                           "! video/x-raw,format=RGBA,width=[16,%d],height=[16,%d],"
+                           "pixel-aspect-ratio=1/1,framerate=15/1 " % (REMOTE_MAX, REMOTE_MAX) +
                            "! appsink name=remote_video emit-signals=true sync=false max-buffers=1 drop=true")
         else:
             return
@@ -2136,7 +2148,13 @@ class CallAudio:
         return self.Gst.FlowReturn.OK
 
     def set_video(self, enabled):
-        """Open only on a tap; stopping releases the device immediately."""
+        """Open only on a tap; stopping releases the device immediately.
+        It blocks (finding the camera takes a second or more with libcamera):
+        VoiceCall runs it on CAMERA_THREAD, never on the asyncio loop."""
+        with self.camera_lock:
+            return self._set_video(enabled)
+
+    def _set_video(self, enabled):
         self.video_generation += 1
         camera, self.camera = self.camera, None
         if camera is not None:
@@ -2165,7 +2183,7 @@ class CallAudio:
             raise ValueError("unsupported camera source")
         else:
             from haltia_kit import camera
-            found = camera.cameras()  # libcamera first, V4L2 fallback, in backend thread
+            found = camera.cameras()  # libcamera first, V4L2 fallback; on CAMERA_THREAD
             if not found:
                 raise RuntimeError("no camera")
             chosen = next((c for c in found if c.front), found[0])
@@ -2203,7 +2221,7 @@ class CallAudio:
             if camera.set_state(self.Gst.State.PLAYING) == self.Gst.StateChangeReturn.FAILURE:
                 raise RuntimeError("camera failed")
         except BaseException:
-            self.set_video(False)
+            self._set_video(False)
             raise
         return True
 
@@ -2309,8 +2327,9 @@ class CallAudio:
         return result
 
     def close(self):
-        self.set_video(False)
-        self.closed = True
+        with self.camera_lock:  # a camera opening on CAMERA_THREAD finishes first
+            self.closed = True
+            self._set_video(False)
         self.frame = None
         self.video_bin = None
         self.video_pad = None
@@ -2594,13 +2613,19 @@ class VoiceCall:
     async def camera(self, enabled, failed=False):
         if self.closed or self.audio is None:
             return
+        audio = self.audio
+        loop = asyncio.get_running_loop()
         try:
-            self.video = self.audio.set_video(enabled)
-            self.video_error = "Камера не включилась. Разговор продолжается без видео." if failed else None
+            # Finding and opening the camera blocks: signalling, ICE and
+            # hang-up go on meanwhile. One thread keeps taps in their order.
+            video = await loop.run_in_executor(CAMERA_THREAD, audio.set_video, enabled)
+            error = "Камера не включилась. Разговор продолжается без видео." if failed else None
         except Exception:
-            self.audio.set_video(False)
-            self.video = False
-            self.video_error = "Камера не включилась. Разговор продолжается без видео."
+            await loop.run_in_executor(CAMERA_THREAD, audio.set_video, False)
+            video, error = False, "Камера не включилась. Разговор продолжается без видео."
+        if self.closed or audio is not self.audio:
+            return  # hung up meanwhile: close() released the camera
+        self.video, self.video_error = video, error
         # Show the own preview immediately, even if the signalling ACK is slow.
         self.show(self.state)
         await self.command("change-media-settings", mediaSettings=self.media_settings())
@@ -5679,6 +5704,8 @@ class Max(Gtk.Application):
         self.call_frame_lock = threading.Lock()
         self.call_frames = {}
         self.call_frame_pending = False
+        self.call_remote_seen = 0.0  # monotonic time of the peer's last frame
+        self.call_remote_timer = None
         self.call_video = False
         self.call_video_invitation = False
         self.call_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
@@ -7293,9 +7320,28 @@ class Max(Gtk.Application):
         for own, (conversation, frame) in frames.items():
             if conversation == self.call_id and (not own or self.call_video):
                 (self.call_own if own else self.call_remote).picture(frame)
-                self.call_video_area.show()
-                self.call_identity.hide()
+                if not own:
+                    self.call_remote_seen = time.monotonic()
+                    if self.call_remote_timer is None:
+                        self.call_remote_timer = GLib.timeout_add(500, self._call_remote_stale)
+        self.show_call_video()
         return False
+
+    def _call_remote_stale(self):
+        # The peer's video is what arrives, not what it announced: a peer
+        # that stops sending without media-settings-changed leaves no black screen.
+        if self.call_id is not None and time.monotonic() - self.call_remote_seen < REMOTE_STALE:
+            return True
+        self.call_remote_timer = None
+        self.call_remote.picture(None)
+        self.show_call_video()
+        return False
+
+    def show_call_video(self):
+        """The video area while there is a picture to show, else the portrait."""
+        shown = self.call_remote.pixbuf is not None or self.call_own.pixbuf is not None
+        self.call_video_area.set_visible(shown)
+        self.call_identity.set_visible(not shown)
 
     def call_changed(self, call):
         state = call["state"]
@@ -7317,16 +7363,12 @@ class Max(Gtk.Application):
         self.call_camera.set_label("Выключить камеру" if self.call_video else "Включить камеру")
         self.call_own_box.set_visible(self.call_video)
         if call.get("remote_video") is False:
-            self.call_remote.picture(None)
-            if not self.call_video:
-                self.call_video_area.hide()
-                self.call_identity.show()
+            self.call_remote.picture(None)  # said so: no need to wait for frames to stop
         if not self.call_video:
             self.call_own.picture(None)
         if terminal or state in ("ringing", "dialling"):
             self.call_remote.picture(None)
-            self.call_video_area.hide()
-            self.call_identity.show()
+        self.show_call_video()
         if call.get("video_error"):
             text = call["video_error"]
         self.call_video_caption.set_text(call["name"] + (" · " + call["video_error"] if call.get("video_error") else ""))

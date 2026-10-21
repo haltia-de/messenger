@@ -311,6 +311,16 @@ assert app.call_own.pixbuf is None and not app.call_video_area.get_visible()
 app.call_frame("old-video", True, frame)
 wait(lambda: not app.call_frame_pending)
 assert app.call_own.pixbuf is None
+# The peer's picture goes when its frames stop, though it never said so.
+with patch.object(bm, "REMOTE_STALE", .3):
+    app.call_changed(dict(video_call, state="active", video=False))
+    app.call_frame("video-ui", False, (24, 32, bytes(4 * 24 * 32)))
+    wait(lambda: app.call_remote.pixbuf is not None)
+    assert app.call_video_area.get_visible() and not app.call_identity.get_visible()
+    # Upright, as sent: no bands of its own (CallPicture fits it).
+    assert (app.call_remote.pixbuf.get_width(), app.call_remote.pixbuf.get_height()) == (24, 32)
+    wait(lambda: app.call_remote.pixbuf is None)
+    assert not app.call_video_area.get_visible() and app.call_identity.get_visible()
 app.call_changed(dict(video_call, state="ended"))
 assert not app.call_audio_answer.get_visible() and not app.call_camera.get_visible()
 video_probe.stop()

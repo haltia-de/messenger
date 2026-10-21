@@ -3,6 +3,7 @@
 Run inside the Messenger Flatpak when the host has no GstWebRTC/libnice.
 """
 import asyncio
+import threading
 from common import load, ok
 
 bm = load()
@@ -111,13 +112,14 @@ async def h264_receive():
     phone.closed, phone.remote_set, phone.pending = False, False, []
     phone.camera = phone.video_bin = phone.video_pad = phone.frame = None
     phone.video_generation = 0
+    phone.camera_lock = threading.Lock()
     phone.sink = "fakesink name=heard sync=false"
     phone.pipeline = Gst.parse_launch(
         "webrtcbin name=rtc bundle-policy=max-bundle "
         "audiotestsrc is-live=true ! audioconvert ! audioresample "
         "! audio/x-raw,rate=48000,channels=1 ! opusenc ! rtpopuspay pt=111 "
         "! application/x-rtp,media=audio,encoding-name=OPUS,payload=111,clock-rate=48000,encoding-params=(string)2 ! rtc. "
-        "videotestsrc is-live=true ! video/x-raw,width=320,height=240,framerate=15/1 "
+        "videotestsrc is-live=true ! video/x-raw,width=480,height=640,framerate=15/1 "
         "! videoconvert ! x264enc tune=zerolatency speed-preset=ultrafast key-int-max=15 "
         "! video/x-h264,profile=constrained-baseline ! rtph264pay pt=102 config-interval=-1 "
         "! application/x-rtp,media=video,encoding-name=H264,payload=102,clock-rate=90000 ! rtc.")
@@ -146,12 +148,14 @@ async def h264_receive():
         while len(frames) < 5 and loop.time() < deadline:
             await asyncio.sleep(.05)
         assert len(frames) >= 5, states
+        # A phone held upright: upright within REMOTE_MAX, no bands added.
+        assert frames[-1][:2] == (360, 480), frames[-1][:2]
         for peer in peers:
             heard = peer.pipeline.get_by_name("heard")
             assert heard is not None and heard.get_property("stats").get_value("rendered") > 10
         assert receiver.camera is None and receiver.video_bin is None
         assert not any("failed" in s for s in states), states
-        ok("H264-only incoming video decoded; camera stays closed; Opus connection survives")
+        ok("H264-only incoming video decoded upright; camera stays closed; Opus connection survives")
     finally:
         for peer in peers:
             peer.close()

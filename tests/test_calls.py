@@ -3,6 +3,7 @@
 import asyncio
 import base64
 import json
+import threading
 from unittest.mock import AsyncMock, Mock, patch
 from types import SimpleNamespace
 from common import load, ok
@@ -77,6 +78,7 @@ def camera_refresh():
         scheduled, statuses = [], []
         audio = bm.CallAudio.__new__(bm.CallAudio)
         audio.camera, audio.closed, audio.video_generation = None, False, 0
+        audio.camera_lock = threading.Lock()
         audio.video_bin, audio.video_size = object(), (320, 240, 15)
         audio.loop = SimpleNamespace(call_soon_threadsafe=lambda cb, *a: scheduled.append((cb,a)))
         audio.status = statuses.append
@@ -584,7 +586,15 @@ async def video_consent():
             self.video_size = (320, 240, 15)
             self.camera = False
             self.fail = False
+            self.hold = None
+            self.threads = set()
         def set_video(self, enabled):
+            self.threads.add(threading.current_thread().name)
+            if enabled and self.hold:
+                opened, release = self.hold
+                self.hold = None
+                opened.set()
+                release.wait(5)
             self.camera = False
             if enabled and self.fail:
                 raise RuntimeError("synthetic busy camera")
@@ -631,6 +641,17 @@ async def video_consent():
         await socket.notify("media-settings-changed", participantId="remote", mediaSettings={"isVideoEnabled": True})
         await until(lambda: call.remote_video is True)
         assert not call.video  # A peer cannot turn our camera on.
+        # Opening the camera blocks its own thread, never the loop.
+        call.audio.fail = False
+        opened, release = threading.Event(), threading.Event()
+        call.audio.hold = (opened, release)
+        enabling = asyncio.create_task(call.camera(True))
+        await until(opened.is_set)
+        await asyncio.sleep(.05)
+        assert not enabling.done()
+        release.set()
+        await enabling
+        assert call.video and call.audio.threads == {"camera_0"}
         await call.end("HUNGUP")
         await asyncio.gather(task, return_exceptions=True)
         assert call.audio.closed and not call.audio.camera
