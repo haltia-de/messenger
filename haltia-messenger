@@ -5139,6 +5139,9 @@ class Max(Gtk.Application):
         self.call_id = None
         self.dial_confirming = False
         self.call_awake = Awake(NAME, "voice call")
+        # A GTK/portal cookie may be granted without a working portal.
+        # Keep an independent logind fd for haltia-sleep on the tablet.
+        self.call_logind = Awake(NAME, "call", app=False)
         self.call_ringer = CallRinger()
         self.call_notice = None
         self.call_portrait = None
@@ -5195,6 +5198,7 @@ class Max(Gtk.Application):
                 future.cancel()
         self.backend.run(self.backend.stop("max"))
         self.call_awake.release()
+        self.call_logind.release()
         self.call_ringer.stop()
         self.backend.cache.flush()  # what the last two seconds changed
         recent = getattr(self, "recent", None)  # no window ever built: none
@@ -6878,8 +6882,10 @@ class Max(Gtk.Application):
         self.call_pages.set_visible_child_name("call")
         self.call_button.set_sensitive(terminal)
         if state in ("ringing", "dialling", "connecting", "active"):
+            self.call_logind.hold()
             self.call_awake.hold()
         else:
+            self.call_logind.release()
             self.call_awake.release()
         if state == "ringing":
             if self.dial_confirming:

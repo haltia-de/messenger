@@ -7,6 +7,7 @@ from common import load, ok
 bm = load()
 from fake_link import FakeLink
 from fake_hands import FakeHands
+from fake_logind import FakeLogind
 from gi.repository import GLib, Gio, GdkPixbuf
 
 
@@ -27,6 +28,8 @@ hands = FakeHands()
 app = bm.Max(link=fake, media=bm.Media(hands.spawn, hands.open_uri, hands.fetch, hands.player, hands.download))
 app.call_ringer = Mock()  # No real speaker, even on a host with media support.
 app.call_awake = Mock()
+logind = FakeLogind()
+app.call_logind.inhibit = logind.inhibit
 app.set_flags(app.get_flags() | bm.Gio.ApplicationFlags.NON_UNIQUE)
 app.register(None)
 # Exercise the real GIO freedesktop backend, including its desktop-entry hint.
@@ -138,6 +141,9 @@ assert "default" in notification[5]
 app.activate_action("show-call", None)
 assert not requests  # Bringing the call forward is never acceptance.
 app.call_awake.hold.assert_called()
+assert logind.requests[-1] == ("sleep:idle", "Сообщения", "call", "block")
+assert not logind.released()  # A portal cookie is not the tablet's inhibitor.
+held_fd, inhibitors = app.call_logind.fd, len(logind.requests)
 app.call_ringer.start.assert_called()
 assert app.call_box.get_visible() and app.call_answer.get_visible()
 assert app.call_pages.get_visible_child_name() == "call"
@@ -161,11 +167,15 @@ for width, height in ((800, 600), (1280, 800)):
         app.win.draw(cairo.Context(surface))
         surface.write_to_png(os.path.join(shots, "incoming-%d.png" % width))
 app.call_changed({"id": "synthetic-invitation", "name": "Тестовый собеседник", "state": "active"})
+assert app.call_logind.fd == held_fd and len(logind.requests) == inhibitors
+assert not logind.released()
 app.call_ringer.stop.assert_called()
 wait(lambda: closed)
 assert not app.call_answer.get_visible() and app.call_end.get_label() == "Завершить"
 assert "микрофон включён" in app.call_label.get_text()
 app.call_changed({"id": "synthetic-invitation", "name": "Тестовый собеседник", "state": "ended"})
+assert app.call_logind.fd is None
+wait(lambda: logind.released())
 assert app.call_end.get_label() == "Закрыть" and app.call_button.get_sensitive()
 app.call_end.clicked()
 assert not app.call_box.get_visible()
@@ -191,7 +201,10 @@ with patch.object(app.media, "photo", side_effect=lambda url, done, **_kw: portr
 app.backend.run(app.backend.stop("max"))
 wait(lambda: not app.backend.accounts["max"].online)
 app.win.destroy()
+assert all(logind.released(n) for n in range(len(logind.readers)))
+logind.close()
 connection.unregister_object(registration)
 Gio.bus_unown_name(bus_owner)
 ok("dialog-only Call, incoming Answer/Decline, active End, dismissal and stale events")
 ok("critical call.incoming notification, desktop-entry, show-only action, wake, large controls and late portraits")
+ok("logind sleep:idle fd is held from ringing through active despite a portal cookie, then closed")

@@ -6,6 +6,7 @@ import time
 from common import load, ok
 bm = load()
 from fake_link import FakeLink
+from fake_logind import FakeLogind
 from gi.repository import GLib
 
 
@@ -26,6 +27,8 @@ class Audio:
 
 fake = FakeLink(can={"calls"})
 app = bm.Max(link=fake)
+logind = FakeLogind()
+app.call_logind.inhibit = logind.inhibit
 app.set_flags(app.get_flags() | bm.Gio.ApplicationFlags.NON_UNIQUE)
 socket, audio = SilentSocket(), Audio()
 started = []
@@ -42,6 +45,8 @@ async def setup():
 def ready(_result, error):
     if error is not None:
         errors.append(error)
+    app.call_logind.hold()
+    assert not logind.released()
     started.append(time.monotonic())
     app.activate_action("quit", None)
 
@@ -65,4 +70,7 @@ app.run([])
 assert not errors, errors
 assert started and 1.8 <= time.monotonic() - started[0] < 3.5
 assert audio.closed and socket.attempted["reason"] == "HUNGUP"
+assert app.call_logind.fd is None and logind.released()
+logind.close()
 ok("GTK quit attempts HUNGUP, closes media and stops waiting after two seconds")
+ok("quit releases the logind fd even when hangup cannot finish")

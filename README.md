@@ -240,7 +240,8 @@ flatpak run --command=python3 --filesystem="$PWD":ro \
 
 На Ubuntu вне Flatpak для звонков нужны в том числе
 `gstreamer1.0-nice` и `gir1.2-gst-plugins-bad-1.0`; зависимости deb
-содержат полный набор. На планшете звонки ещё не проверены.
+содержат полный набор. На планшете состоялся первый разговор; полная
+приёмка и проверка удержания экрана на батарее ещё впереди.
 Пакеты и ограничение WebRTC в Alpine 3.24 описаны в
 [docs/calls-alpine.md](docs/calls-alpine.md).
 
