@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """The call controls on the real GTK window, using no account or microphone."""
 import time
+from unittest.mock import patch
 from common import load, ok
 bm = load()
 from fake_link import FakeLink
@@ -38,6 +39,42 @@ fake.can = fake.can | {"calls"}
 app.open(group)
 assert not app.call_button.get_visible()
 app.open(dialog)
+# Dialling always asks, including when file/forward confirmations are off.
+requests, questions = [], []
+async def dial(action, **kwargs):
+    requests.append((action, kwargs))
+def question(_window, text, yes):
+    questions.append((text, yes))
+    assert not requests
+    app.dial_call()  # reentry while the modal dialog is open cannot ask/dial again
+    return False
+app.confirm_acts = False
+with patch.object(app.backend, "call", side_effect=dial):
+    with patch.object(bm.dialogs, "ask", side_effect=question):
+        app.dial_call()
+    assert not requests and questions == [("Позвонить Тестовый собеседник?", "Позвонить")]
+    with patch.object(bm.dialogs, "ask", return_value=True):
+        app.dial_call()
+    wait(lambda: len(requests) == 1)
+    assert requests == [("dial", {"peer": dialog})]
+    requests.clear()
+    def changed_chat(*_args):
+        app.open(group)
+        return True
+    with patch.object(bm.dialogs, "ask", side_effect=changed_chat):
+        app.dial_call()
+    assert not requests
+    app.open(dialog)
+    def incoming_while_asking(*_args):
+        app.call_changed({"id": "during-confirm", "name": "Тестовый собеседник", "state": "ringing"})
+        return True
+    with patch.object(bm.dialogs, "ask", side_effect=incoming_while_asking):
+        app.dial_call()
+    assert not requests
+    app.call_changed({"id": "during-confirm", "name": "Тестовый собеседник", "state": "ended"})
+assert app.lookup_action("quit") is not None and app.get_accels_for_action("app.quit")
+ok("mandatory dial confirmation, cancellation, reentry, changed chat and incoming-call races")
+
 app.call_changed({"id": "synthetic-invitation", "name": "Тестовый собеседник", "state": "ringing"})
 assert app.call_box.get_visible() and app.call_answer.get_visible()
 assert app.call_end.get_label() == "Отклонить"
