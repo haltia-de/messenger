@@ -13,6 +13,7 @@ class FakeLogind:
     def __init__(self):
         self.requests = []
         self.readers = []
+        self.refuse = False
         self.ready = queue.Queue()
         self.thread = threading.Thread(target=self._serve, daemon=True)
         self.thread.start()
@@ -50,6 +51,9 @@ class FakeLogind:
 
     def _inhibit(self, _bus, _sender, _path, _interface, _method, parameters, invocation):
         self.requests.append(parameters.unpack())
+        if self.refuse:
+            invocation.return_dbus_error("org.freedesktop.login1.Error.Failed", "test refusal")
+            return
         reader, writer = os.pipe2(os.O_NONBLOCK | os.O_CLOEXEC)
         self.readers.append(reader)
         fds = Gio.UnixFDList.new()
