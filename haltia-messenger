@@ -2579,8 +2579,9 @@ class VoiceCall:
             self.audio.set_video(False)
             self.video = False
             self.video_error = "Камера не включилась. Разговор продолжается без видео."
-        await self.command("change-media-settings", mediaSettings=self.media_settings())
+        # Show the own preview immediately, even if the signalling ACK is slow.
         self.show(self.state)
+        await self.command("change-media-settings", mediaSettings=self.media_settings())
 
     async def adapt_video(self, fps):
         if not self.video or fps >= self.audio.video_size[2] * .6:

@@ -527,8 +527,9 @@ async def video_consent():
             self.camera = False
             super().close()
     for answer_video in (True, False):
+        shown = []
         socket = Socket()
-        call = bm.VoiceCall("video-consent", "test-person", True, lambda *_a: None,
+        call = bm.VoiceCall("video-consent", "test-person", True, lambda c, _s: shown.append(c.video),
                             audio=VideoAudio, connect=lambda *_a, **_k: socket, video=True)
         task = asyncio.create_task(call.run(dict(params)))
         await until(lambda: "change-participant-state" in socket.commands())
@@ -543,7 +544,16 @@ async def video_consent():
         accepted = next(v for v in socket.sent if isinstance(v, dict) and v["command"] == "accept-call")
         assert accepted["mediaSettings"]["isVideoEnabled"] == answer_video
         call.audio_state("connected")
-        await call.camera(True)
+        await call.camera(False)
+        gate = asyncio.Event()
+        async def slow_ack(*_args, **_kwargs):
+            await gate.wait()
+        with patch.object(call, "command", side_effect=slow_ack):
+            enabling = asyncio.create_task(call.camera(True))
+            await until(lambda: call.audio.camera)
+            assert shown[-1] is True and not enabling.done()
+            gate.set()
+            await enabling
         await call.adapt_video(3)
         assert call.audio.video_size == (160,120,10) and call.video
         await call.adapt_video(3)
