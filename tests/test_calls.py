@@ -3,9 +3,45 @@
 import asyncio
 import base64
 import json
+from unittest.mock import Mock, patch
+from types import SimpleNamespace
 from common import load, ok
 
 bm = load()
+
+
+def media_probe():
+    for missing in ("Gst", "GstWebRTC", "GstSdp"):
+        bm.calls_supported.cache_clear()
+        def require_namespace(namespace, version):
+            if namespace == missing:
+                raise ValueError("missing typelib")
+        try:
+            with patch.object(bm.gi, "require_version", side_effect=require_namespace) as require:
+                first = bm.PyMaxLink("unused")
+                second = bm.PyMaxLink("unused")
+                assert "calls" not in first.can and "calls" not in second.can
+                assert "phone" in first.can
+                assert require.call_count == ("Gst", "GstWebRTC", "GstSdp").index(missing) + 1
+        finally:
+            bm.calls_supported.cache_clear()
+    for missing in ("webrtcbin", "opusenc", "nicesrc", "pulsesrc", None):
+        bm.calls_supported.cache_clear()
+        gst = SimpleNamespace(init=Mock(), ElementFactory=SimpleNamespace(
+            find=Mock(side_effect=lambda name: None if name == missing else object())))
+        try:
+            with patch.object(bm, "call_media", return_value=(gst, object(), object())) as load_media:
+                first = bm.PyMaxLink("unused")
+                second = bm.PyMaxLink("unused")
+                assert ("calls" in first.can) == (missing is None)
+                assert first.can == second.can and load_media.call_count == 1
+                gst.init.assert_called_once_with(None)
+        finally:
+            bm.calls_supported.cache_clear()
+    ok("missing media disables calls; positive and negative probes run only once")
+
+
+media_probe()
 
 
 def literal(value):
@@ -243,6 +279,73 @@ async def backend_dial():
     ok("one dial per tap, dialog/account guards and cancellation before opcode 78 replies")
 
 
+async def unavailable_media():
+    from fake_link import FakeLink
+    fake = FakeLink(can={"phone"})
+    backend = bm.Backend(object(), fake)
+    account = backend.accounts["max"]
+    account.online = True
+    with patch.object(bm, "call_params", side_effect=AssertionError("invitation was parsed")):
+        await account.on_call_frame(137, {"vcp": "unavailable"})
+    assert account.call is None
+    try:
+        await backend.call("dial", peer=10)
+    except bm.Offline:
+        pass
+    else:
+        raise AssertionError("dialled without media support")
+    ok("no media capability: invitations ignored and outgoing calls blocked")
+
+
+async def connection_states():
+    def make():
+        call = bm.VoiceCall("network", "test-person", False, lambda *args: None)
+        assert 5 <= call.DISCONNECT_GRACE <= 10
+        call.DISCONNECT_GRACE = .03
+        call.audio = Audio(None, None, call.audio_state, {})
+        call.audio_state("connected")
+        return call
+    call = make()
+    call.audio_state("closed")
+    await asyncio.sleep(.01)
+    assert not call.closed
+    call.audio_state("disconnected")
+    await asyncio.sleep(.01)
+    assert not call.closed and not call.audio.closed
+    call.audio_state("connected")
+    await asyncio.sleep(.06)
+    assert not call.closed and call.state == "active"
+    await call.end()
+    call = make()
+    call.audio_state("disconnected")
+    await until(lambda: call.closed)
+    assert call.end_reason == "NETWORK_ERROR" and call.audio.closed
+    call = make()
+    call.audio_state("failed")
+    await until(lambda: call.closed)
+    assert call.state == "failed" and call.audio.closed
+    call = make()
+    call.audio_state("disconnected")
+    await call.end("HUNGUP")
+    await asyncio.sleep(.06)
+    assert call.end_reason == "HUNGUP"  # no late network timeout after hangup
+    ok("disconnected grace, recovery, persistent failure and timeout cancellation")
+
+
+async def stop_reasons():
+    from fake_link import FakeLink
+    for incoming, accepted, reason in ((True, False, "REJECTED"),
+                                        (False, False, "CANCELED"),
+                                        (True, True, "HUNGUP"), (False, True, "HUNGUP")):
+        account = bm.Backend(object(), FakeLink()).accounts["max"]
+        call = bm.VoiceCall("stop", "test-person", incoming, lambda *args: None)
+        call.accepted = accepted
+        account.call = call
+        await account.stop()
+        assert call.closed and call.end_reason == reason
+    ok("account stop rejects incoming, cancels outgoing and hangs up accepted calls")
+
+
 async def main():
     await scenario(True)
     await scenario(False)
@@ -250,6 +353,9 @@ async def main():
     await cancelled_before_connect()
     await terminal_events()
     await backend_dial()
+    await unavailable_media()
+    await connection_states()
+    await stop_reasons()
 
 
 asyncio.run(main())

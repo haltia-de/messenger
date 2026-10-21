@@ -95,6 +95,7 @@ offers no renaming of contacts.
 import asyncio
 import base64
 import dataclasses
+import functools
 import hashlib
 import importlib.util
 import json
@@ -939,7 +940,7 @@ class PyMaxLink:
     hosts = ("max.ru",)  # links of its channels and groups
     # What it can besides messages (Account.can): find by phone, join by
     # link, reactions, forwarding, telemetry, its own invite setting.
-    can = frozenset({"phone", "links", "search", "react", "forward", "telemetry", "invites", "calls"})
+    can = frozenset({"phone", "links", "search", "react", "forward", "telemetry", "invites"})
 
     @staticmethod
     def dialog_of(me, user):
@@ -948,6 +949,7 @@ class PyMaxLink:
         return me ^ user
 
     def __init__(self, work_dir, vault=None):
+        self.can = type(self).can | ({"calls"} if calls_supported() else set())
         self.work_dir = work_dir
         self.vault = vault  # secrets() unless given
         self.client = None
@@ -1804,6 +1806,26 @@ def call_endpoint(params, conversation, incoming):
     return urllib.parse.urlunsplit(url._replace(query=urllib.parse.urlencode(query)))
 
 
+def call_media():
+    """Load the optional media typelibs without opening an audio device."""
+    for namespace in ("Gst", "GstWebRTC", "GstSdp"):
+        gi.require_version(namespace, "1.0")
+    from gi.repository import Gst, GstWebRTC, GstSdp
+    return Gst, GstWebRTC, GstSdp
+
+
+@functools.lru_cache(maxsize=1)
+def calls_supported():
+    """Probe once per process, including a negative result; no microphone."""
+    try:
+        Gst, _rtc, _sdp = call_media()
+        Gst.init(None)
+        return all(Gst.ElementFactory.find(name) is not None for name in
+                   ("webrtcbin", "opusenc", "nicesrc", "pulsesrc"))
+    except (ImportError, ValueError, GLib.Error):
+        return False
+
+
 class CallAudio:
     """One Opus WebRTC peer, owned by VoiceCall in the backend loop.
 
@@ -1814,10 +1836,7 @@ class CallAudio:
 
     def __init__(self, loop, candidate, status, params, source="pulsesrc",
                  sink="pulsesink sync=false"):
-        gi.require_version("Gst", "1.0")
-        gi.require_version("GstWebRTC", "1.0")
-        gi.require_version("GstSdp", "1.0")
-        from gi.repository import Gst, GstWebRTC, GstSdp
+        Gst, GstWebRTC, GstSdp = call_media()
         self.Gst, self.RTC, self.Sdp = Gst, GstWebRTC, GstSdp
         Gst.init(None)
         self.loop, self.candidate, self.status = loop, candidate, status
@@ -1826,6 +1845,9 @@ class CallAudio:
         self.pending = []
         self.sink = sink
         self.pipeline = None
+        self.rtc = None
+        self.bus = None
+        self.signals = []
         try:
             # RFC 7587 section 7 requires /2 in Opus SDP even for mono.
             # Keep it in RTP caps: without it the MAX peer never answers.
@@ -1836,9 +1858,10 @@ class CallAudio:
                 "! application/x-rtp,media=audio,encoding-name=OPUS,payload=111,clock-rate=48000,"
                 "encoding-params=(string)2 ! rtc.")
             self.rtc = self.pipeline.get_by_name("rtc")
-            self.rtc.connect("on-ice-candidate", self._candidate)
-            self.rtc.connect("pad-added", self._received)
-            self.rtc.connect("notify::connection-state", self._state)
+            for name, callback in (("on-ice-candidate", self._candidate),
+                                   ("pad-added", self._received),
+                                   ("notify::connection-state", self._state)):
+                self.signals.append(self.rtc.connect(name, callback))
             # Keep the video m-line used by MAX, without a camera or video sink.
             caps = Gst.Caps.from_string("application/x-rtp,media=video,encoding-name=VP8,payload=96,clock-rate=90000")
             self.rtc.emit("add-transceiver", GstWebRTC.WebRTCRTPTransceiverDirection.INACTIVE, caps)
@@ -1890,7 +1913,8 @@ class CallAudio:
         return self.Gst.BusSyncReply.DROP
 
     def _received(self, _rtc, pad):
-        if pad.direction != self.Gst.PadDirection.SRC or self.closed:
+        pipeline = self.pipeline
+        if pad.direction != self.Gst.PadDirection.SRC or self.closed or pipeline is None:
             return
         # Link on this streaming thread before its first packet arrives.
         caps = pad.get_current_caps() or pad.query_caps(None)
@@ -1898,7 +1922,7 @@ class CallAudio:
             return
         audio = self.Gst.parse_bin_from_description(
             "queue ! rtpopusdepay ! opusdec ! audioconvert ! audioresample ! " + self.sink, True)
-        self.pipeline.add(audio)
+        pipeline.add(audio)
         pad.link(audio.get_static_pad("sink"))
         audio.sync_state_with_parent()
 
@@ -1966,8 +1990,19 @@ class CallAudio:
 
     def close(self):
         self.closed = True
-        if self.pipeline is not None:
-            self.pipeline.set_state(self.Gst.State.NULL)
+        pipeline, self.pipeline = self.pipeline, None
+        rtc, self.rtc = self.rtc, None
+        bus, self.bus = self.bus, None
+        if bus is not None:
+            bus.set_sync_handler(None, None)
+        if rtc is not None:
+            for handler in self.signals:
+                rtc.disconnect(handler)
+        self.signals.clear()
+        if pipeline is not None:
+            pipeline.set_state(self.Gst.State.NULL)
+        self.pending.clear()
+        self.candidate = self.status = None
 
 
 class VoiceCall:
@@ -1977,6 +2012,8 @@ class VoiceCall:
     negotiation. Commands have deadlines; there is no reconnect or retry.
     Account owns this object and ignores every older call's callback.
     """
+
+    DISCONNECT_GRACE = 7  # seconds; a brief Wi-Fi interruption is not a failed call
 
     SETTINGS = {"isAudioEnabled": True, "isVideoEnabled": False,
                 "isScreenSharingEnabled": False, "isFastScreenSharingEnabled": False,
@@ -2006,6 +2043,10 @@ class VoiceCall:
         self.offer_ready = asyncio.Event()
         self.params = {}
         self.task = None
+        self.disconnect_timer = None
+
+    def hangup_reason(self):
+        return "HUNGUP" if self.accepted else "REJECTED" if self.incoming else "CANCELED"
 
     def show(self, state):
         if not self.closed:
@@ -2165,9 +2206,18 @@ class VoiceCall:
         if self.closed:
             return
         if state == "connected":
+            if self.disconnect_timer is not None:
+                self.disconnect_timer.cancel()
+                self.disconnect_timer = None
             self.show("active")
-        elif state in ("failed", "disconnected", "closed"):
+        elif state == "failed":
             self.job(self.end("NETWORK_ERROR", "failed"))
+        elif state == "disconnected" and self.disconnect_timer is None:
+            def expired():
+                self.disconnect_timer = None
+                if not self.closed:
+                    self.job(self.end("NETWORK_ERROR", "failed"))
+            self.disconnect_timer = asyncio.get_running_loop().call_later(self.DISCONNECT_GRACE, expired)
 
     async def negotiate(self):
         self.show("connecting")
@@ -2204,12 +2254,12 @@ class VoiceCall:
 
     async def ring_deadline(self):
         await asyncio.sleep(90)
-        if not self.accepted:
+        if not self.closed and not self.accepted:
             await self.end("MISSED" if self.incoming else "CANCELED", "ended")
 
     async def deadline(self):
         await asyncio.sleep(30)
-        if self.state != "active":
+        if not self.closed and self.state != "active":
             await self.end("TIMEOUT", "failed")
 
     async def end(self, reason=None, state="ended"):
@@ -2217,6 +2267,9 @@ class VoiceCall:
             return
         self.closed = True
         self.end_reason = reason
+        if self.disconnect_timer is not None:
+            self.disconnect_timer.cancel()
+            self.disconnect_timer = None
         self.state = state
         log_line("voice call: " + state)
         if self.audio:
@@ -2356,7 +2409,7 @@ class Backend:
 
     async def call(self, action, peer=None, conversation=None):
         account = self.accounts.get("max")
-        if account is None:
+        if account is None or not account.can("calls"):
             raise Offline()
         account.ask()
         if action == "dial":
@@ -2384,8 +2437,7 @@ class Backend:
             if action == "answer":
                 call.job(call.answer())
             elif action == "end":
-                reason = "HUNGUP" if call.accepted else "REJECTED" if call.incoming else "CANCELED"
-                await call.end(reason)
+                await call.end(call.hangup_reason())
 
     async def password(self, name, text):
         """The cloud password the sign-in asked for (Account.on_password)."""
@@ -2599,7 +2651,7 @@ class Account:
         """Disconnected: the link's run() cancelled (PyMax closes on it)."""
         task, self.task = self.task, None
         if self.call is not None:
-            await self.call.end("HUNGUP")
+            await self.call.end(self.call.hangup_reason())
         self.online = False
         if task is not None:
             task.cancel()
@@ -6526,7 +6578,8 @@ class Max(Gtk.Application):
         summary = self.about(self.open_chat) if self.open_chat is not None else {}
         self.call_button.set_visible(page == "chat" and summary.get("type") == "DIALOG"
                                      and isinstance(self.open_chat, int)
-                                     and summary.get("peer") is not None)
+                                     and summary.get("peer") is not None
+                                     and self.backend.can("calls", self.open_chat))
         if page not in ("chat", "photo", "forward") and not self.keep_sound:
             self.stop_sound()  # the chat is left: its sound stops
         self.show_nowplay()
@@ -6649,7 +6702,8 @@ class Max(Gtk.Application):
         self.naming.hide()
         self.edit.set_visible(self.chatlist.listed(chat_id))
         self.call_button.set_visible(s.get("type") == "DIALOG" and isinstance(chat_id, int)
-                                     and s.get("peer") is not None)
+                                     and s.get("peer") is not None
+                                     and self.backend.can("calls", chat_id))
         if self.playing and self.playing_chat != chat_id and not self.keep_sound:
             self.stop_sound()  # another chat in front: the sound of the last one stops
         GLib.idle_add(lambda: self.show_nowplay() and False)

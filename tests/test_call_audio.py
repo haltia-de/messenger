@@ -64,12 +64,27 @@ async def pair(passive=False):
                                   "nack-count"} for c in counters)
         ok("passive offer, active answer and two-way Opus" if passive else "outgoing offer with inactive video and two-way Opus")
     finally:
+        pipelines = [peer.pipeline for peer in peers]
+        handlers = [(peer.rtc, list(peer.signals)) for peer in peers]
         for peer in peers:
             peer.close()
-        assert all(peer.pipeline.get_state(0)[1] == peer.Gst.State.NULL for peer in peers)
+            peer.close()  # cleanup is idempotent, including partially built pipelines
+            assert peer.pipeline is None and peer.rtc is None and peer.bus is None
+        assert all(pipeline.get_state(0)[1] == peers[0].Gst.State.NULL for pipeline in pipelines)
+        assert all(not rtc.handler_is_connected(handler) for rtc, ids in handlers for handler in ids)
 
 
 async def main():
+    assert bm.calls_supported()  # the complete Flatpak media stack is advertised
+    broken = bm.CallAudio.__new__(bm.CallAudio)
+    try:
+        broken.__init__(asyncio.get_running_loop(), lambda c: None, lambda s: None,
+                        {"turn": {"urls": ["invalid:server"]}},
+                        source="audiotestsrc is-live=true", sink="fakesink")
+    except ValueError:
+        assert broken.closed and broken.pipeline is None and broken.rtc is None and broken.bus is None
+    else:
+        raise AssertionError("invalid TURN scheme accepted")
     await pair()
     await pair(passive=True)
 

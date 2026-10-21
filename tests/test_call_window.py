@@ -17,7 +17,7 @@ def wait(check):
         time.sleep(.01)
 
 
-fake = FakeLink()
+fake = FakeLink(can=FakeLink.can | {"calls"})
 fake.person(10, "Тестовый собеседник", contact=True)
 dialog = fake.dialog(10)
 group = fake.group(20, "Тестовая группа")
@@ -29,6 +29,12 @@ app.do_activate()
 wait(lambda: app.backend.accounts["max"].online and dialog in app.chatlist.chats)
 app.open(dialog)
 assert app.call_button.get_visible()
+fake.can = fake.can - {"calls"}
+app.page_changed()
+assert not app.call_button.get_visible()
+app.open(dialog)
+assert not app.call_button.get_visible()
+fake.can = fake.can | {"calls"}
 app.open(group)
 assert not app.call_button.get_visible()
 app.open(dialog)
