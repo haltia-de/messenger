@@ -1901,7 +1901,7 @@ class CallAudio:
     """
 
     def __init__(self, loop, candidate, status, params, source="pulsesrc",
-                 sink='pulsesink sync=false stream-properties="props,media.role=phone"'):
+                 sink="pulsesink sync=false"):
         Gst, GstWebRTC, GstSdp = call_media()
         self.Gst, self.RTC, self.Sdp = Gst, GstWebRTC, GstSdp
         Gst.init(None)
@@ -1923,6 +1923,7 @@ class CallAudio:
                 "! opusenc bitrate=32000 inband-fec=true ! rtpopuspay pt=111 "
                 "! application/x-rtp,media=audio,encoding-name=OPUS,payload=111,clock-rate=48000,"
                 "encoding-params=(string)2 ! rtc.")
+            self._phone_streams(self.pipeline)
             self.rtc = self.pipeline.get_by_name("rtc")
             for name, callback in (("on-ice-candidate", self._candidate),
                                    ("pad-added", self._received),
@@ -1960,6 +1961,25 @@ class CallAudio:
             self.close()
             raise
 
+    def _phone_streams(self, container):
+        # PulseAudio's module-filter-apply pairs these streams and creates
+        # the echo canceller only for the call, then removes it afterwards.
+        properties = self.Gst.Structure.new_from_string(
+            "props,media.role=phone,filter.want=echo-cancel")
+        elements = container.iterate_recurse()
+        while True:
+            result, element = elements.next()
+            if result == self.Gst.IteratorResult.DONE:
+                break
+            if result == self.Gst.IteratorResult.RESYNC:
+                elements.resync()
+                continue
+            if result != self.Gst.IteratorResult.OK:
+                raise RuntimeError("could not configure call audio streams")
+            factory = element.get_factory()
+            if factory is not None and factory.get_name() in ("pulsesrc", "pulsesink"):
+                element.set_property("stream-properties", properties)
+
     def _candidate(self, _rtc, index, candidate):
         self.loop.call_soon_threadsafe(self._deliver, self.candidate,
                                       {"candidate": candidate, "sdpMLineIndex": index})
@@ -1988,6 +2008,7 @@ class CallAudio:
             return
         audio = self.Gst.parse_bin_from_description(
             "queue ! rtpopusdepay ! opusdec ! audioconvert ! audioresample ! " + self.sink, True)
+        self._phone_streams(audio)
         pipeline.add(audio)
         pad.link(audio.get_static_pad("sink"))
         audio.sync_state_with_parent()

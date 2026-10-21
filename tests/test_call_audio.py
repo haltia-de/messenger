@@ -8,6 +8,28 @@ from common import load, ok
 bm = load()
 
 
+def phone_streams():
+    Gst, _rtc, _sdp = bm.call_media()
+    Gst.init(None)
+    # Real PulseAudio elements, left in NULL: no microphone or speaker is
+    # opened. Check both the send pipeline and the dynamically added sink.
+    audio = bm.CallAudio.__new__(bm.CallAudio)
+    audio.Gst = Gst
+    for description in ("pulsesrc name=phone ! fakesink",
+                        "audiotestsrc ! pulsesink name=phone"):
+        pipeline = Gst.parse_launch(description)
+        try:
+            audio._phone_streams(pipeline)
+            properties = pipeline.get_by_name("phone").get_property("stream-properties")
+            assert isinstance(properties, Gst.Structure)
+            assert properties.get_name() == "props"
+            assert properties.get_string("media.role") == "phone"
+            assert properties.get_string("filter.want") == "echo-cancel"
+        finally:
+            pipeline.set_state(Gst.State.NULL)
+    ok("call capture and playback request PulseAudio echo cancellation as Gst.Structure without opening audio")
+
+
 async def ringtone():
     from gi.repository import GLib
     bm.save_setting("ring_volume", ".4")
@@ -105,6 +127,7 @@ async def pair(passive=False):
 
 async def main():
     assert bm.calls_supported()  # the complete Flatpak media stack is advertised
+    phone_streams()
     await ringtone()
     broken = bm.CallAudio.__new__(bm.CallAudio)
     try:
