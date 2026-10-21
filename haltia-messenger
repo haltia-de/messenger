@@ -1962,10 +1962,10 @@ class CallAudio:
             raise
 
     def _phone_streams(self, container):
-        # PulseAudio's module-filter-apply pairs these streams and creates
-        # the echo canceller only for the call, then removes it afterwards.
+        # Let PulseAudio route calls to the device's tuned phone pair.
+        # Do not request another filter over its existing echo canceller.
         properties = self.Gst.Structure.new_from_string(
-            "props,media.role=phone,filter.want=echo-cancel")
+            "props,media.role=phone")
         elements = container.iterate_recurse()
         while True:
             result, element = elements.next()

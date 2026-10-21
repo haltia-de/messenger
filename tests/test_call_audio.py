@@ -24,10 +24,11 @@ def phone_streams():
             assert isinstance(properties, Gst.Structure)
             assert properties.get_name() == "props"
             assert properties.get_string("media.role") == "phone"
-            assert properties.get_string("filter.want") == "echo-cancel"
+            assert properties.n_fields() == 1
+            assert not properties.has_field("filter.want")
         finally:
             pipeline.set_state(Gst.State.NULL)
-    ok("call capture and playback request PulseAudio echo cancellation as Gst.Structure without opening audio")
+    ok("call capture and playback set only the phone role as Gst.Structure without opening audio")
 
 
 async def ringtone():
