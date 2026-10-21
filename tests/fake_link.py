@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: GPL-2.0
+# SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2026 Mikhail Nevskiy
 """A small MAX in memory, the other link beside haltia-messenger's PyMaxLink (see
 CONTEXT.md: Связь с MAX). Tests and the demo build its state, run the real

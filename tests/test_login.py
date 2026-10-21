@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: GPL-2.0
+# SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2026 Mikhail Nevskiy
 """The messengers' sign-in in the window, on the fake link: the first start
 with no login kept (the login page, a QR code in MAX's card), the cards in

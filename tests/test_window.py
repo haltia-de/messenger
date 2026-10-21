@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: GPL-2.0
+# SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2026 Mikhail Nevskiy
 """The window with the real Backend on the fake link (needs a display:
 tests/run.sh gives it broadwayd). What is checked is what the window shows

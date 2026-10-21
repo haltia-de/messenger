@@ -1,5 +1,5 @@
 #!/bin/sh
-# SPDX-License-Identifier: GPL-2.0
+# SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2026 Mikhail Nevskiy
 # Run the tests: sh tests/run.sh [test_backend.py test_window.py ...]
 # The first run makes .cache/venv (the system's PyGObject, plus the PyMax

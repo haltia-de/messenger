@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: GPL-2.0
+# SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2026 Mikhail Nevskiy
 """Сообщения (Messages): an unofficial client for the MAX messenger (and
 Telegram, through Telethon: TelethonLink), no web browser, part of the

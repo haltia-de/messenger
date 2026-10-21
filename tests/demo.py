@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: GPL-2.0
+# SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2026 Mikhail Nevskiy
 """haltia-messenger on the fake link, with made-up chats: to look at the window
 without an account. Nothing goes anywhere; what is sent, joined or deleted

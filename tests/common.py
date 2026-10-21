@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: GPL-2.0
+# SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2026 Mikhail Nevskiy
 """Loads haltia-messenger (a script without .py) as a module, with HOME in a fresh
 temporary directory so nothing of the real account is touched."""

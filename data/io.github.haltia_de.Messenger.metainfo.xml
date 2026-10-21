@@ -2,7 +2,7 @@
 <component type="desktop-application">
   <id>io.github.haltia_de.Messenger</id>
   <metadata_license>CC0-1.0</metadata_license>
-  <project_license>GPL-2.0-only</project_license>
+  <project_license>GPL-3.0-or-later</project_license>
   <name>Messages</name>
   <name xml:lang="ru">Сообщения</name>
   <summary>An unofficial client for the MAX messenger</summary>
