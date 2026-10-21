@@ -8,6 +8,35 @@ from common import load, ok
 bm = load()
 
 
+async def ringtone():
+    from gi.repository import GLib
+    bm.save_setting("ring_volume", ".4")
+    ring = bm.CallRinger(sink="fakesink sync=false")
+    try:
+        ring.start()
+        pipeline = ring.pipeline
+        assert pipeline is not None and ring.sounding
+        assert abs(pipeline.get_by_name("level").get_property("volume") - .4) < .00001
+        ring.start()  # An updated caller name cannot start another melody.
+        assert ring.pipeline is pipeline
+        deadline = asyncio.get_running_loop().time() + 1.0
+        while asyncio.get_running_loop().time() < deadline:
+            while GLib.MainContext.default().iteration(False):
+                pass
+            await asyncio.sleep(.01)
+        assert not ring.sounding
+        assert pipeline.get_state(0)[1] == bm.call_media()[0].State.NULL
+    finally:
+        ring.stop()
+        ring.stop()
+    assert ring.pipeline is None and ring.timer is None
+    # A broken output leaves neither a timer nor a partially built pipeline.
+    ring = bm.CallRinger(sink="no_such_audio_element")
+    ring.start()
+    assert ring.pipeline is None and ring.timer is None
+    ok("ringtone volume, cadence, repeated start, stop and unavailable output without a speaker or microphone")
+
+
 async def pair(passive=False):
     loop = asyncio.get_running_loop()
     states = [set(), set()]
@@ -76,6 +105,7 @@ async def pair(passive=False):
 
 async def main():
     assert bm.calls_supported()  # the complete Flatpak media stack is advertised
+    await ringtone()
     broken = bm.CallAudio.__new__(bm.CallAudio)
     try:
         broken.__init__(asyncio.get_running_loop(), lambda c: None, lambda s: None,
