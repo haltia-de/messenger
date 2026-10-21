@@ -265,6 +265,40 @@ restored_view.destroy()
 ok("missed notification opens the chat; its dated local mark survives a restart without a fake message")
 ok("ringtone floor, clean error identity and one failed inhibitor attempt per call")
 
+# Video invitations never open a camera by presenting or drawing frames.
+video_call = {"id": "video-ui", "name": "Тестовый собеседник", "state": "ringing",
+              "video_invitation": True, "video": False}
+app.call_changed(video_call)
+assert "Видеозвонок" in app.call_label.get_text()
+assert app.call_audio_answer.get_visible() and app.call_end.get_visible()
+requests.clear()
+with patch.object(app.backend, "call", side_effect=dial):
+    app.call_audio_answer.clicked()
+    wait(lambda: len(requests) == 1)
+assert requests[0] == ("answer", {"conversation": "video-ui"})
+app.call_changed(dict(video_call, state="active", video=True))
+# Feed the mailbox from a worker just like Gst: GTK drawing happens later.
+import threading
+frame = (32, 24, bytes([80, 130, 180, 255]) * (32 * 24))
+worker = threading.Thread(target=lambda: [app.call_frame("video-ui", own, frame)
+                                        for _n in range(100) for own in (True, False)])
+worker.start()
+worker.join()
+assert len(app.call_frames) == 2 and app.call_frame_pending
+wait(lambda: app.call_remote.pixbuf is not None and app.call_own.pixbuf is not None)
+assert app.call_own_box.get_visible() and app.call_video_area.get_visible()
+assert app.call_end.get_visible()
+shot("video-call.png")
+app.call_changed(dict(video_call, state="active", video=False, remote_video=False))
+assert app.call_own.pixbuf is None and not app.call_video_area.get_visible()
+app.call_frame("old-video", True, frame)
+wait(lambda: not app.call_frame_pending)
+assert app.call_own.pixbuf is None
+app.call_changed(dict(video_call, state="ended"))
+assert not app.call_audio_answer.get_visible() and not app.call_camera.get_visible()
+requests.clear()
+ok("video invitation, audio-only answer, bounded frame mailbox, own preview and stale-frame rejection")
+
 app.backend.run(app.backend.stop("max"))
 wait(lambda: not app.backend.accounts["max"].online)
 app.signin("max", {"kind": "out"})

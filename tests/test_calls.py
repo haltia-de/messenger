@@ -484,7 +484,58 @@ async def missed_calls():
     ok("unanswered incoming closure and timeout are missed; decline, answer, outgoing and answer elsewhere are not")
 
 
+async def video_consent():
+    class VideoAudio(Audio):
+        def __init__(self, *args):
+            super().__init__(*args)
+            self.video_size = (320, 240, 15)
+            self.camera = False
+            self.fail = False
+        def set_video(self, enabled):
+            self.camera = False
+            if enabled and self.fail:
+                raise RuntimeError("synthetic busy camera")
+            self.camera = bool(enabled)
+            return self.camera
+        def close(self):
+            self.camera = False
+            super().close()
+    for answer_video in (True, False):
+        socket = Socket()
+        call = bm.VoiceCall("video-consent", "test-person", True, lambda *_a: None,
+                            audio=VideoAudio, connect=lambda *_a, **_k: socket, video=True)
+        task = asyncio.create_task(call.run(dict(params)))
+        await until(lambda: "change-participant-state" in socket.commands())
+        assert call.audio is None and not call.video
+        initial = next(v for v in socket.sent if isinstance(v, dict) and v["command"] == "change-media-settings")
+        assert not initial["mediaSettings"]["isVideoEnabled"]
+        await socket.notify("transmitted-data", participantId="remote", data={
+            "sdp": {"type": "offer", "sdp": "synthetic"}})
+        call.job(call.answer(video=answer_video))
+        await until(lambda: call.audio is not None and "transmit-data" in socket.commands())
+        assert call.video == answer_video and call.audio.camera == answer_video
+        accepted = next(v for v in socket.sent if isinstance(v, dict) and v["command"] == "accept-call")
+        assert accepted["mediaSettings"]["isVideoEnabled"] == answer_video
+        call.audio_state("connected")
+        await call.camera(True)
+        await call.adapt_video(3)
+        assert call.audio.video_size == (160,120,10) and call.video
+        await call.adapt_video(3)
+        assert not call.video and not call.audio.camera and call.state == "active"
+        call.audio.fail = True
+        await call.camera(True)
+        assert not call.video and not call.audio.camera and not call.closed and call.video_error
+        await socket.notify("media-settings-changed", participantId="remote", mediaSettings={"isVideoEnabled": True})
+        await until(lambda: call.remote_video is True)
+        assert not call.video  # A peer cannot turn our camera on.
+        await call.end("HUNGUP")
+        await asyncio.gather(task, return_exceptions=True)
+        assert call.audio.closed and not call.audio.camera
+    ok("video consent, audio-only answer, camera failure, overload downgrade and peer isolation")
+
+
 async def main():
+    await video_consent()
     await scenario(True)
     await scenario(False)
     await rejection()

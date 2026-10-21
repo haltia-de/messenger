@@ -25,5 +25,6 @@ sources:
     sha256: b5296403e990fb7348df4ca2211937a030f524bf638657bda7e45a00bc2df0cd
   - type: git
     url: https://github.com/haltia-de/kit.git
-    tag: v2.2.0
+    # Camera source discovery is not in the 2.2.0 tag. Pin its public API.
+    commit: cbca63c34e6efc326c95a3ed475aa7a77db886d4
     dest: kit

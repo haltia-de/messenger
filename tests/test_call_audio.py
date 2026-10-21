@@ -124,7 +124,7 @@ async def pair(passive=False):
                                   "jitter", "round-trip-time", "bytes-received", "bytes-sent",
                                   "nack-count"} for c in counters)
         assert not callback_errors, callback_errors
-        ok("passive offer, active answer and two-way Opus" if passive else "outgoing offer with inactive video and two-way Opus")
+        ok("passive offer, active answer and two-way Opus" if passive else "outgoing offer with reserved video and two-way Opus")
     finally:
         pipelines = [peer.pipeline for peer in peers]
         handlers = [(peer.rtc, list(peer.signals)) for peer in peers]
