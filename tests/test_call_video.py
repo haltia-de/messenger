@@ -31,7 +31,7 @@ async def video_pair():
     try:
         for n in range(2):
             peer = bm.CallAudio(loop, lambda v, n=n: candidate(n,v), states[n].add, {},
-                                source="audiotestsrc is-live=true", sink="fakesink sync=false", video_payload=100 if n == 0 else 96)
+                                source="audiotestsrc is-live=true", sink="fakesink name=heard sync=false", video_payload=100 if n == 0 else 96)
             peers.append(peer)
             def frame(own, picture, n=n):
                 w,h,data = picture
@@ -61,6 +61,9 @@ async def video_pair():
         for peer in peers:
             counters = await peer.stats()
             assert any(c.get("packets-received", 0) > 20 for c in counters)
+        for peer in peers:
+            heard = peer.pipeline.get_by_name("heard")
+            assert heard is not None and heard.get_property("stats").get_value("rendered") > 10
         cameras = [p.camera for p in peers]
         for peer in peers:
             assert peer.set_video(False) is False
@@ -68,8 +71,10 @@ async def video_pair():
         assert all(c.get_state(0)[1] == peers[0].Gst.State.NULL for c in cameras)
         await asyncio.sleep(.3)
         count = [f[True] for f in frames]
+        encoded = [p.video_frames for p in peers]
         await asyncio.sleep(.4)
         assert count == [f[True] for f in frames]
+        assert encoded == [p.video_frames for p in peers]
         # Re-enable after releasing the device; frame timestamps must remain valid.
         for peer in peers:
             peer.set_video(True)
@@ -106,7 +111,7 @@ async def h264_receive():
     phone.closed, phone.remote_set, phone.pending = False, False, []
     phone.camera = phone.video_bin = phone.video_pad = phone.frame = None
     phone.video_generation = 0
-    phone.sink = "fakesink sync=false"
+    phone.sink = "fakesink name=heard sync=false"
     phone.pipeline = Gst.parse_launch(
         "webrtcbin name=rtc bundle-policy=max-bundle "
         "audiotestsrc is-live=true ! audioconvert ! audioresample "
@@ -126,7 +131,7 @@ async def h264_receive():
     peers.append(phone)
     try:
         receiver = bm.CallAudio(loop, lambda v: candidate(1,v), states[1].add, {},
-                                source="audiotestsrc is-live=true", sink="fakesink sync=false")
+                                source="audiotestsrc is-live=true", sink="fakesink name=heard sync=false")
         peers.append(receiver)
         receiver.frame = lambda own, frame: frames.append(frame) if not own else None
         offer = await phone.description("offer")
@@ -141,6 +146,9 @@ async def h264_receive():
         while len(frames) < 5 and loop.time() < deadline:
             await asyncio.sleep(.05)
         assert len(frames) >= 5, states
+        for peer in peers:
+            heard = peer.pipeline.get_by_name("heard")
+            assert heard is not None and heard.get_property("stats").get_value("rendered") > 10
         assert receiver.camera is None and receiver.video_bin is None
         assert not any("failed" in s for s in states), states
         ok("H264-only incoming video decoded; camera stays closed; Opus connection survives")
