@@ -7128,6 +7128,7 @@ class Max(Gtk.Application):
                                      and isinstance(self.open_chat, int)
                                      and summary.get("peer") is not None
                                      and self.backend.can("calls", self.open_chat))
+        self.video_button.set_visible(self.call_button.get_visible() and video_supported())
         if page not in ("chat", "photo", "forward") and not self.keep_sound:
             self.stop_sound()  # the chat is left: its sound stops
         self.show_nowplay()

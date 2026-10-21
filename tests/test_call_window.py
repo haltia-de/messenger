@@ -268,6 +268,13 @@ ok("ringtone floor, clean error identity and one failed inhibitor attempt per ca
 # Video invitations never open a camera by presenting or drawing frames.
 video_probe = patch.object(bm, "video_supported", return_value=True)
 video_probe.start()
+app.open(dialog)
+assert app.video_button.get_visible()
+app.stack.set_visible_child_name("chats")
+assert not app.video_button.get_visible()
+app.open(group)
+assert not app.video_button.get_visible()
+app.open(dialog)
 video_call = {"id": "video-ui", "name": "Тестовый собеседник", "state": "ringing",
               "video_invitation": True, "video": False}
 app.call_changed(video_call)
