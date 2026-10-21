@@ -4281,6 +4281,7 @@ RECORDERS = (
     ("parecord", lambda path: ["parecord", "--file-format=oga", path]),
 )
 SHORTEST = 1000  # ms: a press shorter than this was not a message
+TAP_RECORD = 0.6  # s: the microphone let go sooner was tapped: it records on
 
 
 class Recorder:
@@ -6412,20 +6413,32 @@ class Max(Gtk.Application):
         self.mic.get_style_context().add_class("mic")
         self.mic.set_can_focus(False)
         self.mic.set_focus_on_click(False)
-        self.mic.set_tooltip_text("Держите, пока говорите; отпустите — уйдёт")
+        self.mic.set_tooltip_text("Нажмите и говорите, затем «Отправить»; "
+                                  "или держите, пока говорите")
         self.mic.set_no_show_all(True)  # only with voice messages switched on
         self.mic.set_visible(self.voice_on)
         self.mic.hold = Gtk.GestureMultiPress.new(self.mic)
+        # Held: let go and it goes. Tapped: it records on without a finger
+        # (a tremor makes holding hard) till «Отправить» or «Отмена».
         self.mic.hold.connect("pressed", lambda *_a: self.record_start())
-        self.mic.hold.connect("released", lambda *_a: self.record_stop(True))
-        self.mic.hold.connect("cancel", lambda *_a: self.record_stop(False))
+        self.mic.hold.connect("released", lambda *_a: self.record_released())
+        self.mic.hold.connect("cancel", lambda *_a: self.record_locked or self.record_stop(False))
         self.record_label = label("", "recording")
         self.record_label.set_no_show_all(True)
         self.record_timer = None
+        self.record_locked = False  # recording without the finger on the button
+        self.record_began = 0.0
+        self.record_cancel = Gtk.Button(label="Отмена")
+        self.record_cancel.get_style_context().add_class("plain")
+        self.record_cancel.set_can_focus(False)
+        self.record_cancel.set_valign(Gtk.Align.CENTER)
+        self.record_cancel.set_no_show_all(True)
+        self.record_cancel.connect("clicked", lambda _b: self.record_stop(False))
         self.inputbar.pack_start(self.smile, False, False, 0)
         self.inputbar.pack_start(self.clip, False, False, 0)
         self.inputbar.pack_start(self.entry, True, True, 0)
         self.inputbar.pack_start(self.record_label, True, True, 0)
+        self.inputbar.pack_start(self.record_cancel, False, False, 0)
         self.inputbar.pack_start(self.mic, False, False, 0)
         self.inputbar.pack_start(self.sendb, False, False, 0)
         chat.pack_start(self.attachbar, False, False, 0)
@@ -8466,6 +8479,9 @@ class Max(Gtk.Application):
         the entry at once and waits in the chat as a bubble (🕓) till it is
         sent; one that could not go stays there (⚠, «Повторить»), and goes
         by itself when the connection is back."""
+        if voice is None and self.recorder.recording():
+            self.record_stop(True)  # «Отправить» while it records: the voice goes
+            return
         text = "" if voice else self.entry.get_text().strip()
         files = [voice] if voice else list(self.attached)
         chat_id = self.open_chat
@@ -8647,6 +8663,9 @@ class Max(Gtk.Application):
 
     # --- a voice message --------------------------------------------------------
     def record_start(self):
+        if self.record_locked:
+            self.record_stop(True)  # the microphone tapped again: it goes
+            return
         if self.call_id is not None or self.open_chat is None or self.recorder.recording():
             return
         self.stop_sound()  # no voice played into the microphone
@@ -8656,12 +8675,25 @@ class Max(Gtk.Application):
         self.mic.get_style_context().add_class("recording")
         self.entry.hide()
         self.record_label.show()
+        self.record_began = time.monotonic()
         self.show_recording()
         self.record_timer = GLib.timeout_add(250, self.show_recording)
 
+    def record_released(self):
+        """The finger off the microphone: a hold sends, a tap records on."""
+        if not self.recorder.recording() or self.record_locked:
+            return
+        if time.monotonic() - self.record_began < TAP_RECORD:
+            self.record_locked = True
+            self.record_cancel.show()
+            self.show_recording()
+        else:
+            self.record_stop(True)
+
     def show_recording(self):
-        self.record_label.set_text("● %s — отпустите, чтобы отправить"
-                                   % mmss(self.recorder.seconds()))
+        self.record_label.set_text(
+            ("● %s — говорите, затем «Отправить»" if self.record_locked else
+             "● %s — отпустите, чтобы отправить") % mmss(self.recorder.seconds()))
         return self.recorder.recording()
 
     def record_stop(self, keep):
@@ -8672,13 +8704,15 @@ class Max(Gtk.Application):
             self.record_timer = None
         self.mic.get_style_context().remove_class("recording")
         self.record_label.hide()
+        self.record_cancel.hide()
+        self.record_locked = False
         self.entry.show()
         chat_id = self.open_chat
 
         def done(got):
             if got is None:
                 if keep:
-                    self.sub.set_text("Держите кнопку, пока говорите")
+                    self.sub.set_text("Слишком коротко: скажите подольше")
                 return
             path, ms = got
             if self.open_chat != chat_id:
