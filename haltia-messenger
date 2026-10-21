@@ -338,6 +338,10 @@ button.gear {
   padding: 8px;
 }
 .settings { background-color: #f2f2f0; border-radius: 18px; padding: 24px 28px; }
+.call-screen { background-color: #f2f2f0; padding: 20px 28px; }
+label.call-name { font-size: 36px; font-weight: bold; }
+label.call-state { font-size: 26px; }
+button.call-control { min-height: 80px; font-size: 30px; border-radius: 18px; }
 label.setting { font-size: 26px; }
 switch { min-width: 120px; min-height: 56px; border-radius: 28px; }
 switch slider { min-width: 56px; min-height: 56px; border-radius: 28px; }
@@ -758,7 +762,7 @@ def max_chat(c):
 
 
 def max_person(user):
-    return Person(user.id, user_name(user))
+    return Person(user.id, user_name(user), getattr(user, "base_url", None))
 
 
 # --- what a link hands out -----------------------------------------------------------
@@ -766,9 +770,10 @@ def max_person(user):
 # objects: nothing above a link knows which messenger it talks to.
 @dataclasses.dataclass
 class Person:
-    """Someone in the messenger: their id and the name they have there."""
+    """Someone in the messenger: their id, name and optional portrait."""
     id: object
     name: str = ""
+    photo: str = None  # fetched only through Media's host and redirect checks
 
 
 @dataclasses.dataclass
@@ -1826,6 +1831,67 @@ def calls_supported():
         return False
 
 
+def ring_volume():
+    try:
+        return max(0., min(1., float(load_text("ring_volume", "0.65"))))
+    except ValueError:
+        return .65
+
+
+class CallRinger:
+    """A quiet cadence on the default speakers; never opens a microphone.
+
+    Own stream volume, independent of voice-message playback. PulseAudio
+    owns device routing, including the tablet's speaker default.
+    """
+    def __init__(self, sink='pulsesink stream-properties="props,media.role=ringtone"'):
+        self.pipeline = None
+        self.timer = None
+        self.sounding = False
+        self.sink = sink
+
+    def start(self):
+        if self.pipeline is not None:
+            return
+        try:
+            Gst, _rtc, _sdp = call_media()
+            Gst.init(None)
+            volume = ring_volume()
+            self.pipeline = Gst.parse_launch(
+                'audiotestsrc is-live=true wave=sine freq=660 volume=0.2 '
+                '! volume name=level ! audioconvert ! audioresample ! ' + self.sink)
+            self.pipeline.get_by_name("level").set_property("volume", volume)
+            self._pulse()
+        except (ImportError, ValueError, GLib.Error):
+            self.stop()
+            log_line("voice call: ringtone unavailable")
+
+    def _pulse(self):
+        self.timer = None
+        Gst, _rtc, _sdp = call_media()
+        if self.pipeline.get_bus().pop_filtered(Gst.MessageType.ERROR) is not None:
+            self.stop()
+            log_line("voice call: ringtone output failed")
+            return False
+        self.sounding = not self.sounding
+        if self.pipeline.set_state(Gst.State.PLAYING if self.sounding else Gst.State.NULL) == Gst.StateChangeReturn.FAILURE:
+            self.stop()
+            log_line("voice call: ringtone output failed")
+            return False
+        self.timer = GLib.timeout_add(700 if self.sounding else 2300, self._pulse)
+        return False
+
+    def stop(self):
+        if self.timer is not None:
+            GLib.source_remove(self.timer)
+            self.timer = None
+        if self.pipeline is not None:
+            Gst, _rtc, _sdp = call_media()
+            self.pipeline.set_state(Gst.State.NULL)
+            self.pipeline = None
+        self.sounding = False
+
+
 class CallAudio:
     """One Opus WebRTC peer, owned by VoiceCall in the backend loop.
 
@@ -1857,6 +1923,7 @@ class CallAudio:
                 "! opusenc bitrate=32000 inband-fec=true ! rtpopuspay pt=111 "
                 "! application/x-rtp,media=audio,encoding-name=OPUS,payload=111,clock-rate=48000,"
                 "encoding-params=(string)2 ! rtc.")
+            self._phone_streams(self.pipeline)
             self.rtc = self.pipeline.get_by_name("rtc")
             for name, callback in (("on-ice-candidate", self._candidate),
                                    ("pad-added", self._received),
@@ -1894,6 +1961,25 @@ class CallAudio:
             self.close()
             raise
 
+    def _phone_streams(self, container):
+        # Let PulseAudio route calls to the device's tuned phone pair.
+        # Do not request another filter over its existing echo canceller.
+        properties = self.Gst.Structure.new_from_string(
+            "props,media.role=phone")
+        elements = container.iterate_recurse()
+        while True:
+            result, element = elements.next()
+            if result == self.Gst.IteratorResult.DONE:
+                break
+            if result == self.Gst.IteratorResult.RESYNC:
+                elements.resync()
+                continue
+            if result != self.Gst.IteratorResult.OK:
+                raise RuntimeError("could not configure call audio streams")
+            factory = element.get_factory()
+            if factory is not None and factory.get_name() in ("pulsesrc", "pulsesink"):
+                element.set_property("stream-properties", properties)
+
     def _candidate(self, _rtc, index, candidate):
         self.loop.call_soon_threadsafe(self._deliver, self.candidate,
                                       {"candidate": candidate, "sdpMLineIndex": index})
@@ -1922,6 +2008,7 @@ class CallAudio:
             return
         audio = self.Gst.parse_bin_from_description(
             "queue ! rtpopusdepay ! opusdec ! audioconvert ! audioresample ! " + self.sink, True)
+        self._phone_streams(audio)
         pipeline.add(audio)
         pad.link(audio.get_static_pad("sink"))
         audio.sync_state_with_parent()
@@ -2442,6 +2529,9 @@ class Backend:
                     call.start(params)
             except BaseException:
                 await call.end(None, "failed")
+                # No ws2 task will be started after a failed dial request.
+                # Release shutdown even if it already canceled this call.
+                call.hangup_done.set()
                 raise
         else:
             call = account.call
@@ -2633,6 +2723,7 @@ class Account:
         self.call = None
         self.declining = set()  # invitations currently being answered BUSY
         self.names = {}
+        self.portraits = {}
         self.chats = {}
         self.seeded = os.path.exists(self.known_path)
         self.known = set(load_json(self.known_path, []))
@@ -2711,7 +2802,8 @@ class Account:
         def changed(call, state):
             if self.call is call:
                 GLib.idle_add(self.ui.call_changed, {
-                    "id": call.id, "name": self.name(call.peer, "Собеседник"), "state": state})
+                    "id": call.id, "name": self.name(call.peer, "Собеседник"),
+                    "photo": self.portraits.get(call.peer), "state": state})
                 if call.closed:
                     self.call = None
         call = self.call = VoiceCall(conversation, peer, incoming, changed, self.agent)
@@ -2752,6 +2844,13 @@ class Account:
             return
         call = self.new_call(conversation, peer, True)
         call.start(params)
+        # Fetch a stranger's name/photo without delaying the invitation or
+        # its signaling. A late lookup must not revive an ended call.
+        async def identify():
+            await self.lookup([peer])
+            if self.call is call and not call.closed:
+                call.changed(call, call.state)
+        call.job(identify())
 
     async def on_qr(self, qr_url):
         path = os.path.join(self.folder, "qr.png")
@@ -2809,6 +2908,7 @@ class Account:
             if u:
                 self.known.add(u.id)
                 self.names.setdefault(u.id, u.name)
+                self.portraits[u.id] = u.photo
         if not self.seeded:
             self.known.update(p for p in map(self.peer, chats) if p)
             self.seeded = True
@@ -2887,6 +2987,7 @@ class Account:
                 continue
             for u in users or []:
                 self.names[u.id] = u.name
+                self.portraits[u.id] = u.photo
 
     def peer(self, chat):
         """The other person of a dialog (None in Избранное, a group, a channel)."""
@@ -5059,6 +5160,12 @@ class Max(Gtk.Application):
         self.call_id = None
         self.dial_confirming = False
         self.call_awake = Awake(NAME, "voice call")
+        # A GTK/portal cookie may be granted without a working portal.
+        # Keep an independent logind fd for haltia-sleep on the tablet.
+        self.call_logind = Awake(NAME, "call", app=False)
+        self.call_ringer = CallRinger()
+        self.call_notice = None
+        self.call_portrait = None
         self.recorder = recorder or Recorder()  # voice messages from the microphone
         self.backend = Backend(self, link)  # link: PyMaxLink unless given (tests, demo)
         self.telemetry = Telemetry(self.backend)
@@ -5095,6 +5202,9 @@ class Max(Gtk.Application):
         quit_action.connect("activate", lambda *_args: self.quit())
         self.add_action(quit_action)
         self.set_accels_for_action("app.quit", ["<Primary>q"])
+        show_call = Gio.SimpleAction.new("show-call", None)
+        show_call.connect("activate", lambda *_args: self.do_activate())
+        self.add_action(show_call)  # Showing the invitation never answers it.
         if FLATPAK:
             ask_background(self.get_dbus_connection())
 
@@ -5109,6 +5219,8 @@ class Max(Gtk.Application):
                 future.cancel()
         self.backend.run(self.backend.stop("max"))
         self.call_awake.release()
+        self.call_logind.release()
+        self.call_ringer.stop()
         self.backend.cache.flush()  # what the last two seconds changed
         recent = getattr(self, "recent", None)  # no window ever built: none
         if recent is not None and recent != self.recent_saved:
@@ -5221,19 +5333,46 @@ class Max(Gtk.Application):
         column.pack_start(self.nowplay, False, False, 0)
         self.call_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
         self.call_box.set_no_show_all(True)
-        self.call_label = label("", "big", xalign=0.5, wrap=True)
+        self.call_box.get_style_context().add_class("call-screen")
+        self.call_photo = Gtk.Image.new_from_icon_name("avatar-default-symbolic", Gtk.IconSize.DIALOG)
+        self.call_photo.set_pixel_size(180)
+        self.call_photo.set_size_request(180, 180)
+        self.call_name = label("", "call-name", xalign=0.5, wrap=True)
+        self.call_name.set_max_width_chars(28)
+        self.call_name.set_lines(2)
+        self.call_name.set_ellipsize(Pango.EllipsizeMode.END)
+        self.call_label = label("", "call-state", xalign=0.5, wrap=True)
+        self.call_hint = label("Звук через динамики", "hint", xalign=0.5)
         self.call_answer = Gtk.Button(label="Ответить")
         self.call_answer.get_style_context().add_class("suggested-action")
         self.call_end = Gtk.Button(label="Завершить")
         self.call_end.get_style_context().add_class("destructive-action")
+        for button in (self.call_answer, self.call_end):
+            button.get_style_context().add_class("call-control")
         self.call_answer.connect("clicked", lambda _b: self.call_action("answer"))
         self.call_end.connect("clicked", lambda _b: self.call_action("end"))
-        for child in (self.call_label, self.call_answer, self.call_end):
+        identity = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
+        for child in (self.call_photo, self.call_name, self.call_label, self.call_hint):
+            identity.pack_start(child, False, False, 0)
+            child.show()
+        identity.show()
+        identity_scroll = Gtk.ScrolledWindow()
+        identity_scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        identity_scroll.add(identity)
+        identity_scroll.show_all()
+        # On a short screen the portrait can scroll; the controls cannot.
+        self.call_box.pack_start(identity_scroll, True, True, 0)
+        for child in (self.call_answer, self.call_end):
             self.call_box.pack_start(child, False, False, 0)
             child.show()
-        column.pack_start(self.call_box, False, False, 16)
         column.pack_start(self.stack, True, True, 0)
-        self.win.add(column)
+        # A separate page uses all available room, without losing the chat
+        # underneath. Navigation cannot hide the hang-up button.
+        self.call_pages = Gtk.Stack()
+        self.call_pages.set_homogeneous(False)
+        self.call_pages.add_named(column, "messages")
+        self.call_pages.add_named(self.call_box, "call")
+        self.win.add(self.call_pages)
         wait = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
         wait.set_valign(Gtk.Align.CENTER)
         self.wait_text = label("Подключение к MAX…", "big", xalign=0.5)
@@ -5515,6 +5654,18 @@ class Max(Gtk.Application):
             "Оповещение о новом сообщении", self.buzz_new, self.on_buzz,
             "Уведомление рабочего стола: на планшете оно вздрагивает или звучит, "
             "как настроено в системе. Для отдельных чатов — в их меню."), False, False, 0)
+        ring = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        ring.get_style_context().add_class("settings")
+        ring.pack_start(label("Громкость входящего звонка", "setting", wrap=True), False, False, 0)
+        self.ring_scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0, 100, 5)
+        self.ring_scale.set_value(ring_volume() * 100)
+        self.ring_scale.set_value_pos(Gtk.PositionType.RIGHT)
+        self.ring_scale.connect("value-changed", lambda scale:
+                               save_setting("ring_volume", str(scale.get_value() / 100)))
+        ring.pack_start(self.ring_scale, False, False, 0)
+        ring.pack_start(label("Через динамики. Общая громкость и выключение звука — в настройках устройства.",
+                              "hint", wrap=True), False, False, 0)
+        settings.pack_start(ring, False, False, 0)
         settings.pack_start(self.setting(
             "Спрашивать перед сохранением и пересылкой", self.confirm_acts, self.on_confirm,
             "Перед тем как сохранить файл на планшет или переслать сообщение в "
@@ -6705,8 +6856,10 @@ class Max(Gtk.Application):
     def call_action(self, action):
         if self.call_id is None:
             self.call_box.hide()
+            self.call_pages.set_visible_child_name("messages")
             return
         self.call_answer.set_sensitive(False)
+        self.call_ringer.stop()
         if action == "answer":
             self.stop_sound()
             self.record_stop(False)
@@ -6719,6 +6872,7 @@ class Max(Gtk.Application):
             self.call_end.set_label("Закрыть")
             self.call_end.show()
             self.call_box.show()
+            self.call_pages.set_visible_child_name("call")
 
     def call_changed(self, call):
         state = call["state"]
@@ -6730,24 +6884,55 @@ class Max(Gtk.Application):
                 "connecting": "Соединяемся…", "active": "Разговор · микрофон включён",
                 "ended": "Звонок завершён", "failed": "Связь прервалась",
                 "unsupported": "Этот вид соединения пока не поддерживается"}[state]
-        self.call_label.set_text(call["name"] + "\n" + text)
+        self.call_name.set_text(call["name"])
+        self.call_label.set_text(text)
+        portrait = (call["id"], call.get("photo"))
+        if portrait != self.call_portrait:
+            self.call_portrait = portrait
+            self.call_photo.set_from_icon_name("avatar-default-symbolic", Gtk.IconSize.DIALOG)
+            def drawn(pixbuf):
+                if self.call_portrait == portrait and pixbuf is not None:
+                    self.call_photo.set_from_pixbuf(pixbuf)
+            if portrait[1]:
+                self.media.photo(portrait[1], drawn, size=180)
         self.call_answer.set_visible(state == "ringing")
         self.call_answer.set_sensitive(state == "ringing")
         self.call_end.show()
         self.call_end.set_label("Закрыть" if terminal else "Отклонить" if state == "ringing" else "Завершить")
         self.call_box.show()
+        self.call_pages.set_visible_child_name("call")
         self.call_button.set_sensitive(terminal)
-        if state in ("connecting", "active"):
+        if state in ("ringing", "dialling", "connecting", "active"):
+            self.call_logind.hold()
             self.call_awake.hold()
         else:
+            self.call_logind.release()
             self.call_awake.release()
         if state == "ringing":
-            self.win.present()
-            notification = Gio.Notification.new("Входящий звонок")
-            notification.set_body(call["name"])
-            notification.set_priority(Gio.NotificationPriority.URGENT)
-            self.send_notification("voice-call", notification)
+            if self.dial_confirming:
+                # The kit's question runs a nested GTK loop. Dismiss its
+                # modal window so it cannot cover the incoming controls.
+                for dialog in Gtk.Window.list_toplevels():
+                    if (isinstance(dialog, Gtk.Dialog) and dialog.get_modal()
+                            and dialog.get_transient_for() is self.win):
+                        dialog.response(Gtk.ResponseType.CANCEL)
+            if self.call_notice != call["id"]:
+                self.call_notice = call["id"]
+                self.stop_sound()
+                self.record_stop(False)
+                self.win.set_focus(None)
+                self.call_ringer.start()
+                self.win.present()
+                notification = Gio.Notification.new("Входящий звонок")
+                notification.set_body(call["name"])
+                notification.set_priority(Gio.NotificationPriority.URGENT)
+                notification.set_category("call.incoming")
+                notification.set_default_action("app.show-call")
+                # GIO supplies desktop-entry=APP_ID on freedesktop desktops.
+                self.send_notification("voice-call", notification)
         else:
+            self.call_notice = None
+            self.call_ringer.stop()
             self.withdraw_notification("voice-call")
         return False
 

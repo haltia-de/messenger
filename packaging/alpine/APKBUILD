@@ -13,7 +13,9 @@ license="GPL-3.0-or-later"
 depends="python3 py3-gobject3 gtk+3.0 py3-haltia-kit>=2.2.0 libsecret
 	py3-aiohttp py3-pydantic py3-aiofiles py3-aiosqlite py3-msgpack
 	py3-python-socks py3-qrcode py3-websockets py3-zstandard py3-telethon
-	py3-mpv mpv-libs font-noto-emoji"
+	py3-mpv mpv-libs font-noto-emoji
+	gstreamer gst-plugins-base gst-plugins-good gst-plugins-bad libnice-gstreamer
+	haltia-gst-webrtc"
 _whl=maxapi_python-2.4.1-py3-none-any.whl
 source="$pkgname-$pkgver.tar.gz::https://github.com/haltia-de/messenger/archive/v$pkgver.tar.gz
 	$_whl::https://files.pythonhosted.org/packages/py3/m/maxapi-python/$_whl"
