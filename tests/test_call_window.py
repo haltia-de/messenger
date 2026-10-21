@@ -266,6 +266,8 @@ ok("missed notification opens the chat; its dated local mark survives a restart 
 ok("ringtone floor, clean error identity and one failed inhibitor attempt per call")
 
 # Video invitations never open a camera by presenting or drawing frames.
+video_probe = patch.object(bm, "video_supported", return_value=True)
+video_probe.start()
 video_call = {"id": "video-ui", "name": "Тестовый собеседник", "state": "ringing",
               "video_invitation": True, "video": False}
 app.call_changed(video_call)
@@ -287,7 +289,15 @@ worker.join()
 assert len(app.call_frames) == 2 and app.call_frame_pending
 wait(lambda: app.call_remote.pixbuf is not None and app.call_own.pixbuf is not None)
 assert app.call_own_box.get_visible() and app.call_video_area.get_visible()
-assert app.call_end.get_visible()
+assert app.call_end.get_visible() and app.call_camera.get_visible()
+for width, height in ((1280, 800), (800, 1280)):
+    app.win.resize(width, height)
+    until = time.monotonic() + .2
+    wait(lambda: time.monotonic() > until)
+    assert app.call_end.get_mapped() and app.call_camera.get_mapped()
+    assert app.call_end.get_allocation().height >= 80
+    assert app.call_camera.get_allocation().height >= 80
+    shot("video-call-%dx%d.png" % (width, height))
 shot("video-call.png")
 app.call_changed(dict(video_call, state="active", video=False, remote_video=False))
 assert app.call_own.pixbuf is None and not app.call_video_area.get_visible()
@@ -296,6 +306,7 @@ wait(lambda: not app.call_frame_pending)
 assert app.call_own.pixbuf is None
 app.call_changed(dict(video_call, state="ended"))
 assert not app.call_audio_answer.get_visible() and not app.call_camera.get_visible()
+video_probe.stop()
 requests.clear()
 ok("video invitation, audio-only answer, bounded frame mailbox, own preview and stale-frame rejection")
 
