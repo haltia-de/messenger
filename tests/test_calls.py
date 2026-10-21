@@ -346,6 +346,99 @@ async def stop_reasons():
     ok("account stop rejects incoming, cancels outgoing and hangs up accepted calls")
 
 
+async def busy_invitation():
+    from fake_link import FakeLink
+    fake = FakeLink(can={"calls"})
+    account = bm.Backend(object(), fake).accounts["max"]
+    account.online = True
+    primary = account.call = bm.VoiceCall("primary", 10, True, lambda *_args: None)
+    primary.accepted = True
+    primary.state = "active"
+    made = len(Audio.made)
+    connected = asyncio.Event()
+    class BusySocket(Socket):
+        async def __aenter__(self):
+            await connected.wait()
+            return await super().__aenter__()
+    socket = BusySocket()
+    real_call = bm.VoiceCall
+    def other(*args, **kwargs):
+        return real_call(*args, **kwargs, audio=Audio, connect=lambda *_args, **_kwargs: socket)
+    with patch.object(bm, "VoiceCall", side_effect=other) as factory:
+        invitation = {"conversationId": "second", "callerId": 20, "vcp": literal(params)}
+        await account.on_call_frame(137, dict(invitation, conversationId="primary"))
+        assert factory.call_count == 0  # a duplicate of the current call must not reject it
+        pending = asyncio.create_task(account.on_call_frame(137, invitation))
+        await until(lambda: factory.call_count == 1)
+        await account.on_call_frame(137, invitation)  # duplicate during the pending handshake
+        assert factory.call_count == 1
+        connected.set()
+        await pending
+    assert account.call is primary and not primary.closed and primary.state == "active"
+    assert len(Audio.made) == made
+    assert socket.commands() == ["hangup"] and socket.sent[0]["reason"] == "BUSY"
+    assert socket.closed and not account.declining
+    await account.on_call_frame(121, {"conversationId": "second"})
+    assert not primary.closed
+    await primary.end()
+    ok("second invitation gets BUSY without media, UI changes or ending the current call")
+
+
+async def quit_hangup():
+    from fake_link import FakeLink
+    backend = bm.Backend(object(), FakeLink())
+    account = backend.accounts["max"]
+    sent = asyncio.Event()
+    class DelayedSocket(Socket):
+        async def send(self, raw):
+            await asyncio.sleep(.03)
+            await super().send(raw)
+            sent.set()
+    socket = DelayedSocket()
+    call = account.call = bm.VoiceCall("quit", 10, False, lambda *_args: None)
+    call.accepted = True
+    call.audio = Audio(None, None, call.audio_state, {})
+    call.socket = socket
+    ending = asyncio.create_task(backend.hangup_calls())
+    await asyncio.sleep(.01)
+    assert not ending.done() and call.audio.closed
+    await ending
+    assert sent.is_set() and socket.closed and socket.sent[0]["reason"] == "HUNGUP"
+    ok("quit waits for a delayed hangup send and releases media first")
+
+
+async def quit_during_dial():
+    from fake_link import FakeLink
+    fake = FakeLink(can={"calls"})
+    fake.person(10, "Тестовый собеседник")
+    dialog = fake.dialog(10)
+    class UI:
+        def call_changed(self, state):
+            return False
+    backend = bm.Backend(UI(), fake)
+    account = backend.accounts["max"]
+    account.online, account.me, account.chats = True, fake.me.id, fake.rooms
+    gate = asyncio.Event()
+    async def dial(*_args):
+        await gate.wait()
+        return dict(params)
+    fake.dial = dial
+    pending = asyncio.create_task(backend.call("dial", peer=dialog))
+    await until(lambda: account.call is not None)
+    call = account.call
+    socket = Socket()
+    call.connect = lambda *_args, **_kwargs: socket
+    ending = asyncio.create_task(backend.hangup_calls())
+    await asyncio.sleep(.01)
+    assert not ending.done() and call.closed
+    gate.set()
+    await pending
+    await asyncio.wait_for(ending, 1)
+    await call.task
+    assert socket.commands() == ["hangup"] and socket.sent[0]["reason"] == "CANCELED"
+    ok("quit waits for cancellation while outgoing setup is still pending")
+
+
 async def main():
     await scenario(True)
     await scenario(False)
@@ -356,6 +449,9 @@ async def main():
     await unavailable_media()
     await connection_states()
     await stop_reasons()
+    await busy_invitation()
+    await quit_hangup()
+    await quit_during_dial()
 
 
 asyncio.run(main())

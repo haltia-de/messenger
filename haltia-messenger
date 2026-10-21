@@ -2044,6 +2044,7 @@ class VoiceCall:
         self.params = {}
         self.task = None
         self.disconnect_timer = None
+        self.hangup_done = asyncio.Event()  # send attempt finished, including pending ws2 opens
 
     def hangup_reason(self):
         return "HUNGUP" if self.accepted else "REJECTED" if self.incoming else "CANCELED"
@@ -2093,6 +2094,8 @@ class VoiceCall:
                      "reason": self.end_reason})), 2)
             except Exception:
                 pass
+            finally:
+                self.hangup_done.set()
 
     async def run(self, params):
         self.task = asyncio.current_task()
@@ -2134,6 +2137,8 @@ class VoiceCall:
             await self.end(None, "failed")
         finally:
             await self.end(None, "ended")
+            if self.end_reason:
+                self.hangup_done.set()  # connection failed before a hangup could be delivered
 
     async def initialize(self):
         await asyncio.wait_for(self.ready.wait(), 10)
@@ -2394,6 +2399,14 @@ class Backend:
             await account.stop()
         GLib.idle_add(self.ui.signin, name, {"kind": "off"})
 
+    async def hangup_calls(self):
+        """Finish active signalling before quit; no GTK callback is needed."""
+        calls = [account.call for account in self.accounts.values() if account.call is not None]
+        await asyncio.gather(*(call.end(call.hangup_reason()) for call in calls))
+        # A dial request or ws2 handshake may still be finishing. Keep the
+        # process alive for its cancellation send within do_shutdown's budget.
+        await asyncio.gather(*(call.hangup_done.wait() for call in calls if call.end_reason))
+
     async def logout(self, name):
         """Out of a messenger's account: disconnected, the login and the
         messages kept of it here forgotten."""
@@ -2448,7 +2461,8 @@ class Backend:
     def run(self, coro, done=None, owner=None):
         """Run a coroutine in the messengers' thread; done(result, error) in
         the window's, always: an error (Offline) if the thread is not
-        running. Not called when owner (a ChatView) is gone by then."""
+        running. Not called when owner (a ChatView) is gone by then.
+        The returned future is used only for the bounded wait at shutdown."""
         def answer(res, err):
             if done and not getattr(owner, "gone", False):
                 done(res, err)
@@ -2466,6 +2480,7 @@ class Backend:
                 res, err = None, exc
             GLib.idle_add(answer, res, err)
         fut.add_done_callback(back)
+        return fut
 
     def retry(self, name=None):
         """Start the links that gave up again now, not after the pause (the
@@ -2616,6 +2631,7 @@ class Account:
         self.secret = None  # a future the sign-in waits on for the cloud password
         self.me = None
         self.call = None
+        self.declining = set()  # invitations currently being answered BUSY
         self.names = {}
         self.chats = {}
         self.seeded = os.path.exists(self.known_path)
@@ -2709,7 +2725,7 @@ class Account:
             if self.call is not None and self.call.id == payload.get("conversationId"):
                 await self.call.end()
             return
-        if not self.online or not self.can("calls") or self.call is not None:
+        if not self.online or not self.can("calls"):
             return
         log_line("voice call: invitation received")
         try:
@@ -2718,6 +2734,21 @@ class Account:
             call_endpoint(params, conversation, True)  # validate before showing the invitation
         except Exception:
             log_line("voice call: invalid invitation")
+            return
+        if conversation in self.declining:
+            return
+        if self.call is not None:
+            if self.call.id == conversation:
+                return  # a repeated invitation for our own call is not a second caller
+            self.declining.add(conversation)
+            try:
+                busy = VoiceCall(conversation, peer, True, lambda *_args: None, self.agent)
+                await busy.end("BUSY")
+                # A terminal VoiceCall opens ws2 only to send hangup; no
+                # acceptance, media pipeline or UI callback is created.
+                await busy.run(params)
+            finally:
+                self.declining.discard(conversation)
             return
         call = self.new_call(conversation, peer, True)
         call.start(params)
@@ -5026,6 +5057,7 @@ class Max(Gtk.Application):
         super().__init__(application_id=APP_ID)
         self.win = None
         self.call_id = None
+        self.dial_confirming = False
         self.call_awake = Awake(NAME, "voice call")
         self.recorder = recorder or Recorder()  # voice messages from the microphone
         self.backend = Backend(self, link)  # link: PyMaxLink unless given (tests, demo)
@@ -5059,10 +5091,22 @@ class Max(Gtk.Application):
         act = Gio.SimpleAction.new("open-chat", GLib.VariantType("s"))  # the id as JSON
         act.connect("activate", lambda _a, v: (self.do_activate(), self.open(json.loads(v.unpack()))))
         self.add_action(act)
+        quit_action = Gio.SimpleAction.new("quit", None)
+        quit_action.connect("activate", lambda *_args: self.quit())
+        self.add_action(quit_action)
+        self.set_accels_for_action("app.quit", ["<Primary>q"])
         if FLATPAK:
             ask_background(self.get_dbus_connection())
 
     def do_shutdown(self):
+        # Only process shutdown waits for the backend: at most two seconds,
+        # independent of idle callbacks on the GTK loop which is stopping.
+        future = self.backend.run(self.backend.hangup_calls())
+        if future is not None:
+            try:
+                future.result(timeout=2)
+            except Exception:
+                future.cancel()
         self.backend.run(self.backend.stop("max"))
         self.call_awake.release()
         self.backend.cache.flush()  # what the last two seconds changed
@@ -6639,10 +6683,24 @@ class Max(Gtk.Application):
         return view
 
     def dial_call(self):
-        if self.call_id is None:
+        chat_id = self.open_chat
+        if self.call_id is not None or self.dial_confirming or chat_id is None:
+            return
+        summary = self.about(chat_id)
+        if summary.get("type") != "DIALOG" or not self.backend.can("calls", chat_id):
+            return
+        self.dial_confirming = True
+        try:
+            confirmed = dialogs.ask(self.win, "Позвонить %s?" % summary.get("title", "собеседнику"),
+                                    "Позвонить")
+        finally:
+            self.dial_confirming = False
+        # A dialog runs a nested GTK loop: an incoming call or a changed
+        # chat while it was open must not dial the old target afterwards.
+        if confirmed and self.call_id is None and self.open_chat == chat_id:
             self.stop_sound()
             self.record_stop(False)
-            self.backend.run(self.backend.call("dial", peer=self.open_chat), self.call_result)
+            self.backend.run(self.backend.call("dial", peer=chat_id), self.call_result)
 
     def call_action(self, action):
         if self.call_id is None:
