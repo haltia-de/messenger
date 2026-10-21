@@ -34,11 +34,15 @@ def phone_streams():
 async def ringtone():
     from gi.repository import GLib
     bm.save_setting("ring_volume", ".4")
-    ring = bm.CallRinger(sink="fakesink sync=false")
+    ring = bm.CallRinger(sink="fakesink name=heard sync=false signal-handoffs=true")
     try:
         ring.start()
         pipeline = ring.pipeline
-        assert pipeline is not None and ring.sounding
+        assert pipeline is not None
+        received = [0]
+        def handoff(_sink, buffer, _pad):
+            received[0] += buffer.get_size()
+        pipeline.get_by_name("heard").connect("handoff", handoff)
         assert abs(pipeline.get_by_name("level").get_property("volume") - .4) < .00001
         ring.start()  # An updated caller name cannot start another melody.
         assert ring.pipeline is pipeline
@@ -47,17 +51,30 @@ async def ringtone():
             while GLib.MainContext.default().iteration(False):
                 pass
             await asyncio.sleep(.01)
-        assert not ring.sounding
-        assert pipeline.get_state(0)[1] == bm.call_media()[0].State.NULL
+        # The sink has no clock: more than one complete phrase proves EOS
+        # restarts playback, including its baked-in pause, rather than stopping.
+        assert received[0] > 2 * 24000 * 4 * 2
+        assert ring.pipeline is pipeline
+        assert pipeline.get_state(0)[1] == bm.call_media()[0].State.PLAYING
     finally:
         ring.stop()
         ring.stop()
     assert ring.pipeline is None and ring.timer is None
+    assert pipeline.get_state(0)[1] == bm.call_media()[0].State.NULL
     # A broken output leaves neither a timer nor a partially built pipeline.
     ring = bm.CallRinger(sink="no_such_audio_element")
     ring.start()
     assert ring.pipeline is None and ring.timer is None
-    ok("ringtone volume, cadence, repeated start, stop and unavailable output without a speaker or microphone")
+    # An unavailable WAV also releases its pipeline and poll source.
+    ring = bm.CallRinger(sink="fakesink", path="/no/such/ringtone.wav")
+    ring.start()
+    deadline = asyncio.get_running_loop().time() + 1
+    while ring.pipeline is not None and asyncio.get_running_loop().time() < deadline:
+        while GLib.MainContext.default().iteration(False):
+            pass
+        await asyncio.sleep(.01)
+    assert ring.pipeline is None and ring.timer is None
+    ok("ringtone WAV, volume, repeat, repeated start, stop, missing file and unavailable output without audio devices")
 
 
 async def pair(passive=False):

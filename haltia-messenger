@@ -1838,17 +1838,27 @@ def ring_volume():
         return .65
 
 
+def ringtone_file():
+    """Our bundled melody in a checkout or under the installation prefix."""
+    here = os.path.dirname(os.path.realpath(__file__))
+    for path in (os.path.join(here, "data", "ringtone.wav"),
+                 os.path.join(here, "..", "share", "haltia-messenger", "ringtone.wav")):
+        if os.path.isfile(path):
+            return os.path.abspath(path)
+    raise FileNotFoundError("ringtone.wav")
+
+
 class CallRinger:
-    """A quiet cadence on the default speakers; never opens a microphone.
+    """Loop our call melody on the default speakers; never opens a microphone.
 
     Own stream volume, independent of voice-message playback. PulseAudio
     owns device routing, including the tablet's speaker default.
     """
-    def __init__(self, sink='pulsesink stream-properties="props,media.role=ringtone"'):
+    def __init__(self, sink='pulsesink stream-properties="props,media.role=ringtone"', path=None):
         self.pipeline = None
         self.timer = None
-        self.sounding = False
         self.sink = sink
+        self.path = path
 
     def start(self):
         if self.pipeline is not None:
@@ -1858,28 +1868,31 @@ class CallRinger:
             Gst.init(None)
             volume = ring_volume()
             self.pipeline = Gst.parse_launch(
-                'audiotestsrc is-live=true wave=sine freq=660 volume=0.2 '
+                'filesrc name=melody ! wavparse '
                 '! volume name=level ! audioconvert ! audioresample ! ' + self.sink)
+            self.pipeline.get_by_name("melody").set_property("location", self.path or ringtone_file())
             self.pipeline.get_by_name("level").set_property("volume", volume)
-            self._pulse()
-        except (ImportError, ValueError, GLib.Error):
+            if self.pipeline.set_state(Gst.State.PLAYING) == Gst.StateChangeReturn.FAILURE:
+                self.stop()
+                log_line("voice call: ringtone output failed")
+                return
+            self.timer = GLib.timeout_add(100, self._poll)
+        except (ImportError, ValueError, OSError, GLib.Error):
             self.stop()
             log_line("voice call: ringtone unavailable")
 
-    def _pulse(self):
-        self.timer = None
+    def _poll(self):
         Gst, _rtc, _sdp = call_media()
-        if self.pipeline.get_bus().pop_filtered(Gst.MessageType.ERROR) is not None:
+        message = self.pipeline.get_bus().pop_filtered(Gst.MessageType.ERROR | Gst.MessageType.EOS)
+        if message is not None and message.type == Gst.MessageType.ERROR:
             self.stop()
             log_line("voice call: ringtone output failed")
             return False
-        self.sounding = not self.sounding
-        if self.pipeline.set_state(Gst.State.PLAYING if self.sounding else Gst.State.NULL) == Gst.StateChangeReturn.FAILURE:
+        if message is not None and not self.pipeline.seek_simple(Gst.Format.TIME, Gst.SeekFlags.FLUSH, 0):
             self.stop()
-            log_line("voice call: ringtone output failed")
+            log_line("voice call: ringtone repeat failed")
             return False
-        self.timer = GLib.timeout_add(700 if self.sounding else 2300, self._pulse)
-        return False
+        return True
 
     def stop(self):
         if self.timer is not None:
@@ -1889,7 +1902,6 @@ class CallRinger:
             Gst, _rtc, _sdp = call_media()
             self.pipeline.set_state(Gst.State.NULL)
             self.pipeline = None
-        self.sounding = False
 
 
 class CallAudio:
