@@ -2161,22 +2161,22 @@ class CallAudio:
             source = chosen.make()
         width, height, fps = self.video_size
         camera = self.Gst.parse_launch(
-            "videoconvert name=convert ! videoscale ! videorate drop-only=true "
-            "! video/x-raw,format=I420,width=%d,height=%d,framerate=%d/1 ! tee name=t "
+            "videorate name=rate drop-only=true ! video/x-raw,framerate=%d/1 "
+            "! videoconvert ! videoscale ! video/x-raw,format=I420,width=%d,height=%d ! tee name=t "
             "t. ! queue max-size-buffers=2 leaky=downstream "
             "! appsink name=send emit-signals=true sync=false max-buffers=1 drop=true "
             "t. ! queue max-size-buffers=1 leaky=downstream ! videoconvert "
             "! video/x-raw,format=RGBA ! appsink name=preview emit-signals=true "
-            "sync=false max-buffers=1 drop=true" % (width, height, fps))
+            "sync=false max-buffers=1 drop=true" % (fps, width, height))
         self.camera = camera
         try:
             camera.add(source)
-            convert = camera.get_by_name("convert")
+            rate = camera.get_by_name("rate")
             if source.get_factory().get_name() == "libcamerasrc":
-                linked = source.link_filtered(convert, self.Gst.Caps.from_string(
+                linked = source.link_filtered(rate, self.Gst.Caps.from_string(
                     "video/x-raw,width=320,height=240"))
             else:
-                linked = source.link(convert)
+                linked = source.link(rate)
             if not linked:
                 raise RuntimeError("camera format unavailable")
             generation = self.video_generation
