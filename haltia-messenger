@@ -1940,7 +1940,7 @@ class CallPicture(Gtk.DrawingArea):
 
 
 class CallAudio:
-    """One Opus WebRTC peer, owned by VoiceCall in the backend loop.
+    """One WebRTC peer with Opus and optional video, owned by VoiceCall.
 
     Gst callbacks cross into that loop; they never touch GTK. Constructed
     only after Answer/Call, so an invitation cannot open the microphone.
@@ -2079,16 +2079,17 @@ class CallAudio:
             description = "queue ! rtpopusdepay ! opusdec ! audioconvert ! audioresample ! " + self.sink
         elif media == "video":
             codec = caps.get_structure(0).get_string("encoding-name")
-            decoder = "rtpvp8depay ! vp8dec" if codec == "VP8" else None
+            decoder = "rtpvp8depay request-keyframe=true wait-for-keyframe=true ! vp8dec threads=2" if codec == "VP8" else None
             if codec == "H264":
                 name = next((n for n in ("avdec_h264", "openh264dec")
                              if self.Gst.ElementFactory.find(n)), None)
                 if name:
-                    decoder = "rtph264depay ! " + name
+                    decoder = "rtph264depay request-keyframe=true wait-for-keyframe=true ! " + name
             if decoder is None:
                 return
-            description = ("queue max-size-buffers=2 leaky=downstream ! " + decoder +
-                           " ! videoconvert ! videoscale add-borders=true ! video/x-raw,format=RGBA,width=320,height=240 "
+            description = ("queue max-size-time=200000000 max-size-buffers=0 max-size-bytes=1048576 leaky=downstream ! " + decoder +
+                           " ! videorate drop-only=true ! videoconvert ! videoscale add-borders=true "
+                           "! video/x-raw,format=RGBA,width=320,height=240,framerate=15/1 "
                            "! appsink name=remote_video emit-signals=true sync=false max-buffers=1 drop=true")
         else:
             return
