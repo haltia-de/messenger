@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: GPL-2.0
+# SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2026 Mikhail Nevskiy
 """Media's hands for tests (haltia-messenger's Media takes them at creation): they
 record what would have been started, opened, fetched and played."""

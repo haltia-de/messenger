@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: GPL-2.0
+# SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2026 Mikhail Nevskiy
 """The chat list's rules, without the window or MAX: tabs and order, pins,
 notifications, strangers, counts, the search, dialogs from the search, and

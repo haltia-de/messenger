@@ -1,5 +1,5 @@
 #!/bin/sh
-# SPDX-License-Identifier: GPL-2.0
+# SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2026 Mikhail Nevskiy
 # Install haltia-messenger (Сообщения, a client for MAX): sh install.sh [ROOT] [PREFIX]
 # ROOT empty or / for this system; PREFIX /usr/local unless given (a

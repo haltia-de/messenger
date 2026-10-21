@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: GPL-2.0
+# SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2026 Mikhail Nevskiy
 """How fast the window is, on the fake link with many chats: for the tablet,
 where the numbers decide what is worth making faster. Not a test: it prints

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: GPL-2.0
+# SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2026 Mikhail Nevskiy
 """Backend on the fake link, no window: the chat list, known people, the
 message cache and its gaps, pages, reactions, invites, renaming, removing;

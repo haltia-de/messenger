@@ -8,7 +8,7 @@ url="https://github.com/haltia-de/messenger"
 provides="b8k-max=$pkgver-r$pkgrel"
 replaces="b8k-max"
 arch="noarch"
-license="GPL-2.0-only"
+license="GPL-3.0-or-later"
 # PyMax's own needs, Telethon (Telegram), then voice messages (libmpv) and emoji.
 depends="python3 py3-gobject3 gtk+3.0 py3-haltia-kit>=2.2.0 libsecret
 	py3-aiohttp py3-pydantic py3-aiofiles py3-aiosqlite py3-msgpack

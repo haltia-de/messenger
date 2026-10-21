@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: GPL-2.0
+# SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2026 Mikhail Nevskiy
 """Media with fake hands, no network, no player: which links are let
 through, the one header, redirects, the photo cache and its pruning, voice,

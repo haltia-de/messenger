@@ -25,8 +25,8 @@ where the kit's `Settings("max")` in another program (the shell) may have moved 
 one is left in place. The name on the screen is by what it is, not the
 service: MAX is a trademark (ADR 0004, rule 7); «MAX» stays in `GenericName`/`Keywords`.
 
-There is no build step or linter config; the tests are in `tests/` (see Tests). GPL-2.0; every
-source file starts with an `SPDX-License-Identifier: GPL-2.0` line.
+There is no build step or linter config; the tests are in `tests/` (see Tests). GPL-3.0-or-later;
+every source file starts with an `SPDX-License-Identifier: GPL-3.0-or-later` line.
 
 ## Commands
 
