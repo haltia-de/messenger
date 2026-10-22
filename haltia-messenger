@@ -2093,6 +2093,20 @@ class CallRinger:
         self.sounding = False
 
 
+def video_calls():
+    """«Видеозвонки» in the settings, off by default for now (issue #55, the
+    author's decision of 22 October 2026: on the B8000-H a long video call
+    panics the kernel in the Wi-Fi driver, device-lenovo-b8000h#39). Off,
+    calls are voice only: no camera, no video offered, an incoming video
+    call answered by voice, the peer's video neither asked for nor decoded."""
+    return SETTINGS.get_bool("calls_video", False)
+
+
+def video_on():
+    """Video in calls: switched on and the plugins there."""
+    return video_calls() and video_supported()
+
+
 @functools.lru_cache(maxsize=1)
 def video_supported():
     try:
@@ -2263,7 +2277,8 @@ class CallAudio:
                 self.signals.append(self.rtc.connect(name, callback))
             # Reserve a sendrecv video track even in audio calls, as MAX does.
             # appsrc holds no camera and produces no frames until a person's tap.
-            if video_supported():
+            self.video_ok = video_on()  # decided once per call
+            if self.video_ok:
                 self.video_bin = self._sender_bin(video_payload)
                 self.pipeline.add(self.video_bin)
                 self.video_pad = self.rtc.request_pad_simple("sink_1")
@@ -2421,6 +2436,9 @@ class CallAudio:
             # Concealment and the peer's in-band FEC: a lost packet is not a gap.
             description = ("queue ! rtpopusdepay ! opusdec plc=true use-inband-fec=true "
                            "! audioconvert ! audioresample ! " + self.sink)
+        elif media == "video" and not getattr(self, "video_ok", True):
+            # A peer's video coming all the same is dropped undecoded.
+            description = "fakesink sync=false async=false"
         elif media == "video":
             codec = caps.get_structure(0).get_string("encoding-name")
             decoder = "rtpvp8depay request-keyframe=true wait-for-keyframe=true ! vp8dec threads=2" if codec == "VP8" else None
@@ -2443,7 +2461,7 @@ class CallAudio:
         received = self.Gst.parse_bin_from_description(description, True)
         if media == "audio":
             self._phone_streams(received)
-        else:
+        elif getattr(self, "video_ok", True):
             self.remote_bin, self.remote_pad = received, pad
             received.get_by_name("remote_video").connect("new-sample", self._frame_sample, False, 0)
         pipeline.add(received)
@@ -3660,7 +3678,9 @@ class Account:
             finally:
                 self.declining.discard(conversation)
             return
-        call = self.new_call(conversation, peer, True, video=payload.get("type") == "VIDEO")
+        # «Видеозвонки» off: a video call rings and is answered by voice.
+        call = self.new_call(conversation, peer, True,
+                             video=payload.get("type") == "VIDEO" and video_calls())
         call.start(params)
         # Fetch a stranger's name/photo without delaying the invitation or
         # its signaling. A late lookup must not revive an ended call.
@@ -6936,6 +6956,11 @@ class Max(Gtk.Application):
             "Кнопка микрофона рядом с полем ввода: нажмите её и говорите, затем "
             "«Отправить» или «Отмена». Можно и держать её, пока говорите: отпустите — "
             "сообщение уйдёт. Если выключить, кнопки не будет.")
+        calls_video = self.setting(
+            "Видеозвонки", video_calls(), self.on_video_calls,
+            "Камера в звонках и кнопка видеозвонка. Пока выключено: долгий видеозвонок "
+            "может перезагрузить планшет (ошибка в драйвере Wi-Fi). Выключено — звонки "
+            "только голосом, входящий видеозвонок принимается без видео.")
         keep = self.setting(
             "Звук играет и вне чата", self.keep_sound, self.on_keep_sound,
             "Голосовое или аудиофайл продолжают играть в других чатах, в списке и "
@@ -6949,7 +6974,7 @@ class Max(Gtk.Application):
             "и имён: так она меньше отличается от приложения, и это может снизить риск "
             "блокировки аккаунта. Если выключить, сервер не получит ничего из этого.")
         self.settings_cards = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=20)
-        for part in (label("Основное", "big"), buzz, ring, voice, folder,
+        for part in (label("Основное", "big"), buzz, ring, calls_video, voice, folder,
                      label("Мессенджеры", "big"), self.settings_cards,
                      label("Дополнительно", "big"), contacts_only, self.invites_card,
                      confirm, keep, telemetry):
@@ -8197,6 +8222,11 @@ class Max(Gtk.Application):
             return True
         return dialogs.ask(self.win, question, yes)
 
+    def on_video_calls(self, on):
+        save_setting("calls_video", on)
+        if self.open_chat is not None and self.stack.get_visible_child_name() == "chat":
+            self.video_button.set_visible(self.call_button.get_visible() and video_on())
+
     def on_voice(self, on):
         self.voice_on = on
         save_setting("voice", on)
@@ -8228,7 +8258,7 @@ class Max(Gtk.Application):
                                      and isinstance(self.open_chat, int)
                                      and summary.get("peer") is not None
                                      and self.backend.can("calls", self.open_chat))
-        self.video_button.set_visible(self.call_button.get_visible() and video_supported())
+        self.video_button.set_visible(self.call_button.get_visible() and video_on())
         if page != "chat":
             self.record_stop(False)  # a voice is said in its chat, or not at all
         if page not in ("chat", "photo", "forward") and not self.keep_sound:
@@ -8439,7 +8469,7 @@ class Max(Gtk.Application):
         self.call_since = call.get("since") if state == "active" else None
         if state == "active" and self.call_clock is None:
             self.call_clock = GLib.timeout_add_seconds(1, self.call_tick)
-        self.call_camera.set_visible(state == "active" and video_supported())
+        self.call_camera.set_visible(state == "active" and video_on())
         wanted = call.get("video_wanted", self.call_video)
         set_switch(self.call_camera, "camera", wanted)
         # While the camera follows a tap, a second tap is not taken for another.
@@ -8587,7 +8617,7 @@ class Max(Gtk.Application):
         self.call_button.set_visible(s.get("type") == "DIALOG" and isinstance(chat_id, int)
                                      and s.get("peer") is not None
                                      and self.backend.can("calls", chat_id))
-        self.video_button.set_visible(self.call_button.get_visible() and video_supported())
+        self.video_button.set_visible(self.call_button.get_visible() and video_on())
         if self.playing and self.playing_chat != chat_id and not self.keep_sound:
             self.stop_sound()  # another chat in front: the sound of the last one stops
         GLib.idle_add(lambda: self.show_nowplay() and False)

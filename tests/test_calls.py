@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from common import load, ok
 
 bm = load()
+bm.SETTINGS.set("calls_video", True)  # «Видеозвонки» on here (off by default, #55); voice-only below
 
 
 def media_probe():
@@ -589,6 +590,42 @@ async def link_stability():
     ok("a lost connection leaves a call; one start per account; the keyring's failure; backoff")
 
 
+async def voice_only():
+    # As shipped (#55): no video at all — not offered, not decoded, a video
+    # invitation rung and answered by voice.
+    from fake_link import FakeLink
+    bm.SETTINGS.set("calls_video", False)
+    bm.video_supported.cache_clear()
+    try:
+        assert not bm.video_on() and not bm.video_calls()
+        fake = FakeLink(can={"calls"})
+        account = bm.Backend(object(), fake).accounts["max"]
+        account.online = True
+        made = []
+        with patch.object(account, "new_call", side_effect=lambda *a, **k: made.append(k) or Mock()):
+            await account.on_call_frame(137, {"conversationId": "v", "callerId": 20,
+                                              "vcp": literal(params), "type": "VIDEO"})
+        assert made == [{"video": False}]
+        from gi.repository import Gst
+        Gst.init(None)
+        audio = bm.CallAudio.__new__(bm.CallAudio)
+        audio.Gst, audio.closed, audio.failed_bins = Gst, False, []
+        audio.remote_bin, audio.video_ok = None, bm.video_on()
+        audio.pipeline = Gst.Pipeline.new("call")
+        src = Gst.ElementFactory.make("videotestsrc", None)
+        audio.pipeline.add(src)
+        caps = Gst.Caps.from_string("application/x-rtp,media=video,encoding-name=VP8")
+        pad = SimpleNamespace(direction=Gst.PadDirection.SRC, get_current_caps=lambda: caps,
+                              link=lambda sink: Gst.PadLinkReturn.OK)
+        audio._received(None, pad)
+        assert audio.remote_bin is None  # the peer's video, if it comes, goes undecoded
+        audio.pipeline.set_state(Gst.State.NULL)
+    finally:
+        bm.SETTINGS.set("calls_video", True)
+        bm.video_supported.cache_clear()
+    ok("voice only (#55): no video offered, decoded, or answered")
+
+
 async def busy_invitation():
     from fake_link import FakeLink
     fake = FakeLink(can={"calls"})
@@ -957,6 +994,7 @@ async def main():
     await connection_states()
     await stop_reasons()
     await link_stability()
+    await voice_only()
     await busy_invitation()
     await quit_hangup()
     await quit_during_dial()

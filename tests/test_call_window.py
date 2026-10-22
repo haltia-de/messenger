@@ -5,6 +5,7 @@ import time
 from unittest.mock import Mock, patch
 from common import load, ok
 bm = load()
+bm.SETTINGS.set("calls_video", True)  # «Видеозвонки» on here (off by default, #55); voice-only below
 from fake_link import FakeLink
 from fake_hands import FakeHands
 from fake_logind import FakeLogind
@@ -380,6 +381,23 @@ assert not app.call_mute.get_visible() and not app.call_camera.get_visible()
 video_probe.stop()
 requests.clear()
 ok("video invitation, audio-only answer, bounded frame mailbox, own preview and stale-frame rejection")
+# «Видеозвонки» off (the default for now, #55): no video button, no camera in a talk
+bm.SETTINGS.set("calls_video", False)
+bm.video_supported.cache_clear()
+app.open(dialog)
+assert app.call_button.get_visible() and not app.video_button.get_visible()
+assert bm.SETTINGS.get_bool("calls_video", True) is False
+with patch.object(bm, "video_supported", lambda: True):  # the plugins as on the tablet
+    app.on_video_calls(True)  # the author switches it on in the settings: the button comes
+    assert app.video_button.get_visible()
+    app.on_video_calls(False)
+    assert not app.video_button.get_visible()
+app.call_changed({"id": "voice-only", "name": "Тестовый собеседник", "state": "active"})
+assert not app.call_camera.get_visible() and app.call_mute.get_visible()
+app.call_changed({"id": "voice-only", "name": "Тестовый собеседник", "state": "ended"})
+bm.SETTINGS.set("calls_video", True)
+bm.video_supported.cache_clear()
+ok("voice only (#55): no video button, no camera")
 
 # The incoming call's notification leaves the server on every way the
 # ringing ends (critical ones stay in mako till closed): answered, with or
