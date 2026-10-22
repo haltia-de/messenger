@@ -2655,14 +2655,21 @@ class CallAudio:
                 raise RuntimeError("no camera")
             chosen = next((c for c in found if c.front), found[0])
             width, height, _fps = self.video_size
+            size = "video/x-raw,width=%d,height=%d" % (width, height)
             try:
-                # haltia-kit 2.3.1: the size asked of the camera before kit
-                # turns the picture with the screen (a bin: source, size, flip).
-                source = chosen.make(caps="video/x-raw,width=%d,height=%d" % (width, height))
+                # haltia-kit 2.3.2: the size asked of the sensor as it lies,
+                # the whole of its view; kit's videoflip turns the picture
+                # with the screen (2.3.1 swapped it upright for the sensor,
+                # which cut a narrow middle out: a face did not fit).
+                source = chosen.make(caps=size, sensor=True)
                 self.sized = True
-            except TypeError:  # haltia-kit 2.3.0: the source alone, sized below
-                source = chosen.make()
-                self.sized = False
+            except TypeError:
+                try:  # haltia-kit 2.3.1: the size after the turn
+                    source = chosen.make(caps=size)
+                    self.sized = True
+                except TypeError:  # haltia-kit 2.3.0: the source alone, sized below
+                    source = chosen.make()
+                    self.sized = False
         if source is None:
             raise RuntimeError("no camera source")
         # Its kind is the source's, inside kit's bin if it is one (read only).
