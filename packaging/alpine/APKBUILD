@@ -1,6 +1,6 @@
 # Maintainer: Mikhail Nevskiy <rensomail@gmail.com>
 pkgname=haltia-messenger
-pkgver=2.8.0
+pkgver=2.9.0
 pkgrel=0
 pkgdesc="Сообщения: an unofficial client for the MAX messenger (Haltia, GTK 3)"
 url="https://github.com/haltia-de/messenger"

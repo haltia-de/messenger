@@ -1,3 +1,24 @@
+haltia-messenger (2.9.0) unstable; urgency=medium
+
+  * A file shared from another program stays in the chat where you attached it
+    and never goes with a message in another chat. An accidental touch no
+    longer picks a chat to send to.
+  * The message menu now has «Ответить» (Reply): the reply shows a quote of
+    the original message.
+  * On the call screen, the microphone and camera buttons clearly show whether
+    they are on. You can also see when the other person has turned off their
+    microphone or camera. Your own picture is larger and sits at the bottom
+    right. Video adapts to the tablet faster.
+  * In «Найти или написать» (Find or write), your own chats narrow as you
+    type. Profile photos now appear in the list and the chat.
+  * The sign-in screen shows where to find «Войти по QR-коду» (Sign in by QR
+    code) on the phone.
+  * The program reconnects without a flood of repeated requests, and a lost
+    connection no longer ends a call. Lists are faster, and many photos use
+    less memory.
+
+ -- Haltia <rensomail@gmail.com>  Thu, 22 Oct 2026 15:00:00 +0300
+
 haltia-messenger (2.8.0) unstable; urgency=medium
 
   * In a video call, the other person fills the screen and your own picture
