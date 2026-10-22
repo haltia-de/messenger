@@ -842,13 +842,22 @@ async def video_consent():
         # A dim room slows the camera: no overload while the encoder keeps up.
         await call.adapt_video(8, 9)
         assert call.audio.video_size == (320, 240, 15) and call.video
+        # Processors with room: no step down; the whole system busy: one, even
+        # if the encoder keeps up (640×480 kept two of four cores busy).
+        await call.adapt_video(15, 15, idle=.5)
+        assert call.audio.video_size == (320, 240, 15)
+        call.audio.video_size = (480, 360, 15)
+        await call.adapt_video(15, 15, idle=.1)
+        assert call.audio.video_size == (320, 240, 15) and call.video
+        idle, total = bm.system_cpu()
+        assert 0 <= idle <= total
         await call.adapt_video(3, 15)
         assert call.audio.video_size == (160,120,10) and call.video
         assert bm.VIDEO_START[0] == (160, 120, 10)  # the next call starts at what kept up
         await call.adapt_video(3, 15)
         assert not call.video and not call.audio.camera and call.state == "active"
         assert not call.video_wanted  # turned off: adaptation never turns it on again
-        bm.VIDEO_START[0] = bm.VIDEO_SIZES[0]
+        bm.VIDEO_START[0] = bm.VIDEO_SIZES[1]
         await call.adapt_video(0, 15)
         assert not call.video
         call.audio.fail = True
