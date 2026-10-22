@@ -1023,6 +1023,9 @@ assert app.entry.get_text() == "" and not app.attachbar.get_visible()  # it left
 m, box = app.view.msgs[out]
 assert m["text"] == "Вот счёт\n📎 Дача.JPG, Счёт.pdf" and m["mine"]
 wait(lambda: box.ticks.get_text() == "⚠ Не отправлено", what="not sent")
+app.menu = None
+app.pick_reaction(mama, out, box.get_parent())  # not sent yet: no reactions, no menu
+assert app.menu is None
 assert box.unsent.get_visible() and [b.get_label() for b in box.unsent.get_children()] == ["Повторить", "Убрать"]
 shot("unsent.png")
 app.entry.set_text("Новое")  # typed meanwhile: stays
@@ -1034,6 +1037,18 @@ assert fake.asked("send")[-1] == {"chat_id": mama, "text": "Вот счёт",
 assert app.entry.get_text() == "Новое" and app.chatlist.get(mama)["last"] == "Вы: Вот счёт"
 sent = app.backend.cache.read(mama)[-1]
 assert sent["photos"] == ["https://i.oneme.ru/sent/Дача.JPG"] and sent["media"][0]["name"] == "Счёт.pdf"
+# Two not sent: when the connection is back they go one after another, in order
+fake.drop()
+wait(lambda: app.offline.get_visible(), what="the bar")
+for text in ("Первое", "Второе"):
+    app.entry.set_text(text)
+    app.send()
+wait(lambda: all(q["m"]["state"] == "failed" for q in app.queue.values()) and len(app.queue) == 2,
+     what="both not sent")
+n = len(fake.asked("send"))
+fake.back()
+wait(lambda: not app.queue, what="both sent")
+assert [a["text"] for a in fake.asked("send")[n:]] == ["Первое", "Второе"]
 # Enter twice: one message
 n = len(fake.asked("send"))
 app.entry.set_text("Раз")

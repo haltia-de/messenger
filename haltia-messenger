@@ -5749,6 +5749,10 @@ class Mpris:
 class Max(Gtk.Application):
     def __init__(self, link=None, media=None, recorder=None):
         super().__init__(application_id=APP_ID)
+        # Typed messages on their way, as bubbles at once: id -> {"chat", "text",
+        # "files", "m": the bubble's dict, its "state" sending or failed}.
+        self.queue = {}
+        self.queued = 0
         self.win = None
         self.call_id = None
         self.dial_confirming = False
@@ -6160,10 +6164,6 @@ class Max(Gtk.Application):
         self.clip.set_tooltip_text("Прикрепить фото или файл")
         self.clip.connect("clicked", lambda _b: self.attach())
         self.attached = []  # attachment()s waiting to be sent with the message
-        # Typed messages on their way, as bubbles at once: id -> {"chat", "text",
-        # "files", "m": the bubble's dict, its "state" sending or failed}.
-        self.queue = {}
-        self.queued = 0
         self.attachbar = Gtk.Box(spacing=10)
         self.attachbar.set_margin_start(16)
         self.attachbar.set_margin_end(16)
@@ -7910,8 +7910,8 @@ class Max(Gtk.Application):
     def pick_reaction(self, chat_id, msg_id, bubble):
         view = self.views.get(chat_id)
         m = view.message(msg_id) if view else None
-        if m is None:
-            return
+        if m is None or m.get("state"):
+            return  # one not sent yet has no reactions or menu: «Повторить», «Убрать»
         yours = m.get("yours")
         pop = Gtk.Popover.new(bubble)
         row = Gtk.Box(spacing=4)
@@ -8110,11 +8110,14 @@ class Max(Gtk.Application):
             view.add(m)
         self.deliver(m["id"])
 
-    def deliver(self, out_id):
-        """Send a queued message (again)."""
+    def deliver(self, out_id, then=None):
+        """Send a queued message (again); then() once it is answered."""
         q = self.queue.get(out_id)
-        if q is None:
+        if q is None or q.get("busy"):  # gone, or on its way already: never twice
+            if then:
+                then()
             return
+        q["busy"] = True
         chat_id, text, files, m = q["chat"], q["text"], q["files"], q["m"]
         m["state"] = "sending"
         view = self.views.get(chat_id)
@@ -8122,6 +8125,9 @@ class Max(Gtk.Application):
             view.restate(out_id)
 
         def done(msg, err):
+            q["busy"] = False
+            if then:
+                GLib.idle_add(lambda: then() and False)
             if out_id not in self.queue:
                 return  # «Убрать» meanwhile
             view = self.views.get(chat_id)
@@ -8164,10 +8170,14 @@ class Max(Gtk.Application):
             self.show_attached()
 
     def retry_unsent(self):
-        """The connection is back: what could not go goes now."""
-        for out_id, q in list(self.queue.items()):
-            if q["m"]["state"] == "failed":
-                self.deliver(out_id)
+        """The connection is back: what could not go goes now, one after
+        another, so the chat gets them in the order they were written."""
+        waiting = [i for i, q in self.queue.items() if q["m"]["state"] == "failed"]
+
+        def one():
+            if waiting:
+                self.deliver(waiting.pop(0), one)
+        one()
 
     def send_voice(self, chat_id, voice):
         """A voice message just recorded; one that cannot go is not kept."""
