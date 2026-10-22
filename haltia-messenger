@@ -443,6 +443,8 @@ label.recording { font-size: 22px; color: #a51d2d; }
 label.emoji-group { font-size: 18px; color: #77767b; }
 .viewer { background-color: #000000; }
 .found .bubble { background-color: #fff3bf; }
+label.play-over { font-size: 44px; color: #ffffff; background-color: rgba(0, 0, 0, 0.55);
+                  border-radius: 40px; padding: 4px 22px 4px 28px; }
 label.forwarded { font-size: 19px; font-style: italic; color: #1c71d8; }
 .tabs { background-color: #dcdcda; padding: 8px 12px; }
 .tabs radiobutton, .tabs button {
@@ -5475,16 +5477,33 @@ class ChatView:
             return named
         if item["kind"] == "video":
             box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
-            if item["thumb"]:
-                img = Gtk.Image.new_from_icon_name("video-x-generic", Gtk.IconSize.DIALOG)
-                img.set_size_request(460, 200)
-                box.pack_start(img, False, False, 0)
-                self.photos.append((watched(img), item["thumb"]))  # Media.photo checks the host
             sec = secs(item["duration"])
             b = Gtk.Button(label="▶  Видео %s" % mmss(sec) if sec else "▶  Видео")
             b.get_style_context().add_class("file")
             b.set_can_focus(False)
             b.connect("clicked", lambda _b: self.on_media(m, item, {"button": b}))
+            if item["thumb"]:
+                img = Gtk.Image.new_from_icon_name("video-x-generic", Gtk.IconSize.DIALOG)
+                img.set_size_request(460, 200)
+                # The preview plays it too, with ▶ over it, as in MAX and Telegram.
+                over = Gtk.Overlay()
+                over.add(img)
+                play = label("▶", "play-over", xalign=0.5)
+                play.set_halign(Gtk.Align.CENTER)
+                play.set_valign(Gtk.Align.CENTER)
+                over.add_overlay(play)
+                preview = Gtk.EventBox()
+                preview.add(over)
+                preview.is_video = True
+                preview.tap = Gtk.GestureMultiPress.new(preview)
+                # One tap starts it once: the second of a double tap, or a tap
+                # while its link is asked for (the button greyed), starts nothing.
+                preview.tap.connect("released", lambda _g, n, _x, _y: (
+                    setattr(self, "photo_at", time.monotonic()),  # not the bubble's own tap
+                    n == 1 and b.get_sensitive() and time.monotonic() - self.held_at > 1.0
+                    and b.clicked()))
+                box.pack_start(preview, False, False, 0)
+                self.photos.append((watched(img), item["thumb"]))  # Media.photo checks the host
             box.pack_start(self._with_save(b, m, item), False, False, 0)
             return box
         b = Gtk.Button(label="📄  %s · %s" % (item["name"], size_text(item["size"])))
@@ -6378,13 +6397,20 @@ class Max(Gtk.Application):
         self.viewer.get_style_context().add_class("viewer")
         self.viewer_image = Gtk.Image()
         self.viewer.add(self.viewer_image)
+        # A double tap: twice as large and back, moved by the finger; a tap
+        # alone does nothing (one to look closer closed it). «←» or Esc closes.
         self.viewer.tap = Gtk.GestureMultiPress.new(self.viewer)
-        self.viewer.tap.connect("released", lambda *_a: self.close_photo())
-        self.viewer.connect("size-allocate", lambda _w, _a: self.fit_photo())
+        self.viewer.tap.connect("released", lambda _g, n, x, y: n == 2 and self.zoom_photo(x, y))
+        self.viewer_scroll = Gtk.ScrolledWindow()
+        self.viewer_scroll.set_kinetic_scrolling(True)
+        self.viewer_scroll.get_style_context().add_class("viewer")
+        self.viewer_scroll.add(self.viewer)
+        self.viewer_scroll.connect("size-allocate", lambda _w, _a: self.fit_photo())
         self.viewer_pix = None  # the photo as loaded, fitted again on each size
         self.viewer_url = None
+        self.viewer_zoom = 1
         viewer_page = Gtk.Overlay()
-        viewer_page.add(self.viewer)
+        viewer_page.add(self.viewer_scroll)
         self.viewer_note = label("", "saved", xalign=0.5)
         self.viewer_note.set_halign(Gtk.Align.CENTER)
         self.viewer_note.set_valign(Gtk.Align.END)
@@ -7100,7 +7126,12 @@ class Max(Gtk.Application):
     def show_photo(self, url):
         self.viewer_pix = None
         self.viewer_url = url
-        self.viewer_note.hide()
+        self.viewer_zoom = 1
+        # Said once, a while: how to look closer, how to go back.
+        self.viewer_note.set_text("Дважды коснитесь — крупнее. Назад — «←»")
+        self.viewer_note.show()
+        GLib.timeout_add_seconds(4, lambda: (
+            self.viewer_note.get_text().startswith("Дважды") and self.viewer_note.hide()) and False)
         self.viewer_image.set_from_icon_name("image-x-generic", Gtk.IconSize.DIALOG)
         # Within the window, under its header (back, «Фото», save): not
         # full screen, where the shell's ✕ would cover the corner.
@@ -7116,12 +7147,13 @@ class Max(Gtk.Application):
         self.media.photo(url, loaded, size=2048)
 
     def fit_photo(self):
-        """The photo as large as the window lets it, its shape kept."""
+        """The photo as large as the window lets it (twice that when zoomed),
+        its shape kept."""
         pix = self.viewer_pix
-        alloc = self.viewer.get_allocation()
+        alloc = self.viewer_scroll.get_allocation()
         if pix is None or alloc.width < 2 or alloc.height < 2:
             return
-        k = min(alloc.width / pix.get_width(), alloc.height / pix.get_height())
+        k = min(alloc.width / pix.get_width(), alloc.height / pix.get_height()) * self.viewer_zoom
         w, h = max(1, int(pix.get_width() * k)), max(1, int(pix.get_height() * k))
         current = self.viewer_image.get_pixbuf()
         if current is None or (current.get_width(), current.get_height()) != (w, h):
@@ -7148,9 +7180,24 @@ class Max(Gtk.Application):
 
         self.media.save(url, into, name, done, replace)
 
+    def zoom_photo(self, x, y):
+        """Twice as large where it was tapped, or back to the whole photo."""
+        if self.viewer_pix is None:
+            return
+        self.viewer_zoom = 2 if self.viewer_zoom == 1 else 1
+        self.fit_photo()
+        if self.viewer_zoom == 2:
+            def there():
+                for adj, at in ((self.viewer_scroll.get_hadjustment(), x),
+                                (self.viewer_scroll.get_vadjustment(), y)):
+                    adj.set_value(at * 2 - adj.get_page_size() / 2)
+                return False
+            GLib.idle_add(there)
+
     def close_photo(self):
         if self.stack.get_visible_child_name() != "photo":
             return
+        self.viewer_zoom = 1
         self.viewer_pix = None
         self.viewer_image.clear()
         self.title.set_text((self.chatlist.get(self.open_chat) or {}).get("title", ""))
