@@ -664,6 +664,42 @@ def initials_icon(name, key, size=64):
     return area
 
 
+def round_pixbuf(pix, size):
+    """A picture cut to a circle of size px, its middle kept (a face)."""
+    surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, size, size)
+    cr = cairo.Context(surface)
+    cr.arc(size / 2, size / 2, size / 2, 0, 6.2832)
+    cr.clip()
+    k = size / min(pix.get_width(), pix.get_height())
+    cr.translate((size - pix.get_width() * k) / 2, (size - pix.get_height() * k) / 2)
+    cr.scale(k, k)
+    Gdk.cairo_set_source_pixbuf(cr, pix, 0, 0)
+    cr.paint()
+    return Gdk.pixbuf_get_from_surface(surface, 0, 0, size, size)
+
+
+def avatar(name, key, url, photo, size=64):
+    """A chat's or person's round picture, as in MAX and Telegram: its
+    initials at once, its photo (photo(url, done, size, owner): Media's)
+    in their place once it has come."""
+    box = watched(Gtk.Box())
+    box.set_valign(Gtk.Align.CENTER)
+    box.pack_start(initials_icon(name, key, size), False, False, 0)
+    box.photo_url = url
+
+    def came(pix):
+        if pix is None or getattr(box, "gone", False):
+            return
+        for child in box.get_children():
+            child.destroy()
+        image = Gtk.Image.new_from_pixbuf(round_pixbuf(pix, size))
+        box.pack_start(image, False, False, 0)
+        image.show()
+    if url:
+        photo(url, came, size=size * 2, owner=box)
+    return box
+
+
 def phone_of(text):
     """A phone number as MAX looks it up (+7…), or None if this is not one."""
     if not re.fullmatch(r"\+?[\d\s()-]+", text):
@@ -816,7 +852,7 @@ def max_chat(c, me=None):
     return Chat(c.id, kind(c.type), c.title or None, members,
                 c.participants_count or len(members), c.new_messages or 0,
                 max_message(c.last_message) if c.last_message else None, c.last_event_time or 0,
-                seen=seen)
+                seen=seen, photo=getattr(c, "base_icon_url", None) or None)
 
 
 def max_person(user):
@@ -866,6 +902,7 @@ class Chat:
     time: int = 0  # ms of its last event
     link: str = None  # a public channel's or group's link (https://…), to join it by
     seen: int = 0  # how far the others have read the account's messages (the link's seen_by)
+    photo: str = None  # a group's or channel's picture (a dialog's is its person's)
 
 
 # --- MAX, in its own thread -------------------------------------------------
@@ -3712,6 +3749,7 @@ class Account:
         return {"id": chat.id, "account": self.id, "title": self.title(chat), "type": chat.kind,
                 "last": self.preview(last), "time": (last.time if last else 0) or chat.time,
                 "unread": chat.unread, "peer": peer, "seen": chat.seen or 0,
+                "photo": chat.photo or (self.portraits.get(peer) if peer is not None else None),
                 "seen_by": getattr(self.link, "seen_by", "time"),
                 "stranger": peer is not None and peer not in self.known}
 
@@ -6192,10 +6230,16 @@ class Max(Gtk.Application):
         self.sub = label("", "sub", xalign=0.5)
         heading.pack_start(self.title, False, False, 0)
         heading.pack_start(self.sub, False, False, 0)
+        # In a chat, its picture left of its name, as in MAX and Telegram.
+        self.head_face = Gtk.Box()
+        self.head_face.set_no_show_all(True)
+        headed = Gtk.Box(spacing=14)
+        headed.pack_start(self.head_face, False, False, 0)
+        headed.pack_start(heading, False, False, 0)
         # A tap on the chat's name opens its menu, as a tap on the header
         # does in MAX and Telegram.
         self.titled = Gtk.EventBox()
-        self.titled.add(heading)
+        self.titled.add(headed)
         self.titled.tap = Gtk.GestureMultiPress.new(self.titled)
         self.titled.tap.connect("released", lambda *_a: self.edit.get_visible() and self.chat_menu())
         bar.set_custom_title(self.titled)
@@ -7131,7 +7175,7 @@ class Max(Gtk.Application):
         box.set_margin_end(16)
         box.set_margin_top(10)
         box.set_margin_bottom(10)
-        box.pack_start(initials_icon(s["title"], s["id"]), False, False, 0)
+        box.pack_start(avatar(s["title"], s["id"], s.get("photo"), self.media.photo), False, False, 0)
         mid = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
         mid.set_valign(Gtk.Align.CENTER)
         mid.pack_start(label(s["title"], "chat-name", ellipsize=True), False, False, 0)
@@ -7162,7 +7206,7 @@ class Max(Gtk.Application):
     def look(self, entry):
         """What a row shows: when it changes the row is redrawn."""
         s, pinned, quiet = entry
-        return (s["title"], s["last"], s["time"], s["unread"], pinned, quiet, self.tagged)
+        return (s["title"], s["last"], s["time"], s["unread"], pinned, quiet, self.tagged, s.get("photo"))
 
     def retag(self):
         """With more than one messenger switched on, each row says whose its
@@ -7938,6 +7982,7 @@ class Max(Gtk.Application):
         # switched off before anything is sent.
         self.gear.set_visible(page in ("chats", "wait", "login"))
         self.findb.set_visible(page == "chats")
+        self.head_face.set_visible(page == "chat")
         self.edit.set_visible(page == "chat" and self.chatlist.listed(self.open_chat))
         self.viewer_save.set_visible(page == "photo")
         summary = self.about(self.open_chat) if self.open_chat is not None else {}
@@ -8297,6 +8342,11 @@ class Max(Gtk.Application):
             self.chat_area.pack_start(view.widget, True, True, 0)
             self.view = view
         self.title.set_text(s.get("title", ""))
+        for child in self.head_face.get_children():
+            child.destroy()
+        face = avatar(s.get("title", ""), chat_id, s.get("photo"), self.media.photo, size=56)
+        self.head_face.pack_start(face, False, False, 0)
+        face.show_all()
         self.sub.set_text("" if not view.empty else "загрузка…")
         self.back.show()
         self.inputbar.set_visible(s.get("type") != "CHANNEL")

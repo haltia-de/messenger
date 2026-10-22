@@ -65,8 +65,8 @@ class FakeLink:
         self.agent = "Mozilla/5.0 (X11; Linux x86_64) FakeLink"
 
     # --- building the state ---------------------------------------------------
-    def person(self, uid, name, contact=False, phone=None):
-        self.people[uid] = user(uid, name)
+    def person(self, uid, name, contact=False, phone=None, photo=None):
+        self.people[uid] = Person(uid, name, photo)
         if contact:
             self.contacts.add(uid)
         if phone:
