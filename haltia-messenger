@@ -2071,19 +2071,8 @@ class CallAudio:
             # Reserve a sendrecv video track even in audio calls, as MAX does.
             # appsrc holds no camera and produces no frames until a person's tap.
             if video_supported():
-                self.video_bin = Gst.parse_bin_from_description(
-                    "appsrc name=outgoing_video is-live=true format=time do-timestamp=true max-buffers=2 leaky-type=downstream "
-                    "caps=video/x-raw,format=I420,width=320,height=240,framerate=15/1 "
-                    "! queue max-size-buffers=2 leaky=downstream "
-                    # Real-time: constant rate for the link, the fastest speed for
-                    # the tablet's Atom, two partitions so both threads have work.
-                    "! vp8enc name=video_encoder deadline=1 cpu-used=16 threads=2 token-partitions=2 "
-                    "end-usage=cbr target-bitrate=300000 keyframe-max-dist=30 "
-                    "! rtpvp8pay name=video_pay pt=%d picture-id-mode=15-bit " % video_payload +
-                    '! capsfilter name=video_caps caps="%s"' % (VIDEO_CAPS % video_payload), True)
+                self.video_bin = self._sender_bin(video_payload)
                 self.pipeline.add(self.video_bin)
-                self.video_bin.get_static_pad("src").add_probe(
-                    Gst.PadProbeType.BUFFER, self._encoded_video)
                 self.video_pad = self.rtc.request_pad_simple("sink_1")
                 self.video_bin.get_static_pad("src").link(self.video_pad)
             else:
@@ -2149,6 +2138,41 @@ class CallAudio:
         state = rtc.get_property("connection-state").value_nick
         self.loop.call_soon_threadsafe(self._deliver, self.status, state)
 
+    def _sender_bin(self, payload):
+        """What sends the camera's picture: appsrc, VP8, RTP with payload."""
+        sender = self.Gst.parse_bin_from_description(
+            "appsrc name=outgoing_video is-live=true format=time do-timestamp=true max-buffers=2 leaky-type=downstream "
+            "caps=video/x-raw,format=I420,width=320,height=240,framerate=15/1 "
+            "! queue max-size-buffers=2 leaky=downstream "
+            # Real-time: constant rate for the link, the fastest speed for
+            # the tablet's Atom, two partitions so both threads have work.
+            "! vp8enc name=video_encoder deadline=1 cpu-used=16 threads=2 token-partitions=2 "
+            "end-usage=cbr target-bitrate=300000 keyframe-max-dist=30 "
+            "! rtpvp8pay name=video_pay pt=%d picture-id-mode=15-bit " % payload +
+            '! capsfilter name=video_caps caps="%s"' % (VIDEO_CAPS % payload), True)
+        sender.get_static_pad("src").add_probe(self.Gst.PadProbeType.BUFFER, self._encoded_video)
+        return sender
+
+    def rebuild_sender(self):
+        """The sending branch failed (its encoder): a new one in its place, on
+        the same transceiver, so the camera's picture goes on. On the loop."""
+        old, pad = self.video_bin, self.video_pad
+        if self.closed or old is None or pad is None or self.pipeline is None:
+            return False
+        payload = old.get_by_name("video_pay").get_property("pt")
+        old.get_static_pad("src").unlink(pad)
+        old.set_state(self.Gst.State.NULL)
+        self.pipeline.remove(old)
+        sender = self._sender_bin(payload)
+        self.pipeline.add(sender)
+        if not sender.get_static_pad("src").link(pad) == self.Gst.PadLinkReturn.OK:
+            self.pipeline.remove(sender)
+            self.video_bin = None
+            return False
+        sender.sync_state_with_parent()
+        self.video_bin = sender
+        return True
+
     def _bus(self, _bus, message, _data):
         if message.type == self.Gst.MessageType.ERROR:
             # Video is optional: its encoder's or decoder's error stops video,
@@ -2156,13 +2180,14 @@ class CallAudio:
             # details can contain TURN credentials.
             err, _debug = message.parse_error()
             src = message.src
-            video = any(part is not None and (src is part or src.has_as_ancestor(part))
-                        for part in (self.video_bin, self.remote_bin))
+            inside = lambda part: part is not None and (src is part or src.has_as_ancestor(part))  # noqa: E731
+            # The peer's picture failing never stops the own camera.
+            video = ("send-video-failed" if inside(self.video_bin) else
+                     "remote-video-failed" if inside(self.remote_bin) else None)
             factory = src.get_factory() if hasattr(src, "get_factory") else None
             self.loop.call_soon_threadsafe(log_line, "voice call: gst error %s %s:%d" % (
                 factory.get_name() if factory else "bin", err.domain, err.code))
-            self.loop.call_soon_threadsafe(self._deliver, self.status,
-                                           "video-failed" if video else "failed")
+            self.loop.call_soon_threadsafe(self._deliver, self.status, video or "failed")
         return self.Gst.BusSyncReply.DROP
 
     def _received(self, _rtc, pad):
@@ -2482,6 +2507,7 @@ class VoiceCall:
         self.video_invitation = bool(video)
         self.video = bool(video) if not incoming else False
         self.video_wanted = self.video  # what the person asked for; video follows it
+        self.sender_rebuilt = 0  # the video sender is built anew once after a failure
         self.video_error = None
         self.remote_video = None
         self.frame = None
@@ -2679,9 +2705,17 @@ class VoiceCall:
             return
         if state == "camera-failed":
             self.job(self.camera(False, failed=True))
-        elif state == "video-failed":
-            if self.video_wanted:
+        elif state == "send-video-failed":
+            # Built anew once: the camera stays; failing again, video stops.
+            if self.sender_rebuilt < 1 and self.audio.rebuild_sender():
+                self.sender_rebuilt += 1
+                log_line("voice call: video sender rebuilt")
+            elif self.video_wanted:
                 self.job(self.camera(False, failed=True))
+        elif state == "remote-video-failed":
+            log_line("voice call: the peer's video stopped")
+            self.remote_video = False  # their picture goes; the own camera stays
+            self.show(self.state)
         elif state == "connected":
             if self.disconnect_timer is not None:
                 self.disconnect_timer.cancel()
