@@ -6699,7 +6699,8 @@ class Max(Gtk.Application):
         self.clip.set_focus_on_click(False)
         self.clip.set_tooltip_text("Прикрепить фото или файл")
         self.clip.connect("clicked", lambda _b: self.attach())
-        self.attached = []  # attachment()s waiting to be sent with the message
+        self.attached = []  # attachment()s waiting to be sent with the message (the open chat's)
+        self.drafts = {}  # chat id -> {"text", "attached"} written there and not sent yet
         self.attachbar = Gtk.Box(spacing=10)
         self.attachbar.set_margin_start(16)
         self.attachbar.set_margin_end(16)
@@ -7399,7 +7400,23 @@ class Max(Gtk.Application):
         self.chatlist.mute(s["id"])
         self.fill_list()
 
+    def keep_draft(self):
+        """The open chat's unsent words and files kept with it, and the entry
+        emptied: a draft belongs to its chat, never goes with a message in
+        another (a photo shared into one chat went with the next anywhere)."""
+        if self.open_chat is None:
+            return
+        text, files = self.entry.get_text(), list(self.attached)
+        if text.strip() or files:
+            self.drafts[self.open_chat] = {"text": text, "attached": files}
+        else:
+            self.drafts.pop(self.open_chat, None)
+        self.entry.set_text("")
+        self.attached = []
+        self.show_attached()
+
     def show_list(self):
+        self.keep_draft()
         self.open_chat = None
         self.back.hide()
         self.title.set_text(NAME)
@@ -7420,6 +7437,7 @@ class Max(Gtk.Application):
 
     # the search: a person by phone, a channel or group by link, own chats by name
     def show_find(self):
+        self.keep_draft()
         self.open_chat = None
         # Here one also writes to someone new: by their number.
         self.title.set_text("Найти или написать")
@@ -8517,6 +8535,13 @@ class Max(Gtk.Application):
 
     def open(self, chat_id):
         start = time.monotonic()
+        if self.open_chat != chat_id:
+            self.keep_draft()  # the chat left keeps its own
+            draft = self.drafts.pop(chat_id, None)
+            if draft:
+                self.entry.set_text(draft["text"])
+                self.attached = list(draft["attached"])
+                self.show_attached()
         if self.replying and self.replying[0] != chat_id:
             self.reply_to(None)  # an answer belongs to its chat
         if self.record_chat is not None and self.record_chat != chat_id:

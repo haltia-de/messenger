@@ -473,6 +473,23 @@ sends = len(fake.asked("send"))
 app.entry.emit("activate")  # a key (Enter) never sends what another program gave
 spin(0.2)
 assert len(fake.asked("send")) == sends and app.attached and app.sub.get_text() == "Нажмите «Отправить»"
+# Shared, left, another chat opened, a message written and sent: no file goes
+# with it — the draft is the first chat's, and is there again when it opens.
+app.entry.set_text("для мамы")
+app.show_list()
+app.open(dacha)
+spin(0.2)
+assert not app.attached and app.entry.get_text() == "" and not app.attachbar.get_visible()
+sends = len(fake.asked("send"))
+app.entry.set_text("Привет даче")
+app.sendb.clicked()
+wait(lambda: len(fake.asked("send")) > sends and not app.queue, what="the message to the other chat")
+assert fake.asked("send")[-1] == {"chat_id": dacha, "text": "Привет даче"}  # no file in it
+app.show_list()
+app.open(mama)
+spin(0.2)
+assert [f["path"] for f in app.attached] == [copy] and app.entry.get_text() == "для мамы"
+app.entry.set_text("")
 for c in list(app.attachbar.get_children()):  # not sent here: the draft taken off again
     [b for b in c.get_children() if isinstance(b, Gtk.Button)][0].clicked()
 spin(0.1)
