@@ -416,7 +416,7 @@ spin(0.1)
 assert [w.get_text() for w in walk(app.emoji_pop) if isinstance(w, Gtk.Label)
         and w.get_style_context().has_class("emoji-group")][0] == "Недавние"
 app.send()
-wait(lambda: app.entry.get_text() == "", what="sent with emoji")
+wait(lambda: fake.asked("send") and app.sendb.get_sensitive(), what="sent with emoji")
 assert fake.asked("send")[-1] == {"chat_id": mama, "text": "😀Привет 😀❤️"}
 wait(lambda: not app.smile.get_active() and app.emoji_pop is None, what="the panel closed")
 ok("emoji")
@@ -1006,12 +1006,42 @@ assert len(app.attachbar.get_children()) == 2 and app.entry.get_text() == "Во�
 fake.back()
 wait(lambda: not app.offline.get_visible(), what="the bar gone")
 app.send()
-wait(lambda: not app.attachbar.get_visible(), what="sent")
+wait(lambda: app.sendb.get_sensitive(), what="sent")
+assert not app.attachbar.get_visible()
 assert fake.asked("send")[-1] == {"chat_id": mama, "text": "Вот счёт",
                                   "files": [("photo", "Дача.JPG", None), ("file", "Счёт.pdf", None)]}
 assert app.entry.get_text() == "" and app.chatlist.get(mama)["last"] == "Вы: Вот счёт"
 sent = app.backend.cache.read(mama)[-1]
 assert sent["photos"] == ["https://i.oneme.ru/sent/Дача.JPG"] and sent["media"][0]["name"] == "Счёт.pdf"
+# Enter twice while it goes: one message; what is typed meanwhile stays
+n = len(fake.asked("send"))
+app.entry.set_text("Раз")
+app.send()
+app.send()
+assert app.entry.get_text() == ""  # the draft went with the send
+app.entry.set_text("Два")
+wait(lambda: app.sendb.get_sensitive(), what="the send answered")
+assert len(fake.asked("send")) == n + 1 and fake.asked("send")[-1]["text"] == "Раз"
+assert app.entry.get_text() == "Два"
+# not sent while something new was typed: kept, back when the chat is opened
+fake.drop()
+wait(lambda: app.offline.get_visible(), what="the bar")
+app.send()
+app.entry.set_text("Три")
+wait(lambda: app.sendb.get_sensitive(), what="the send refused")
+assert app.entry.get_text() == "Три"
+app.entry.set_text("Четыре")  # a second not sent while «Три» is typed: kept with the first
+app.send()
+app.entry.set_text("Три")
+wait(lambda: app.sendb.get_sensitive(), what="the second send refused")
+fake.back()
+wait(lambda: not app.offline.get_visible(), what="the bar gone")
+app.entry.set_text("")
+app.show_list()
+app.open(mama)
+spin(0.2)
+assert app.entry.get_text() == "Два Четыре", app.entry.get_text()
+app.entry.set_text("")
 # a voice message: held, let go
 assert app.recorder.available()
 app.record_start()
