@@ -314,6 +314,7 @@ label.who { font-size: 19px; font-weight: bold; color: #1c71d8; }
 label.when { font-size: 16px; color: #77767b; }
 label.ticks { font-size: 22px; font-weight: bold; color: #77767b; }
 label.ticks.read { color: #1c71d8; }
+label.ticks.failed { color: #c01c28; }
 label.day { font-size: 19px; color: #5e5c64; background-color: #dcdcda;
             border-radius: 14px; padding: 4px 16px; }
 .inputbar { background-color: #dcdcda; padding: 10px; }
@@ -4868,8 +4869,9 @@ class ChatView:
 
     def __init__(self, chat_id, kind, cached, fetch_older, on_hold, on_media, on_react,
                  photo, on_photo=lambda url: None, on_forward=None, on_save=None, missed=None,
-                 seen=0, seen_by="time"):
+                 seen=0, seen_by="time", on_unsent=lambda msg_id, act: None):
         self.chat_id = chat_id
+        self.on_unsent = on_unsent  # «Повторить» or «Убрать» on a message not sent
         self.seen_mark, self.seen_by = seen or 0, seen_by  # how far the others have read
         self.group = kind in ("CHAT", "CHANNEL")  # senders' names over their bubbles
         self.channel = kind == "CHANNEL"  # its posts keep the ↪ beside them
@@ -5071,12 +5073,28 @@ class ChatView:
             return isinstance(m["id"], int) and m["id"] <= self.seen_mark
         return (m["time"] or 0) <= self.seen_mark
 
-    def _tick(self, m, ticks):
-        read = self.read(m)
-        ticks.set_text("✓✓" if read else "✓")
-        ticks.set_tooltip_text("Прочитано" if read else "Доставлено")
-        (ticks.get_style_context().add_class if read else
-         ticks.get_style_context().remove_class)("read")
+    def _tick(self, m, box):
+        """An own message's mark: 🕓 on its way, ⚠ not sent, ✓ sent, ✓✓ read."""
+        ticks, state = box.ticks, m.get("state")
+        read = state is None and self.read(m)
+        text, tip = {"sending": ("🕓", "Отправляется"),
+                     "failed": ("⚠ Не отправлено", "Не отправлено")}.get(
+            state, ("✓✓", "Прочитано") if read else ("✓", "Доставлено"))
+        ticks.set_text(text)
+        ticks.set_tooltip_text(tip)
+        style = ticks.get_style_context()
+        (style.add_class if read else style.remove_class)("read")
+        (style.add_class if state == "failed" else style.remove_class)("failed")
+        unsent = getattr(box, "unsent", None)
+        if unsent is not None:
+            unsent.set_visible(state == "failed")
+
+    def restate(self, msg_id):
+        """A message not sent yet changed its state (sending, failed)."""
+        if msg_id in self.msgs:
+            m, box = self.msgs[msg_id]
+            if getattr(box, "ticks", None) is not None:
+                self._tick(m, box)
 
     def seen(self, mark):
         """The others read up to mark: their ✓ become ✓✓."""
@@ -5084,9 +5102,8 @@ class ChatView:
             return
         self.seen_mark = mark
         for m, box in self.msgs.values():
-            ticks = getattr(box, "ticks", None)
-            if ticks is not None:
-                self._tick(m, ticks)
+            if getattr(box, "ticks", None) is not None:
+                self._tick(m, box)
 
     def message(self, msg_id):
         """The message as built, or None."""
@@ -5272,8 +5289,24 @@ class ChatView:
             foot.pack_start(at, False, False, 0)
             reacts.ticks = label("", "ticks")
             foot.pack_start(reacts.ticks, False, False, 0)
-            self._tick(m, reacts.ticks)
-            bubble.pack_start(foot, False, False, 0)
+            if "state" in m:
+                # Not sent yet (the send queue's): «Повторить» and «Убрать»
+                # beside it once it could not go.
+                reacts.unsent = Gtk.Box(spacing=10, halign=Gtk.Align.END)
+                for text, act in (("Повторить", "retry"), ("Убрать", "drop")):
+                    b = Gtk.Button(label=text)
+                    b.get_style_context().add_class("plain")
+                    b.set_can_focus(False)
+                    b.connect("clicked", lambda _b, a=act: self.on_unsent(m["id"], a))
+                    reacts.unsent.pack_start(b, False, False, 0)
+                reacts.unsent.set_no_show_all(True)
+                for b in reacts.unsent.get_children():
+                    b.show()
+                bubble.pack_start(foot, False, False, 0)
+                bubble.pack_start(reacts.unsent, False, False, 0)
+            else:
+                bubble.pack_start(foot, False, False, 0)
+            self._tick(m, reacts)
         else:
             bubble.pack_start(at, False, False, 0)
         hold.msg_id = m["id"]
@@ -5716,6 +5749,10 @@ class Mpris:
 class Max(Gtk.Application):
     def __init__(self, link=None, media=None, recorder=None):
         super().__init__(application_id=APP_ID)
+        # Typed messages on their way, as bubbles at once: id -> {"chat", "text",
+        # "files", "m": the bubble's dict, its "state" sending or failed}.
+        self.queue = {}
+        self.queued = 0
         self.win = None
         self.call_id = None
         self.dial_confirming = False
@@ -6127,8 +6164,6 @@ class Max(Gtk.Application):
         self.clip.set_tooltip_text("Прикрепить фото или файл")
         self.clip.connect("clicked", lambda _b: self.attach())
         self.attached = []  # attachment()s waiting to be sent with the message
-        self.sending = False  # a typed message on its way: Enter sends no second
-        self.unsent = {}  # chat id -> (text, files) not sent, back when it is opened
         self.attachbar = Gtk.Box(spacing=10)
         self.attachbar.set_margin_start(16)
         self.attachbar.set_margin_end(16)
@@ -6548,6 +6583,7 @@ class Max(Gtk.Application):
         if on:
             self.retryb.hide()
             self.wait_text.set_text(self.connecting())
+            self.retry_unsent()
         return False
 
     def connecting(self):
@@ -7453,7 +7489,11 @@ class Max(Gtk.Application):
                 on_save=lambda m, item, b: self.save_message(chat_id, m, [item], b),
                 missed=self.missed_calls.get(str(chat_id)),
                 seen=self.about(chat_id).get("seen", 0),
-                seen_by=self.about(chat_id).get("seen_by", "time"))
+                seen_by=self.about(chat_id).get("seen_by", "time"),
+                on_unsent=self.unsent)
+            for q in self.queue.values():  # its messages not sent yet, at the bottom
+                if q["chat"] == chat_id:
+                    view.add(q["m"])
         self.views[chat_id] = view  # most recently used last
         while len(self.views) > VIEWS:
             old_id = next(iter(self.views))
@@ -7710,9 +7750,6 @@ class Max(Gtk.Application):
         self.sub.set_text("" if not view.empty else "загрузка…")
         self.back.show()
         self.inputbar.set_visible(s.get("type") != "CHANNEL")
-        unsent = self.unsent.pop(chat_id, None)
-        if unsent:
-            self.unsent_back(chat_id, *unsent)
         self.stack.set_visible_child_name("chat")
         # Nothing focused: the on-screen keyboard comes when the entry is tapped,
         # not over the messages being read (and never in a channel).
@@ -7873,8 +7910,8 @@ class Max(Gtk.Application):
     def pick_reaction(self, chat_id, msg_id, bubble):
         view = self.views.get(chat_id)
         m = view.message(msg_id) if view else None
-        if m is None:
-            return
+        if m is None or m.get("state"):
+            return  # one not sent yet has no reactions or menu: «Повторить», «Убрать»
         yours = m.get("yours")
         pop = Gtk.Popover.new(bubble)
         row = Gtk.Box(spacing=4)
@@ -8043,43 +8080,67 @@ class Max(Gtk.Application):
 
     def send(self, voice=None):
         """The entry's text and the files waiting above it (or a voice
-        message just recorded: voice) into the open chat. What could not
-        be sent stays where it was."""
+        message just recorded: voice) into the open chat. A typed one leaves
+        the entry at once and waits in the chat as a bubble (🕓) till it is
+        sent; one that could not go stays there (⚠, «Повторить»), and goes
+        by itself when the connection is back."""
         text = "" if voice else self.entry.get_text().strip()
         files = [voice] if voice else list(self.attached)
         chat_id = self.open_chat
         if not (text or files) or chat_id is None:
             return
-        if not voice:
-            if self.sending:
-                return  # Enter again while it goes: one message, not two
-            # The draft goes now: what is typed or attached meanwhile is new.
-            self.sending = True
-            self.entry.set_text("")
-            self.attached = []
-            self.show_attached()
-        self.sendb.set_sensitive(False)
+        if voice:
+            self.send_voice(chat_id, voice)
+            return
+        # The draft goes now: what is typed or attached meanwhile is new, and
+        # Enter again has nothing to send twice.
+        self.entry.set_text("")
+        self.attached = []
+        self.show_attached()
+        self.smile.set_active(False)
+        self.queued += 1
+        shown = "\n".join(t for t in (text, "📎 " + ", ".join(f["name"] for f in files)
+                                         if files else "") if t)
+        m = {"id": "out-%d" % self.queued, "chat": chat_id, "sender": None, "who": "",
+             "text": shown, "photos": [], "media": [], "time": int(time.time() * 1000),
+             "mine": True, "reactions": [], "yours": None, "forwarded": None, "state": "sending"}
+        self.queue[m["id"]] = {"chat": chat_id, "text": text, "files": files, "m": m}
+        view = self.views.get(chat_id)
+        if view:
+            view.add(m)
+        self.deliver(m["id"])
+
+    def deliver(self, out_id, then=None):
+        """Send a queued message (again); then() once it is answered."""
+        q = self.queue.get(out_id)
+        if q is None or q.get("busy"):  # gone, or on its way already: never twice
+            if then:
+                then()
+            return
+        q["busy"] = True
+        chat_id, text, files, m = q["chat"], q["text"], q["files"], q["m"]
+        m["state"] = "sending"
+        view = self.views.get(chat_id)
+        if view:
+            view.restate(out_id)
 
         def done(msg, err):
-            if not voice:
-                self.sending = False
-            self.sendb.set_sensitive(True)
-            if err:
-                log_line("send %s: %r" % ("voice" if voice else "message", err))
-                self.sub.set_text("Нет связи — сообщение не отправлено"
-                                  if isinstance(err, Offline) else "не отправлено, попробуйте ещё раз")
-                if voice:
-                    remove_file(voice["path"])
-                else:
-                    self.unsent_back(chat_id, text, files)
-                return
-            if voice:
-                remove_file(voice["path"])
-            self.sub.set_text("")
-            self.smile.set_active(False)
+            q["busy"] = False
+            if then:
+                GLib.idle_add(lambda: then() and False)
+            if out_id not in self.queue:
+                return  # «Убрать» meanwhile
             view = self.views.get(chat_id)
-            for one in (msg if isinstance(msg, list) else [msg] if msg else []):
+            if err:
+                log_line("send message: %r" % err)
+                m["state"] = "failed"
                 if view:
+                    view.restate(out_id)
+                return
+            del self.queue[out_id]
+            if view:
+                view.remove([out_id])
+                for one in (msg if isinstance(msg, list) else [msg] if msg else []):
                     view.add(one)
             # a dialog from the search is in the list now
             self.chatlist.wrote(chat_id, text or attachment_words(files))
@@ -8090,19 +8151,55 @@ class Max(Gtk.Application):
         else:
             self.backend.run(self.backend.send(chat_id, text), done)
 
-    def unsent_back(self, chat_id, text, files):
-        """A message that could not go back where it was written: in the
-        entry if its chat is open and nothing new was typed, else kept for
-        when the chat is opened again. Never lost, never over new text."""
-        if self.open_chat == chat_id and not self.entry.get_text().strip():
-            self.entry.set_text(text)
-            self.attached = files + [f for f in self.attached if f not in files]
+    def unsent(self, out_id, act):
+        """«Повторить» or «Убрать» on a message that could not go. A removed
+        one comes back to the entry if nothing is typed there: never lost."""
+        q = self.queue.get(out_id)
+        if q is None:
+            return
+        if act == "retry":
+            self.deliver(out_id)
+            return
+        del self.queue[out_id]
+        view = self.views.get(q["chat"])
+        if view:
+            view.remove([out_id])
+        if self.open_chat == q["chat"] and not self.entry.get_text().strip() and not self.attached:
+            self.entry.set_text(q["text"])
+            self.attached = list(q["files"])
             self.show_attached()
-        else:
-            # An earlier one not sent is kept too: both come back together.
-            before, kept = self.unsent.get(chat_id, ("", []))
-            self.unsent[chat_id] = (" ".join(t for t in (before, text) if t),  # an entry is one line
-                                    kept + [f for f in files if f not in kept])
+
+    def retry_unsent(self):
+        """The connection is back: what could not go goes now, one after
+        another, so the chat gets them in the order they were written."""
+        waiting = [i for i, q in self.queue.items() if q["m"]["state"] == "failed"]
+
+        def one():
+            if waiting:
+                self.deliver(waiting.pop(0), one)
+        one()
+
+    def send_voice(self, chat_id, voice):
+        """A voice message just recorded; one that cannot go is not kept."""
+        self.sendb.set_sensitive(False)
+
+        def done(msg, err):
+            self.sendb.set_sensitive(True)
+            remove_file(voice["path"])
+            if err:
+                log_line("send voice: %r" % err)
+                self.sub.set_text("Нет связи — голосовое не отправлено"
+                                  if isinstance(err, Offline) else "голосовое не отправлено, попробуйте ещё раз")
+                return
+            self.sub.set_text("")
+            view = self.views.get(chat_id)
+            for one in (msg if isinstance(msg, list) else [msg] if msg else []):
+                if view:
+                    view.add(one)
+            self.chatlist.wrote(chat_id, attachment_words([voice]))
+            self.edit.set_visible(self.open_chat == chat_id and self.chatlist.listed(chat_id))
+
+        self.backend.run(self.backend.send(chat_id, "", [voice]), done)
 
     # --- attachments ------------------------------------------------------------
     def attach(self):
