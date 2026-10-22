@@ -281,7 +281,7 @@ MAIN_TAB = {"source_type": 5, "source_id": 1, "tab_config": 2}  # going to the c
 FLUSH_SEC = 3  # events go out in small batches, as the app sends them
 REACTIONS = ("👍", "❤️", "😂", "😮", "😢", "🔥")  # offered on a long press of a message
 REACTIONS_ASKED = 50  # newest messages of the chat in front whose reactions are asked
-REACTIONS_EVERY = 30  # s between those asks while the chat stays in front
+REACTIONS_EVERY = 10  # s between those asks while the chat stays in front
 # The emoji panel of the message entry, by group; the recent ones come first.
 EMOJI = (
     ("Лица", "😀 😃 😄 😁 😆 😅 😂 🤣 😊 😇 🙂 😉 😌 😍 🥰 😘 😗 😋 😛 😜 🤪 🤗 🤔 🤨 "
@@ -7413,6 +7413,8 @@ class Max(Gtk.Application):
             self.fill_list(only={msg["chat"]})
             return False  # from a stranger: no bubble, no buzz, left unread
         here = self.open_chat == msg["chat"] and self.win.is_visible()
+        if here and not msg.get("mine"):
+            self.watch_reactions(msg["chat"])  # the other is there now: their reactions asked soon
         view = self.views.get(msg["chat"])
         if view:
             view.add(msg)
@@ -9076,8 +9078,9 @@ class Max(Gtk.Application):
 
     def watch_reactions(self, chat_id):
         """The others' reactions on the newest messages of the chat in front,
-        asked at once and every REACTIONS_EVERY s while it stays there: MAX
-        tells a reaction only to the message's author."""
+        asked at once (and after another's message there) and every
+        REACTIONS_EVERY s while it stays there: MAX tells a reaction only to
+        the message's author."""
         if self.react_timer:
             GLib.source_remove(self.react_timer)
         def ask():
