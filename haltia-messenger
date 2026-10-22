@@ -5496,9 +5496,12 @@ class ChatView:
                 preview.add(over)
                 preview.is_video = True
                 preview.tap = Gtk.GestureMultiPress.new(preview)
-                preview.tap.connect("released", lambda *_a: (
+                # One tap starts it once: the second of a double tap, or a tap
+                # while its link is asked for (the button greyed), starts nothing.
+                preview.tap.connect("released", lambda _g, n, _x, _y: (
                     setattr(self, "photo_at", time.monotonic()),  # not the bubble's own tap
-                    time.monotonic() - self.held_at > 1.0 and b.clicked()))
+                    n == 1 and b.get_sensitive() and time.monotonic() - self.held_at > 1.0
+                    and b.clicked()))
                 box.pack_start(preview, False, False, 0)
                 self.photos.append((watched(img), item["thumb"]))  # Media.photo checks the host
             box.pack_start(self._with_save(b, m, item), False, False, 0)

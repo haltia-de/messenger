@@ -742,7 +742,10 @@ preview = [w for w in walk(hold) if getattr(w, "is_video", False)][0]
 assert "▶" in [w.get_text() for w in walk(preview) if isinstance(w, Gtk.Label)]
 started = len(hands.spawned)
 preview.tap.emit("released", 1, 5.0, 5.0)
+preview.tap.emit("released", 2, 5.0, 5.0)  # a double tap's second: nothing more
 wait(lambda: len(hands.spawned) > started, what="the video from its preview")
+spin(0.3)
+assert len(hands.spawned) == started + 1  # one player, not two
 doc.clicked()  # a file: fetched under its name, opened by the desktop's program; its save button keeps it
 wait(lambda: hands.opened, what="file")
 assert len(hands.opened) == 1 and hands.opened[0].startswith(bm.GLib.filename_to_uri(bm.DOCS))
