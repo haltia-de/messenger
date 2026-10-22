@@ -642,7 +642,19 @@ app.viewer_save.clicked()  # saved from the viewer, which stays open
 assert questions and questions[-1][0].startswith("Сохранить «фото-") and questions[-1][1] == "Сохранить"
 wait(lambda: app.viewer_note.get_text().startswith("сохранено"), what="saved from the viewer")
 assert app.stack.get_visible_child_name() == "photo" and len(os.listdir(pics)) == 1
-app.viewer.tap.emit("released", 1, 5.0, 5.0)
+assert app.viewer_note.get_visible() is False or "Дважды" in app.viewer_note.get_text() or \
+    app.viewer_note.get_text().startswith("сохранено")
+app.viewer.tap.emit("released", 1, 5.0, 5.0)  # a tap alone: it stays
+spin(0.2)
+assert app.stack.get_visible_child_name() == "photo"
+fitted = app.viewer_image.get_pixbuf().get_width()
+app.viewer.tap.emit("released", 2, 50.0, 40.0)  # a double tap: twice as large
+spin(0.2)
+assert app.viewer_zoom == 2 and abs(app.viewer_image.get_pixbuf().get_width() - fitted * 2) <= 2
+app.viewer.tap.emit("released", 2, 50.0, 40.0)  # and back
+spin(0.2)
+assert app.viewer_zoom == 1 and app.viewer_image.get_pixbuf().get_width() == fitted
+app.go_back()  # «←» closes it
 spin(0.2)
 assert app.stack.get_visible_child_name() == "chat" and app.title.get_text() == "Мамочка"
 assert not app.viewer_save.get_visible()
@@ -725,6 +737,12 @@ vid.clicked()  # the voice stops for the video
 wait(lambda: hands.spawned, what="player")
 assert hands.spawned[-1][-1] == "https://vd.okcdn.ru/v.mp4" and hands.sound.did[-1] == ("stop",)
 assert play.state == "play"
+# the preview plays it too (▶ over it), as in MAX and Telegram
+preview = [w for w in walk(hold) if getattr(w, "is_video", False)][0]
+assert "▶" in [w.get_text() for w in walk(preview) if isinstance(w, Gtk.Label)]
+started = len(hands.spawned)
+preview.tap.emit("released", 1, 5.0, 5.0)
+wait(lambda: len(hands.spawned) > started, what="the video from its preview")
 doc.clicked()  # a file: fetched under its name, opened by the desktop's program; its save button keeps it
 wait(lambda: hands.opened, what="file")
 assert len(hands.opened) == 1 and hands.opened[0].startswith(bm.GLib.filename_to_uri(bm.DOCS))
