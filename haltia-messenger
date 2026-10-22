@@ -2051,6 +2051,7 @@ class CallAudio:
         self.video_frames = 0  # pictures encoded
         self.video_pushed = 0  # the camera's frames handed to the encoder
         self.remote_bin = None  # the peer's video decoding, once it comes
+        self.failed_bins = []  # video branches given up: their late errors are not the call's
         self.video_size = (320, 240, 15)
         try:
             # RFC 7587 section 7 requires /2 in Opus SDP even for mono.
@@ -2142,8 +2143,9 @@ class CallAudio:
         """A video branch's error, on the loop: told once per branch still in use."""
         if branch is self.video_bin and state == "send-video-failed" or \
                 branch is self.remote_bin and state == "remote-video-failed":
+            self.failed_bins.append(branch)  # its later errors count no more
             if state == "remote-video-failed":
-                self.remote_bin = None  # its later errors count no more
+                self.remote_bin = None
                 pad = getattr(self, "remote_pad", None)
                 if pad is not None:
                     # Nothing more into it: a failed branch must not stop the
@@ -2174,6 +2176,8 @@ class CallAudio:
         if self.closed or old is None or pad is None or self.pipeline is None:
             return False
         payload = old.get_by_name("video_pay").get_property("pt")
+        if old not in self.failed_bins:
+            self.failed_bins.append(old)  # late errors from it count no more
         old.set_state(self.Gst.State.NULL)  # stopped before it is let go of
         old.get_static_pad("src").unlink(pad)
         self.pipeline.remove(old)
@@ -2201,7 +2205,9 @@ class CallAudio:
             # The peer's picture failing never stops the own camera; one failure
             # posts several errors, and those of a branch already replaced count
             # no more (the bin goes with them, checked on the loop).
-            if inside(self.video_bin):
+            if any(inside(gone) for gone in self.failed_bins):
+                pass  # a branch already given up: its late errors count no more
+            elif inside(self.video_bin):
                 self.loop.call_soon_threadsafe(self._branch_failed, "send-video-failed", self.video_bin)
             elif inside(self.remote_bin):
                 self.loop.call_soon_threadsafe(self._branch_failed, "remote-video-failed", self.remote_bin)

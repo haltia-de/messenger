@@ -110,6 +110,7 @@ async def h264_receive():
     phone.loop, phone.candidate, phone.status = loop, lambda v: candidate(0, v), states[0].add
     phone.closed, phone.remote_set, phone.pending = False, False, []
     phone.camera = phone.video_bin = phone.video_pad = phone.frame = None
+    phone.remote_bin, phone.failed_bins = None, []
     phone.video_generation = 0
     phone.sink = "fakesink name=heard sync=false"
     phone.pipeline = Gst.parse_launch(

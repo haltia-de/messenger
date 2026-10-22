@@ -133,7 +133,7 @@ def bus_errors():
     from gi.repository import Gst
     Gst.init(None)
     audio = bm.CallAudio.__new__(bm.CallAudio)
-    audio.Gst, audio.closed = Gst, False
+    audio.Gst, audio.closed, audio.failed_bins = Gst, False, []
     audio.video_bin, audio.remote_bin = Gst.Bin.new("send"), Gst.Bin.new("receive")
     encoder, decoder = Gst.ElementFactory.make("identity", None), Gst.ElementFactory.make("queue", None)
     audio.video_bin.add(encoder)
@@ -168,6 +168,16 @@ def bus_errors():
             if statuses == ["send-video-failed"] and k < 3:
                 audio.video_bin = Gst.Bin.new("rebuilt")  # as rebuild_sender does
     assert statuses == ["send-video-failed", "remote-video-failed"], statuses
+    # Errors arriving after the loop gave a branch up: never the call's
+    statuses.clear()
+    queued.clear()
+    with patch.object(bm, "log_line"):
+        for src in (decoder, encoder):  # the peer's failed branch; the sender replaced
+            audio._bus(None, SimpleNamespace(type=Gst.MessageType.ERROR, src=src,
+                                             parse_error=lambda: (error, "")), None)
+        for cb, args in queued:
+            cb(*args)
+    assert statuses == [], statuses
     ok("video branch errors stop video only; logged by element and code without the debug text")
 
 
@@ -184,7 +194,7 @@ def sender_rebuilt():
         ok("video sender rebuild skipped: no vp8enc here")
         return
     audio = bm.CallAudio.__new__(bm.CallAudio)
-    audio.Gst, audio.closed = Gst, False
+    audio.Gst, audio.closed, audio.failed_bins = Gst, False, []
     audio.pipeline = Gst.Pipeline.new("call")
     sink = Gst.ElementFactory.make("fakesink", None)
     audio.pipeline.add(sink)
