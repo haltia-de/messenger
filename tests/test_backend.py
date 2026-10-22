@@ -327,6 +327,12 @@ c = bm.max_chat(PyChat.model_validate({
     "lastMessage": {"id": 9, "sender": 5, "text": "Привет", "time": 1000, "type": "USER"}}))
 assert c.kind == "DIALOG" and c.members == [1, 5] and c.count == 2 and c.unread == 3
 assert c.title is None and c.time == 2000 and c.last.text == "Привет"
+# participants are {id: read mark}: the others' newest is how far they read
+read = bm.max_chat(PyChat.model_validate({
+    "id": 12, "type": "CHAT", "status": "ACTIVE", "owner": 1,
+    "participants": {"1": 9000, "5": 1500, "6": 1700}}), me=1)
+assert read.seen == 1700 and bm.max_chat(PyChat.model_validate({
+    "id": 12, "type": "CHAT", "status": "ACTIVE", "owner": 1, "participants": {"1": 9000}}), me=1).seen == 0
 assert bm.max_person(PyUser.model_validate({"id": 5, "names": [{"name": "Анна", "type": "CUSTOM"}]})) \
     == bm.Person(5, "Анна")
 sent_to_max = []
@@ -502,7 +508,8 @@ m = bm.tg_message(tt.MessageService(id=6, peer_id=tt.PeerChat(9), date=T0,
 assert m.chat == "tg:-9" and m.notes == ["закреплено сообщение"]
 assert bm.tg_message(tmsg(text="моё", out=True), "tg:1").sender == "tg:1"  # Telegram leaves it out
 assert bm.tg_person(tt.User(id=77, first_name="Саша", last_name="Иванов")) == bm.Person("tg:77", "Саша Иванов")
-c = bm.tg_chat(tt.User(id=77, first_name="Саша"), "tg:1", unread=2, last=tmsg(text="Привет"))
+c = bm.tg_chat(tt.User(id=77, first_name="Саша"), "tg:1", unread=2, last=tmsg(text="Привет"), seen=41)
+assert c.seen == 41  # read_outbox_max_id: own messages up to it are read
 assert (c.id, c.kind, c.title, c.members, c.unread, c.last.text) == \
     ("tg:77", "DIALOG", None, ["tg:1", "tg:77"], 2, "Привет")
 assert bm.tg_chat(tt.User(id=1, first_name="Я", is_self=True), "tg:1").members == ["tg:1"]

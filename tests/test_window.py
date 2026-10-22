@@ -323,6 +323,21 @@ app.menu.popdown()
 spin(0.1)
 ok("reactions, rename, chat menu")
 
+# --- ✓ sent, ✓✓ read: the own messages say whether they were read ---------------------------
+def ticks_of(v):
+    return [w for w in walk(v.widget) if isinstance(w, Gtk.Label) and w.get_style_context().has_class("ticks")]
+own = ticks_of(v)
+assert own and all(t.get_text() == "✓" for t in own)  # sent, not read yet
+fake.peer_read(mama, t0 + 1000)
+wait(lambda: all(t.get_text() == "✓✓" for t in ticks_of(v)), what="read marks")
+assert all(t.get_style_context().has_class("read") for t in ticks_of(v))
+assert app.chatlist.get(mama)["seen"] == t0 + 1000
+later = fake.say(mama, "Ещё не прочитано", t=now_ms())
+app.view.add(app.backend.accounts["max"].message(later))
+spin(0.2)
+assert ticks_of(v)[-1].get_text() == "✓"  # newer than what was read
+ok("read marks")
+
 # --- forwarding a message ---------------------------------------------------------------------
 # a tap on a bubble, not only a long press: the reactions and the message's menu
 app.menu = None
