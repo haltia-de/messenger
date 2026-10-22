@@ -1,3 +1,16 @@
+haltia-messenger (2.9.1) unstable; urgency=medium
+
+  * «Видеозвонки» (Video calls) is now in Настройки → Основное (Settings →
+    General). It is off for now: calls are voice only until the tablet’s video
+    issue is fixed. Turn it on to use video calls as before.
+  * «Аудиозвонки» (Audio calls) lets you turn off voice calls. The program
+    asks before recording a voice message; you can turn this question off in
+    the settings.
+  * The call screen correctly shows when the other person has turned off their
+    microphone.
+
+ -- Haltia <rensomail@gmail.com>  Thu, 22 Oct 2026 16:00:00 +0300
+
 haltia-messenger (2.9.0) unstable; urgency=medium
 
   * A file shared from another program stays in the chat where you attached it
