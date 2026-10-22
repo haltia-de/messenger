@@ -253,10 +253,15 @@ async def peek_all():
     link._peek(SimpleNamespace(opcode=Opcode.NOTIF_MSG_REACTIONS_CHANGED, payload={
         "chatId": 13, "messageId": 117484382192958798, "totalCount": 2,
         "counters": [{"reaction": "❤️", "count": 1}, {"reaction": "👍", "count": 1}]}))
+    # the others in the chat get YOU_REACTED, the counts in reactionInfo
+    link._peek(SimpleNamespace(opcode=Opcode.NOTIF_MSG_YOU_REACTED, payload={
+        "chatId": 13, "messageId": 9, "reactionInfo": {
+            "counters": [{"reaction": "👍", "count": 1}], "totalCount": 1, "yourReaction": "👍"}}))
     await asyncio.sleep(0.05)
 asyncio.run(peek_all())
 assert got == [(11, [5, 6]), (12, [7]),
-               ("reaction", 13, 117484382192958798, [["❤️", 1], ["👍", 1]])], got
+               ("reaction", 13, 117484382192958798, [["❤️", 1], ["👍", 1]]),
+               ("reaction", 13, 9, [["👍", 1]])], got
 seen = []
 
 
