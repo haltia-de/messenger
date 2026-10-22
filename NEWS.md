@@ -1,5 +1,35 @@
 # Что нового · What's new
 
+## 2.9.0 (2026-10-22)
+
+### Русский
+
+Файл из другой программы остаётся в том чате, куда вы его прикрепили, и никогда не отправляется с сообщением в другом чате. Случайное касание больше не выбирает чат для отправки.
+
+В меню сообщения появилось «Ответить»: в ответе видна цитата исходного сообщения.
+
+На экране звонка кнопки микрофона и камеры ясно показывают, включены ли они. Видно и когда собеседник выключил микрофон или камеру. Ваше изображение стало больше и находится внизу справа. Видео быстрее подстраивается под планшет.
+
+В «Найти или написать» список ваших чатов сужается по мере ввода. В списке и в чате появились фото профилей.
+
+Экран входа подсказывает, где на телефоне найти «Войти по QR-коду».
+
+Программа переподключается без шквала повторных запросов, а потеря связи больше не завершает звонок. Списки работают быстрее, и при большом количестве фото требуется меньше памяти.
+
+### English
+
+A file shared from another program stays in the chat where you attached it and never goes with a message in another chat. An accidental touch no longer picks a chat to send to.
+
+The message menu now has «Ответить» (Reply): the reply shows a quote of the original message.
+
+On the call screen, the microphone and camera buttons clearly show whether they are on. You can also see when the other person has turned off their microphone or camera. Your own picture is larger and sits at the bottom right. Video adapts to the tablet faster.
+
+In «Найти или написать» (Find or write), your own chats narrow as you type. Profile photos now appear in the list and the chat.
+
+The sign-in screen shows where to find «Войти по QR-коду» (Sign in by QR code) on the phone.
+
+The program reconnects without a flood of repeated requests, and a lost connection no longer ends a call. Lists are faster, and many photos use less memory.
+
 ## 2.8.0 (2026-10-22)
 
 ### Русский
