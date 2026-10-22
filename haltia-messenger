@@ -280,6 +280,8 @@ SCREEN_BACKGROUND, SCREEN_CHATS, SCREEN_SEARCH, SCREEN_CHAT, SCREEN_SETTINGS = 1
 MAIN_TAB = {"source_type": 5, "source_id": 1, "tab_config": 2}  # going to the chat list
 FLUSH_SEC = 3  # events go out in small batches, as the app sends them
 REACTIONS = ("👍", "❤️", "😂", "😮", "😢", "🔥")  # offered on a long press of a message
+REACTIONS_ASKED = 50  # newest messages of the chat in front whose reactions are asked
+REACTIONS_EVERY = 30  # s between those asks while the chat stays in front
 # The emoji panel of the message entry, by group; the recent ones come first.
 EMOJI = (
     ("Лица", "😀 😃 😄 😁 😆 😅 😂 🤣 😊 😇 🙂 😉 😌 😍 🥰 😘 😗 😋 😛 😜 🤪 🤗 🤔 🤨 "
@@ -1484,6 +1486,13 @@ class PyMaxLink:
         else:
             info = await self._api.messages.remove_reaction(chat_id, msg_id)
         return reactions_of(info) if info else None
+
+    async def reactions(self, chat_id, msg_ids):
+        """{msg id: [[emoji, count]]} of messages, as MAX has them now: it
+        tells a reaction only to the message's author, so the others' on
+        others' messages are asked, as the official app does on a chat."""
+        got = await self._api.messages.get_reactions(chat_id, [int(i) for i in msg_ids]) or {}
+        return {int(k): reactions_of(v)[0] for k, v in got.items()}
 
     async def media_url(self, chat_id, msg_id, item):
         """The short-lived link MAX gives for a video or a file of a message.
@@ -3529,6 +3538,9 @@ class Backend:
     async def react(self, chat_id, msg_id, emoji):
         return await self.of(chat_id).react(chat_id, msg_id, emoji)
 
+    async def reactions(self, chat_id, msg_ids):
+        return await self.of(chat_id).reactions(chat_id, msg_ids)
+
     async def rename(self, user_id, name):
         return await self.of(user_id).rename(user_id, name)
 
@@ -4158,6 +4170,17 @@ class Account:
             await self.link.delete(chat_id, stamp)
         self.chats.pop(chat_id, None)
         self.cache.drop(chat_id)
+
+    async def reactions(self, chat_id, msg_ids):
+        """Reactions of messages as the messenger has them (empty: it cannot
+        say); the cache keeps them."""
+        if not hasattr(self.link, "reactions") or not msg_ids:
+            return {}
+        self.ask()
+        got = await self.link.reactions(chat_id, msg_ids)
+        for msg_id, reactions in got.items():
+            self.cache.react(chat_id, msg_id, reactions)
+        return got
 
     async def react(self, chat_id, msg_id, emoji):
         """Put the account's reaction on a message (None takes it off);
@@ -5654,6 +5677,11 @@ class ChatView:
             if getattr(box, "ticks", None) is not None:
                 self._tick(m, box)
 
+    def newest_ids(self, count=REACTIONS_ASKED):
+        """The ids of the newest messages built (sent ones: no own yet)."""
+        ids = [i for i, (m, _box) in self.msgs.items() if isinstance(i, int) and not m.get("state")]
+        return sorted(ids)[-count:]
+
     def message(self, msg_id):
         """The message as built, or None."""
         return self.msgs[msg_id][0] if msg_id in self.msgs else None
@@ -6850,6 +6878,7 @@ class Max(Gtk.Application):
         self.clip.connect("clicked", lambda _b: self.attach())
         self.attached = []  # attachment()s waiting to be sent with the message (the open chat's)
         self.drafts = {}  # chat id -> {"text", "attached"} written there and not sent yet
+        self.react_timer = None  # watch_reactions' timer of the chat in front
         self.attachbar = Gtk.Box(spacing=10)
         self.attachbar.set_margin_start(16)
         self.attachbar.set_margin_end(16)
@@ -8760,6 +8789,7 @@ class Max(Gtk.Application):
                                        "last": "", "time": 0, "unread": 0, "stranger": True})
         s = self.about(chat_id)
         self.open_chat = chat_id
+        self.watch_reactions(chat_id)
         self.confirm.hide()
         self.naming.hide()
         self.edit.set_visible(self.chatlist.listed(chat_id))
@@ -9043,6 +9073,25 @@ class Max(Gtk.Application):
             self.chatlist.update(summary)
             self.fill_list(only={chat_id})
         return False
+
+    def watch_reactions(self, chat_id):
+        """The others' reactions on the newest messages of the chat in front,
+        asked at once and every REACTIONS_EVERY s while it stays there: MAX
+        tells a reaction only to the message's author."""
+        if self.react_timer:
+            GLib.source_remove(self.react_timer)
+        def ask():
+            view = self.views.get(chat_id)
+            if self.open_chat != chat_id or view is None:
+                self.react_timer = None
+                return False
+            if self.stack.get_visible_child_name() == "chat" and self.win.get_mapped():
+                self.backend.run(self.backend.reactions(chat_id, view.newest_ids()), lambda got, err: (
+                    None if err or not got else
+                    [self.reacted(chat_id, i, r, ...) for i, r in got.items()]))
+            return True
+        GLib.timeout_add(1500, lambda: ask() and False)  # once the history is in
+        self.react_timer = GLib.timeout_add_seconds(REACTIONS_EVERY, ask)
 
     def reacted(self, chat_id, msg_id, reactions, yours):
         """New reactions of a message (yours: ... when not known to change)."""
