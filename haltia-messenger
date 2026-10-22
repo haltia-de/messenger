@@ -94,6 +94,7 @@ offers no renaming of contacts.
 """
 import asyncio
 import base64
+import collections
 import concurrent.futures
 import dataclasses
 import functools
@@ -664,6 +665,10 @@ def initials_icon(name, key, size=64):
     return area
 
 
+FACES = collections.OrderedDict()  # (url, size) -> its round picture, the newest last
+FACES_KEPT = 200  # round pictures kept in memory: a row redrawn shows its face at once
+
+
 def round_pixbuf(pix, size):
     """A picture cut to a circle of size px, its middle kept (a face)."""
     surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, size, size)
@@ -684,15 +689,25 @@ def avatar(name, key, url, photo, size=64):
     in their place once it has come."""
     box = watched(Gtk.Box())
     box.set_valign(Gtk.Align.CENTER)
-    box.pack_start(initials_icon(name, key, size), False, False, 0)
     box.photo_url = url
+    known = FACES.get((url, size)) if url else None
+    if known is not None:
+        # Cut round before: shown at once, no initials flashing on each
+        # message that redraws the row.
+        FACES.move_to_end((url, size))
+        box.pack_start(Gtk.Image.new_from_pixbuf(known), False, False, 0)
+        return box
+    box.pack_start(initials_icon(name, key, size), False, False, 0)
 
     def came(pix):
         if pix is None or getattr(box, "gone", False):
             return
+        face = FACES[(url, size)] = round_pixbuf(pix, size)
+        while len(FACES) > FACES_KEPT:
+            FACES.popitem(last=False)  # the one shown longest ago
         for child in box.get_children():
             child.destroy()
-        image = Gtk.Image.new_from_pixbuf(round_pixbuf(pix, size))
+        image = Gtk.Image.new_from_pixbuf(face)
         box.pack_start(image, False, False, 0)
         image.show()
     if url:

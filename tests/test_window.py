@@ -1343,6 +1343,13 @@ wait(lambda: any(isinstance(w, Gtk.Image) for w in walk(app.rows[nina])), what="
 face = [w for w in walk(app.rows[nina]) if isinstance(w, Gtk.Image)][0]
 assert face.get_pixbuf().get_width() == 64 and face.get_pixbuf().get_has_alpha()  # round, as the initials were
 assert app.chatlist.get(nina)["photo"] == "https://i.oneme.ru/nina.jpg"
+# a new message redraws her row: her face at once, kept round in memory (no initials flash)
+fetched = len(hands.fetched)
+fake.incoming(nina, "Как ты?", NINA)
+wait(lambda: app.chatlist.get(nina)["last"] == "Как ты?", what="the new message")
+assert any(isinstance(w, Gtk.Image) for w in walk(app.rows[nina]))
+assert not [w for w in walk(app.rows[nina]) if isinstance(w, Gtk.DrawingArea)]  # no initials
+assert ("https://i.oneme.ru/nina.jpg", 64) in bm.FACES
 app.open(nina)
 wait(lambda: any(isinstance(w, Gtk.Image) for w in walk(app.head_face)), what="her photo in the header")
 assert app.head_face.get_visible()
