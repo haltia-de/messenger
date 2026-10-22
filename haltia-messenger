@@ -4343,6 +4343,9 @@ RECORDERS = (
 SHORTEST = 1000  # ms: a press shorter than this was not a message
 RECONNECT_FIRST = 3.0  # s before MAX is connected again after a loss; doubled each time
 RECONNECT_MOST = 60.0  # s, at most
+FIND_HINT = ("Имя — среди ваших чатов. Номер телефона — чтобы написать человеку. "
+             "Название — канал или группа.")
+FIND_PAUSE = 250  # ms after the last letter before the own chats are looked through
 TAP_RECORD = 0.6  # s: the microphone let go sooner was tapped: it records on
 VOICE_LONGEST = 600  # s: a voice this long goes by itself, the microphone stops
 
@@ -6212,6 +6215,7 @@ class Max(Gtk.Application):
         self.findb = Gtk.Button.new_from_icon_name("system-search-symbolic", Gtk.IconSize.DIALOG)
         self.findb.get_style_context().add_class("gear")
         self.findb.connect("clicked", lambda _b: self.show_find())
+        self.findb.set_tooltip_text("Найти или написать")
         self.findb.set_no_show_all(True)
         bar.pack_end(self.findb)
         # A chat's own menu: rename, pin, notifications, delete. «⋮», as in
@@ -6572,8 +6576,12 @@ class Max(Gtk.Application):
         ask = Gtk.Box(spacing=10)
         self.find_entry = Gtk.Entry()
         self.find_entry.get_style_context().add_class("input")
-        self.find_entry.set_placeholder_text("Телефон, ссылка или название")
+        self.find_entry.set_placeholder_text("Имя, номер телефона или канал")
         self.find_entry.connect("activate", lambda _e: self.find())
+        # Own chats narrow as one types, as in the phone's apps; a number, a
+        # link or channels everywhere are looked for by «Найти».
+        self.find_entry.connect("changed", lambda _e: self.find_soon())
+        self.find_timer = None
         go = Gtk.Button(label="Найти")
         go.get_style_context().add_class("send")
         go.set_can_focus(False)  # as with Отправить: keep the keyboard up
@@ -7223,14 +7231,54 @@ class Max(Gtk.Application):
     # the search: a person by phone, a channel or group by link, own chats by name
     def show_find(self):
         self.open_chat = None
-        self.title.set_text("Поиск")
+        # Here one also writes to someone new: by their number.
+        self.title.set_text("Найти или написать")
         self.sub.set_text("")
         self.back.show()
-        self.find_hint.set_text(
-            "Номер телефона — найти человека в MAX. Ссылка max.ru/… или @имя — "
-            "канал или группа. Другое — среди ваших чатов.")
+        self.find_hint.set_text(FIND_HINT)
         self.stack.set_visible_child_name("find")
         self.find_entry.grab_focus()
+
+    def find_soon(self):
+        """Own chats looked through FIND_PAUSE after the last letter: not at
+        every key, which made the keyboard lag on the tablet."""
+        if self.find_timer is not None:
+            GLib.source_remove(self.find_timer)
+        self.find_timer = GLib.timeout_add(FIND_PAUSE, self._find_now)
+
+    def _find_now(self):
+        self.find_timer = None
+        self.find_own()
+        return False
+
+    def find_own(self):
+        """As one types: own chats whose name has it, at once; the rest
+        (a person by number, channels everywhere) waits for «Найти»."""
+        text = self.find_entry.get_text().strip()
+        for child in self.found.get_children():
+            child.destroy()
+        if not text:
+            self.find_hint.set_text(FIND_HINT)
+            return
+        if phone_of(text) or link_of(text):
+            self.find_hint.set_text("Нажмите «Найти», чтобы написать человеку." if phone_of(text)
+                                    else "Нажмите «Найти».")
+            return
+        hits = self.chatlist.find(text)
+        self.find_hint.set_text("Нажмите «Найти», чтобы искать каналы и группы." if hits else
+                                "Среди ваших чатов такого нет. Нажмите «Найти», чтобы искать везде.")
+        if hits:
+            self.show_own_hits(hits)
+        self.found.show_all()
+
+    def show_own_hits(self, hits):
+        box = Gtk.ListBox()
+        box.set_selection_mode(Gtk.SelectionMode.NONE)
+        box.connect("row-activated", self.on_row)
+        for c in hits:
+            box.add(self.chat_row((c, self.chatlist.is_pinned(c["id"]),
+                                   self.chatlist.quiet(c["id"]))))
+        self.found.pack_start(box, False, False, 0)
 
     def find(self):
         text = self.find_entry.get_text().strip()
@@ -7272,13 +7320,7 @@ class Max(Gtk.Application):
         else:
             hits = self.chatlist.find(text)
             if hits:
-                box = Gtk.ListBox()
-                box.set_selection_mode(Gtk.SelectionMode.NONE)
-                box.connect("row-activated", self.on_row)
-                for c in hits:
-                    box.add(self.chat_row((c, self.chatlist.is_pinned(c["id"]),
-                                           self.chatlist.quiet(c["id"]))))
-                self.found.pack_start(box, False, False, 0)
+                self.show_own_hits(hits)
             # and channels and groups of everyone, by MAX's (Telegram's) own search
             self.find_hint.set_text("Ищу каналы и группы…")
 
