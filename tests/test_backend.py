@@ -234,6 +234,9 @@ class Events:
     async def on_delete(self, chat_id, ids):
         got.append((chat_id, ids))
 
+    async def on_reaction(self, chat_id, msg_id, reactions):
+        got.append(("reaction", chat_id, msg_id, reactions))
+
 
 async def peek_all():
     link = bm.PyMaxLink("/nonexistent")
@@ -246,9 +249,14 @@ async def peek_all():
     link._peek(SimpleNamespace(opcode=Opcode.NOTIF_MESSAGE, payload={
         "chatId": 12, "message": {"id": 8, "time": 1, "type": "USER", "sender": 3, "text": "hi"}}))
     link._peek(SimpleNamespace(opcode=Opcode.NOTIF_MSG_DELETE, payload="odd"))
+    # a reaction as MAX sends it (messageId a number, which PyMax 2.4.1 drops)
+    link._peek(SimpleNamespace(opcode=Opcode.NOTIF_MSG_REACTIONS_CHANGED, payload={
+        "chatId": 13, "messageId": 117484382192958798, "totalCount": 2,
+        "counters": [{"reaction": "❤️", "count": 1}, {"reaction": "👍", "count": 1}]}))
     await asyncio.sleep(0.05)
 asyncio.run(peek_all())
-assert got == [(11, [5, 6]), (12, [7])], got
+assert got == [(11, [5, 6]), (12, [7]),
+               ("reaction", 13, 117484382192958798, [["❤️", 1], ["👍", 1]])], got
 seen = []
 
 
