@@ -5243,7 +5243,14 @@ class ChatView:
             # neither grows nor costs a bubble per message.
             if not any(m["id"] == msg["id"] for m in self.pending_new):
                 self.pending_new.append(msg)
-            del self.pending_new[:-BUBBLES]
+            if len(self.pending_new) > BUBBLES:
+                # Too many to keep: the view starts again from the newest
+                # BUBBLES, and paging fills in above them, so none is skipped
+                # (what was built would not be continuous with them).
+                keep = self.pending_new[-BUBBLES:]
+                self._clear()
+                self.pending_new = keep
+                self.oldest = keep[0]["time"]
             self._start()
         else:
             self._append(msg)
