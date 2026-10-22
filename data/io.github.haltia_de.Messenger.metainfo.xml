@@ -20,6 +20,26 @@
   </content_rating>
   <requires><control>touch</control></requires>
   <releases>
+    <release version="2.8.0" date="2026-10-22">
+      <description>
+        <p>In a video call, the other person fills the screen and your own picture sits in a corner. Use «Включить камеру» (Turn camera on) and «Выключить камеру» (Turn camera off) to control the camera, or «Ответить без видео» (Answer without video) for an incoming call. The tablet uses its front camera.</p>
+        <p>The call screen now works like a phone: a green «Ответить» (Answer) beside a red «Отклонить» (Decline), «Выключить микрофон» (Mute microphone) and the talk’s time. Calls appear in the chat’s history, and a notification announces a missed call.</p>
+        <p>Your messages now show ✓ and ✓✓ for sent and read. A message that could not be sent stays marked «Не отправлено» (Not sent) with «Повторить» (Retry) and goes by itself when the connection returns. What you type meanwhile is never lost or sent twice.</p>
+        <p>A tap on a message opens its menu with «Копировать» (Copy) and «Переслать» (Forward). Open the chat’s menu with «⋮» or a tap on its name.</p>
+        <p>You can record a voice message with a tap on the microphone button, then send it with «Отправить» (Send).</p>
+        <p>A video plays with a tap on its preview, and a photo is enlarged with a double tap.</p>
+        <p>Other programs can send files to Messages: choose «Кому отправить?» (Who to send to?). Documents from messages open in the system’s program, PDF in Documents.</p>
+        <p>The settings used most often now come first.</p>
+        <p xml:lang="ru">В видеозвонке собеседник виден на большом экране, а ваше изображение — в углу. Камеру можно включать и выключать кнопками «Включить камеру» и «Выключить камеру», а на входящий звонок — «Ответить без видео». На планшете используется передняя камера.</p>
+        <p xml:lang="ru">Экран звонка теперь как у телефона: зелёная кнопка «Ответить» рядом с красной «Отклонить», кнопка «Выключить микрофон» и время разговора. Звонки появляются в истории чата, о пропущенном звонке приходит уведомление.</p>
+        <p xml:lang="ru">У ваших сообщений появились ✓ и ✓✓: отправлено и прочитано. Сообщение, которое не удалось отправить, остаётся с пометкой «Не отправлено» и кнопкой «Повторить» и отправляется само, когда связь вернётся. То, что вы набираете в это время, не теряется и не отправляется дважды.</p>
+        <p xml:lang="ru">Касание сообщения открывает меню с «Копировать» и «Переслать». Меню чата открывается кнопкой «⋮» или касанием его названия.</p>
+        <p xml:lang="ru">Голосовое сообщение можно записать касанием кнопки микрофона, а затем отправить кнопкой «Отправить».</p>
+        <p xml:lang="ru">Видео воспроизводится по касанию предпросмотра, фото увеличивается двойным касанием.</p>
+        <p xml:lang="ru">Другие программы могут передавать файлы в «Сообщения»: остаётся выбрать «Кому отправить?». Документы из сообщений открываются в системной программе, PDF — в «Документах».</p>
+        <p xml:lang="ru">Часто используемые настройки теперь идут первыми.</p>
+      </description>
+    </release>
     <release version="2.7.0" date="2026-10-21">
       <description>
         <p>You can now make voice calls to MAX contacts. An incoming call rings and wakes the tablet’s screen; one big button answers it. Before calling a contact, the program asks «Позвонить …?» (Call …?).</p>

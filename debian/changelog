@@ -1,3 +1,31 @@
+haltia-messenger (2.8.0) unstable; urgency=medium
+
+  * In a video call, the other person fills the screen and your own picture
+    sits in a corner. Use «Включить камеру» (Turn camera on) and «Выключить
+    камеру» (Turn camera off) to control the camera, or «Ответить без видео»
+    (Answer without video) for an incoming call. The tablet uses its front
+    camera.
+  * The call screen now works like a phone: a green «Ответить» (Answer) beside
+    a red «Отклонить» (Decline), «Выключить микрофон» (Mute microphone) and
+    the talk’s time. Calls appear in the chat’s history, and a notification
+    announces a missed call.
+  * Your messages now show ✓ and ✓✓ for sent and read. A message that could
+    not be sent stays marked «Не отправлено» (Not sent) with «Повторить»
+    (Retry) and goes by itself when the connection returns. What you type
+    meanwhile is never lost or sent twice.
+  * A tap on a message opens its menu with «Копировать» (Copy) and «Переслать»
+    (Forward). Open the chat’s menu with «⋮» or a tap on its name.
+  * You can record a voice message with a tap on the microphone button, then
+    send it with «Отправить» (Send).
+  * A video plays with a tap on its preview, and a photo is enlarged with a
+    double tap.
+  * Other programs can send files to Messages: choose «Кому отправить?» (Who
+    to send to?). Documents from messages open in the system’s program, PDF in
+    Documents.
+  * The settings used most often now come first.
+
+ -- Haltia <rensomail@gmail.com>  Thu, 22 Oct 2026 12:00:00 +0300
+
 haltia-messenger (2.7.0) unstable; urgency=medium
 
   * You can now make voice calls to MAX contacts. An incoming call rings and
