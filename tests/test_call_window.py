@@ -189,14 +189,26 @@ assert not logind.released()
 app.call_ringer.stop.assert_called()
 wait(lambda: closed)
 assert not app.call_answer.get_visible() and app.call_end.get_label() == "Завершить"
-assert "микрофон включён" in app.call_label.get_text()
+assert app.call_label.get_text() == "Разговор" and app.call_mute.get_visible()  # its time once it is known
+# The talk's time goes on; the microphone switched off is said
+app.call_changed({"id": "synthetic-invitation", "name": "Тестовый собеседник", "state": "active",
+                  "since": time.time() - 65, "muted": True})
+assert app.call_label.get_text() == "Разговор 1:05 · микрофон выключен"
+assert app.call_mute.get_label() == "Включить микрофон"
+requests.clear()
+with patch.object(app.backend, "call", side_effect=dial):
+    app.call_mute.clicked()
+    wait(lambda: len(requests) == 1)
+assert requests[0] == ("mute", {"conversation": "synthetic-invitation"})
+shot("talk.png")
+requests.clear()
 app.call_changed({"id": "synthetic-invitation", "name": "Тестовый собеседник", "state": "ended"})
 assert app.call_logind.fd is None
 wait(lambda: logind.released())
-assert app.call_end.get_label() == "Закрыть" and app.call_button.get_sensitive()
-app.call_end.clicked()
-assert not app.call_box.get_visible()
+# Straight back to the messages, nothing to close; said under the title.
+assert app.call_button.get_sensitive() and not app.call_box.get_visible()
 assert app.call_pages.get_visible_child_name() == "messages"
+assert app.sub.get_text() == "Звонок завершён"
 # A late callback for an older call cannot overwrite a new incoming call.
 app.call_changed({"id": "replacement", "name": "Другой собеседник", "state": "ringing"})
 app.call_changed({"id": "old-call", "name": "Старый собеседник", "state": "failed"})
@@ -220,8 +232,8 @@ app.call_result(None, bm.Offline())
 assert app.call_name.get_text() == "" and app.call_portrait is None
 portraits[-1](new)
 assert app.call_photo.get_storage_type() == bm.Gtk.ImageType.ICON_NAME
-assert not app.call_hint.get_visible() and app.call_end.get_label() == "Закрыть"
-app.call_end.clicked()
+assert not app.call_box.get_visible() and app.call_pages.get_visible_child_name() == "messages"
+assert app.sub.get_text().startswith("Не удалось соединиться")
 
 # A refused logind is tried once per call, not once per state/name update.
 logind.refuse = True
@@ -284,12 +296,19 @@ video_call = {"id": "video-ui", "name": "Тестовый собеседник",
               "video_invitation": True, "video": False}
 app.call_changed(video_call)
 assert "Видеозвонок" in app.call_label.get_text()
-assert app.call_audio_answer.get_visible() and app.call_end.get_visible()
+# Two buttons, as on a phone: red «Отклонить» left of green «Ответить»; the
+# camera is switched in the talk (no third «Ответить без видео»).
+assert app.call_answer.get_visible() and app.call_end.get_visible()
+assert app.call_end.get_parent() is app.call_answer.get_parent()
+assert app.call_end.get_parent().get_children() == [app.call_end, app.call_answer]
+assert app.call_answer.get_style_context().has_class("call-answer")
+assert not app.call_mute.get_visible()
+shot("video-ringing.png")
 requests.clear()
 with patch.object(app.backend, "call", side_effect=dial):
-    app.call_audio_answer.clicked()
+    app.call_answer.clicked()
     wait(lambda: len(requests) == 1)
-assert requests[0] == ("answer", {"conversation": "video-ui"})
+assert requests[0] == ("answer", {"conversation": "video-ui", "video": True})
 # A tap: the button says what was asked at once, and waits for the camera.
 app.call_changed(dict(video_call, state="active", video=False, video_wanted=True))
 assert app.call_camera.get_label() == "Выключить камеру" and not app.call_camera.get_sensitive()
@@ -331,7 +350,7 @@ with patch.object(bm, "REMOTE_STALE", .3):
     wait(lambda: app.call_remote.surface is None)
     assert not app.call_video_area.get_visible() and app.call_identity.get_visible()
 app.call_changed(dict(video_call, state="ended"))
-assert not app.call_audio_answer.get_visible() and not app.call_camera.get_visible()
+assert not app.call_mute.get_visible() and not app.call_camera.get_visible()
 video_probe.stop()
 requests.clear()
 ok("video invitation, audio-only answer, bounded frame mailbox, own preview and stale-frame rejection")
@@ -360,8 +379,7 @@ for video in (False, True):
             wait(lambda: server_id in closed)
             if outcome == "connecting":
                 app.call_changed(dict(invitation, state="ended"))
-            app.call_end.clicked()
-            assert app.call_id is None
+            assert app.call_id is None and not app.call_box.get_visible()
 reply_delay[0] = 0
 # None of the window's incoming-call notifications stays on the server
 # (the earlier parts end calls at once after ringing, before Notify answers).
