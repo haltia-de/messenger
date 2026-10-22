@@ -41,6 +41,7 @@ group = fake.group(20, "Тестовая группа")
 hands = FakeHands()
 app = bm.Max(link=fake, media=bm.Media(hands.spawn, hands.open_uri, hands.fetch, hands.player, hands.download))
 app.call_ringer = Mock()  # No real speaker, even on a host with media support.
+app.call_ringback = Mock()
 portal_awake = app.call_awake
 app.call_awake = Mock()
 logind = FakeLogind()
@@ -174,6 +175,15 @@ assert answers == [bm.Gtk.ResponseType.CANCEL] and app.chooser.hide.called
 question.destroy()
 app.chooser = None
 app.call_changed({"id": "over-a-question", "name": "Тестовый собеседник", "state": "ended"})
+# an outgoing call: the caller hears the ringback tone till it is answered or ends
+app.call_changed({"id": "out", "name": "Тестовый собеседник", "state": "dialling"})
+app.call_ringback.start.assert_called()
+app.call_ringer.start.reset_mock()
+app.call_changed({"id": "out", "name": "Тестовый собеседник", "state": "connecting"})
+app.call_ringback.stop.assert_called()
+app.call_changed({"id": "out", "name": "Тестовый собеседник", "state": "ended"})
+assert not app.call_ringer.start.called  # our own call never plays the incoming melody
+ok("an outgoing call: the ringback tone while dialling, stopped once answered")
 ok("an incoming call closes the questions and choosers over the window")
 
 app.call_changed({"id": "synthetic-invitation", "name": "Тестовый собеседник", "state": "ringing"})

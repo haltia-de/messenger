@@ -3,6 +3,7 @@
 Run inside the Messenger Flatpak when the host has no GstWebRTC/libnice.
 """
 import asyncio
+from unittest.mock import patch
 from common import load, ok
 
 bm = load()
@@ -30,6 +31,32 @@ def phone_streams():
         finally:
             pipeline.set_state(Gst.State.NULL)
     ok("call capture and playback set only the phone role as Gst.Structure without opening audio")
+
+
+async def ringback():
+    from gi.repository import GLib
+    tone = bm.Ringback(sink="fakesink name=heard sync=false")
+    with patch.object(bm, "RINGBACK", (60, 120)):
+        tone.start()
+        try:
+            assert tone.pipeline is not None and tone.on
+            level = tone.pipeline.get_by_name("level")
+            heard = []
+            deadline = asyncio.get_running_loop().time() + .5
+            while asyncio.get_running_loop().time() < deadline:
+                while GLib.MainContext.default().iteration(False):
+                    pass
+                heard.append(level.get_property("mute"))
+                await asyncio.sleep(.01)
+            assert True in heard and False in heard  # the tone, then silence, again
+            tone.start()  # once
+        finally:
+            tone.stop()
+    assert tone.pipeline is None and tone.timer is None
+    tone = bm.Ringback(sink="no_such_audio_element")
+    tone.start()
+    assert tone.pipeline is None and tone.timer is None
+    ok("ringback: 425 Hz on and off while dialling, nothing left when stopped")
 
 
 async def ringtone():
@@ -159,6 +186,7 @@ async def main():
     assert bm.calls_supported()  # the complete Flatpak media stack is advertised
     phone_streams()
     await ringtone()
+    await ringback()
     broken = bm.CallAudio.__new__(bm.CallAudio)
     try:
         broken.__init__(asyncio.get_running_loop(), lambda c: None, lambda s: None,
