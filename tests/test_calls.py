@@ -963,17 +963,22 @@ async def video_consent():
         await call.adapt_video(15, 15, idle=.5)
         assert call.audio.video_size == (320, 240, 15)
         call.audio.video_size = (480, 360, 15)
-        await call.adapt_video(15, 15, idle=.1)
+        await call.adapt_video(15, 15, idle=.1)  # one busy look: no step (a camera starting is busy)
+        assert call.audio.video_size == (480, 360, 15)
+        await call.adapt_video(15, 15, idle=.1)  # two in a row: a step down
         assert call.audio.video_size == (320, 240, 15) and call.video
         idle, total = bm.system_cpu()
         assert 0 <= idle <= total
         await call.adapt_video(3, 15)
-        assert call.audio.video_size == (160,120,10) and call.video
-        assert bm.VIDEO_START[0] == (160, 120, 10)  # the next call starts at what kept up
         await call.adapt_video(3, 15)
-        assert not call.video and not call.audio.camera and call.state == "active"
-        assert not call.video_wanted  # turned off: adaptation never turns it on again
+        assert call.audio.video_size == (160,120,10) and call.video
+        assert bm.VIDEO_START[0] == (320, 240, 15)  # the next call starts no smaller than 320×240
+        await call.adapt_video(3, 15)
+        await call.adapt_video(3, 15)
+        # at its smallest the picture stays: the program never switches the camera off
+        assert call.video and call.audio.camera and call.video_wanted and not call.video_error
         bm.VIDEO_START[0] = bm.VIDEO_SIZES[1]
+        await switch(False)
         await call.adapt_video(0, 15)
         assert not call.video
         call.audio.fail = True

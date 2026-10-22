@@ -2151,6 +2151,8 @@ VIDEO_BITRATE = {640: 900000, 480: 600000, 320: 350000, 160: 150000}  # bit/s fo
 # 640×480 kept two of the B8000-H's four cores busy (10:40, a live call): a
 # call starts at 480×360, and at the size that last kept up after a step down.
 VIDEO_START = [VIDEO_SIZES[1]]
+ADAPT_TIMES = 2  # looks in a row the tablet must be behind before a step down
+ADAPT_SETTLE = 15  # s after a camera starts before its load is judged
 ADAPT_IDLE = .15  # the whole system idle less than this over a look: overloaded too
 ADAPT_EVERY = 5  # s between looks at whether the encoder keeps up
 ADAPT_KEPT = .7  # the share of the camera's frames the encoder keeps up with
@@ -3143,25 +3145,35 @@ class VoiceCall:
             return
         busy = idle is not None and idle < ADAPT_IDLE
         if encoded >= delivered * ADAPT_KEPT and not busy:
+            self.overloaded = 0
             return
+        # Only a load that lasts counts: ADAPT_TIMES looks in a row (the first
+        # seconds of a camera starting are busy by themselves).
+        self.overloaded = getattr(self, "overloaded", 0) + 1
+        if self.overloaded < ADAPT_TIMES:
+            return
+        self.overloaded = 0
         smaller = [v for v in VIDEO_SIZES if v[0] < self.audio.video_size[0]]
-        if smaller:
-            self.audio.video_size = VIDEO_START[0] = smaller[0]  # the next call starts there
-            log_line("voice call: video %dx%d (%s)" % (smaller[0][0], smaller[0][1],
-                                                         "processors busy" if busy else "encoder behind"))
-            await self.camera(True)
-        else:
-            self.video_wanted = False
-            log_line("voice call: camera off, the tablet cannot keep up")
-            await self.camera(False)
-            self.video_error = "Видео выключено: устройству тяжело. Разговор продолжается."
-            self.show(self.state)
+        if not smaller:
+            # The smallest picture stays: the camera is never switched off by
+            # the program, only by the person (it went off 5–10 s after its
+            # switch on the tablet, 22 October 2026).
+            log_line("voice call: video at its smallest, still behind")
+            return
+        self.audio.video_size = smaller[0]
+        # The next call starts no smaller than 320×240: one heavy moment is no rule.
+        VIDEO_START[0] = max(smaller[0], VIDEO_SIZES[-2], key=lambda v: v[0])
+        log_line("voice call: video %dx%d (%s)" % (smaller[0][0], smaller[0][1],
+                                                     "processors busy" if busy else "encoder behind"))
+        await self.camera(True)
 
     async def quality(self):
         """Every ADAPT_EVERY s whether the encoder keeps up (a too big picture
         steps down within seconds, not a minute); the counters in the log
         every 15 s."""
         previous = None
+        seen_generation, settle_until = None, 0.0
+        loop_time = asyncio.get_running_loop().time
         ticks = 0
         while not self.closed:
             await asyncio.sleep(ADAPT_EVERY)
@@ -3170,7 +3182,10 @@ class VoiceCall:
                 if self.video and hasattr(self.audio, "video_frames"):
                     current = (self.audio.video_frames, self.audio.video_pushed,
                                self.audio.video_generation, system_cpu())
-                    if previous is not None and previous[2] == current[2]:
+                    started = self.audio.video_generation != seen_generation
+                    if started:  # a camera (re)started: its first seconds are not judged
+                        seen_generation, settle_until = current[2], loop_time() + ADAPT_SETTLE
+                    if previous is not None and previous[2] == current[2] and loop_time() >= settle_until:
                         idle = None
                         if current[3] and previous[3] and current[3][1] > previous[3][1]:
                             idle = (current[3][0] - previous[3][0]) / (current[3][1] - previous[3][1])
