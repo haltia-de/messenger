@@ -2143,6 +2143,12 @@ ADAPT_EVERY = 5  # s between looks at whether the encoder keeps up
 ADAPT_KEPT = .7  # the share of the camera's frames the encoder keeps up with
 
 
+def calls_allowed(video):
+    """Are voice (video False) or video calls switched on in the settings?
+    Video calls are off by default for now (video_calls, #55)."""
+    return video_calls() if video else SETTINGS.get_bool("calls_audio", True)
+
+
 def system_cpu():
     """(idle, total) jiffies of all processors since boot, or None."""
     try:
@@ -2937,8 +2943,13 @@ class VoiceCall:
                     elif len(self.candidates) < 256:
                         self.candidates.append(data["candidate"])
         elif name == "media-settings-changed":
-            if self.participant is not None and str(event.get("participantId")) == str(self.participant):
-                said = event.get("mediaSettings") or {}
+            said = event.get("mediaSettings") or {}
+            ours = self.participant is not None and str(event.get("participantId")) == str(self.participant)
+            # Only booleans and whether it is the peer: what the peer switched (the
+            # microphone was not seen on the tablet; this says whether it came).
+            log_line("voice call: peer media audio=%s video=%s peer=%s" % (
+                said.get("isAudioEnabled"), said.get("isVideoEnabled"), ours))
+            if ours:
                 self.remote_video = bool(said.get("isVideoEnabled"))
                 self.remote_audio = said.get("isAudioEnabled") is not False
                 self.show(self.state)
@@ -3678,9 +3689,14 @@ class Account:
             finally:
                 self.declining.discard(conversation)
             return
-        # «Видеозвонки» off: a video call rings and is answered by voice.
-        call = self.new_call(conversation, peer, True,
-                             video=payload.get("type") == "VIDEO" and video_calls())
+        video = payload.get("type") == "VIDEO"
+        if video and not video_calls() and calls_allowed(False):
+            video = False  # «Видеозвонки» off: it rings and is answered by voice
+        if not calls_allowed(video):
+            # Switched off here: not rung, not refused; MAX rings the other devices.
+            log_line("voice call: %s calls are off, not shown" % ("video" if video else "voice"))
+            return
+        call = self.new_call(conversation, peer, True, video=video)
         call.start(params)
         # Fetch a stranger's name/photo without delaying the invitation or
         # its signaling. A late lookup must not revive an ended call.
@@ -6323,6 +6339,7 @@ class Max(Gtk.Application):
         self.mpris = None  # what plays, told to the desktop (Mpris)
         self.keep_sound = SETTINGS.get_bool("keep_sound", False)  # plays on outside its chat
         self.voice_on = SETTINGS.get_bool("voice", True)  # the microphone button: voice messages sent
+        self.voice_ask = SETTINGS.get_bool("voice_ask", True)  # a press asks before recording
         self.held = 0.0  # when a row was long-pressed: its release opens nothing
         self.open_chat = None
         self.views = {}  # chat id -> its ChatView, most recently used last
@@ -6761,7 +6778,10 @@ class Max(Gtk.Application):
         self.mic.hold = Gtk.GestureMultiPress.new(self.mic)
         # Held: let go and it goes. Tapped: it records on without a finger
         # (a tremor makes holding hard) till «Отправить» or «Отмена».
-        self.mic.hold.connect("pressed", lambda *_a: self.record_start())
+        # With «Спрашивать перед записью» (on by default) a press asks first and
+        # records on without the finger: a touch by chance records nothing.
+        self.mic.hold.connect("pressed", lambda *_a: (
+            not (self.voice_ask and not self.recorder.recording()) and self.record_start()))
         self.mic.hold.connect("released", lambda *_a: self.record_released())
         self.mic.hold.connect("cancel", lambda *_a: self.record_locked or self.record_stop(False))
         self.record_label = label("", "recording")
@@ -6961,6 +6981,14 @@ class Max(Gtk.Application):
             "Камера в звонках и кнопка видеозвонка. Пока выключено: долгий видеозвонок "
             "может перезагрузить планшет (ошибка в драйвере Wi-Fi). Выключено — звонки "
             "только голосом, входящий видеозвонок принимается без видео.")
+        voice_ask = self.setting(
+            "Спрашивать перед записью голосового", self.voice_ask, self.on_voice_ask,
+            "Нажатие на микрофон сначала спрашивает «Записать голосовое сообщение?»: "
+            "случайное касание ничего не записывает. Если выключить, запись начинается сразу.")
+        calls_audio = self.setting(
+            "Аудиозвонки", calls_allowed(False), lambda on: self.on_calls("calls_audio", on),
+            "Кнопка «Позвонить» в чате и входящие звонки. Если выключить, кнопки нет, "
+            "а входящий звонок здесь не звонит (звонит на других устройствах).")
         keep = self.setting(
             "Звук играет и вне чата", self.keep_sound, self.on_keep_sound,
             "Голосовое или аудиофайл продолжают играть в других чатах, в списке и "
@@ -6974,7 +7002,8 @@ class Max(Gtk.Application):
             "и имён: так она меньше отличается от приложения, и это может снизить риск "
             "блокировки аккаунта. Если выключить, сервер не получит ничего из этого.")
         self.settings_cards = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=20)
-        for part in (label("Основное", "big"), buzz, ring, calls_video, voice, folder,
+        for part in (label("Основное", "big"), buzz, ring, calls_audio, calls_video, voice, voice_ask,
+                     folder,
                      label("Мессенджеры", "big"), self.settings_cards,
                      label("Дополнительно", "big"), contacts_only, self.invites_card,
                      confirm, keep, telemetry):
@@ -8223,9 +8252,17 @@ class Max(Gtk.Application):
         return dialogs.ask(self.win, question, yes)
 
     def on_video_calls(self, on):
-        save_setting("calls_video", on)
-        if self.open_chat is not None and self.stack.get_visible_child_name() == "chat":
-            self.video_button.set_visible(self.call_button.get_visible() and video_on())
+        self.on_calls("calls_video", on)
+
+    def on_voice_ask(self, on):
+        self.voice_ask = on
+        save_setting("voice_ask", on)
+
+    def on_calls(self, key, on):
+        save_setting(key, on)
+        if self.open_chat is not None:
+            self.show_call_buttons(self.open_chat, self.about(self.open_chat),
+                                   self.stack.get_visible_child_name() == "chat")
 
     def on_voice(self, on):
         self.voice_on = on
@@ -8254,11 +8291,7 @@ class Max(Gtk.Application):
         self.edit.set_visible(page == "chat" and self.chatlist.listed(self.open_chat))
         self.viewer_save.set_visible(page == "photo")
         summary = self.about(self.open_chat) if self.open_chat is not None else {}
-        self.call_button.set_visible(page == "chat" and summary.get("type") == "DIALOG"
-                                     and isinstance(self.open_chat, int)
-                                     and summary.get("peer") is not None
-                                     and self.backend.can("calls", self.open_chat))
-        self.video_button.set_visible(self.call_button.get_visible() and video_on())
+        self.show_call_buttons(self.open_chat, summary, page == "chat")
         if page != "chat":
             self.record_stop(False)  # a voice is said in its chat, or not at all
         if page not in ("chat", "photo", "forward") and not self.keep_sound:
@@ -8293,6 +8326,14 @@ class Max(Gtk.Application):
                 dialog.response(Gtk.ResponseType.CANCEL)
         if self.chooser is not None:
             self.chooser.hide()
+
+    def show_call_buttons(self, chat_id, summary, shown):
+        """The header's «Позвонить» and «Видеозвонок», each only while its
+        kind of call is switched on in the settings."""
+        dialog = (shown and summary.get("type") == "DIALOG" and isinstance(chat_id, int)
+                  and summary.get("peer") is not None and self.backend.can("calls", chat_id))
+        self.call_button.set_visible(dialog and calls_allowed(False))
+        self.video_button.set_visible(dialog and calls_allowed(True) and video_supported())
 
     def moved(self):
         """Tell telemetry which screen is in front."""
@@ -8614,10 +8655,7 @@ class Max(Gtk.Application):
         self.confirm.hide()
         self.naming.hide()
         self.edit.set_visible(self.chatlist.listed(chat_id))
-        self.call_button.set_visible(s.get("type") == "DIALOG" and isinstance(chat_id, int)
-                                     and s.get("peer") is not None
-                                     and self.backend.can("calls", chat_id))
-        self.video_button.set_visible(self.call_button.get_visible() and video_on())
+        self.show_call_buttons(chat_id, s, True)
         if self.playing and self.playing_chat != chat_id and not self.keep_sound:
             self.stop_sound()  # another chat in front: the sound of the last one stops
         GLib.idle_add(lambda: self.show_nowplay() and False)
@@ -9202,7 +9240,16 @@ class Max(Gtk.Application):
         self.record_timer = GLib.timeout_add(250, self.show_recording)
 
     def record_released(self):
-        """The finger off the microphone: a hold sends, a tap records on."""
+        """The finger off the microphone: a hold sends, a tap records on.
+        Asked first (voice_ask): a yes records on till «Отправить»."""
+        if self.voice_ask and not self.recorder.recording():
+            if dialogs.ask(self.win, "Записать голосовое сообщение?", "Записать"):
+                self.record_start()
+                if self.recorder.recording():
+                    self.record_locked = True
+                    self.record_cancel.show()
+                    self.show_recording()
+            return
         if not self.recorder.recording() or self.record_locked:
             return
         if time.monotonic() - self.record_began < TAP_RECORD:

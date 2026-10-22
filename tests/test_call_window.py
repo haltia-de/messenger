@@ -94,6 +94,14 @@ fake.can = fake.can | {"calls"}
 app.open(group)
 assert not app.call_button.get_visible()
 app.open(dialog)
+# Voice and video calls switched off apart in the settings: their buttons go
+app.on_calls("calls_audio", False)
+assert not app.call_button.get_visible()
+app.on_calls("calls_audio", True)
+app.on_calls("calls_video", False)
+assert app.call_button.get_visible() and not app.video_button.get_visible()
+app.on_calls("calls_video", True)
+assert app.call_button.get_visible()
 # Dialling always asks, including when file/forward confirmations are off.
 requests, questions = [], []
 async def dial(action, **kwargs):
