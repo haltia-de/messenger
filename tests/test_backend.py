@@ -468,6 +468,14 @@ if shutil.which("ffmpeg"):
                     "-ac", "1", "-c:a", "libopus", tone], check=True)
     levels = bm.voice_wave(tone)
     assert len(levels) == 80 and max(levels) > 0 and max(levels) <= 127
+    # every 8th sample gives the levels of every sample, to within noise
+    pcm = subprocess.run(["ffmpeg", "-nostdin", "-loglevel", "error", "-i", tone, "-ac", "1", "-ar", "8000",
+                          "-f", "s16le", "-"], capture_output=True, check=True).stdout
+    every = memoryview(pcm[:len(pcm) // 2 * 2]).cast("h")
+    n = len(every)
+    full = [min(127, int(sum(abs(x) for x in every[i * n // 80:(i + 1) * n // 80])
+                         / max(1, (i + 1) * n // 80 - i * n // 80) / 32768 * 800)) for i in range(80)]
+    assert all(abs(a - b) <= 3 for a, b in zip(levels, full)), (list(levels), full)
 assert bm.attachment_words([bm.attachment("/x/a.png"), bm.attachment("/x/b.pdf")]) == "Фото, файл «b.pdf»"
 ok("PyMax's objects as the link's own")
 
@@ -864,4 +872,25 @@ c.add(8, [{"id": 1, "time": 1}])
 c.drop(8)  # dropped before its write: nothing comes back on disk
 time.sleep(0.15)
 assert not os.path.exists(c._path(8))
+# the disk written without the lock: a read meanwhile does not wait for it
+c.add(9, [{"id": 1, "time": 1}])
+c.write_lock.acquire()  # a slow disk, say
+writing = threading.Thread(target=c.flush)
+writing.start()
+time.sleep(0.05)
+began = time.monotonic()
+assert c.read(9) == [{"id": 1, "time": 1}] and time.monotonic() - began < 0.05
+c.write_lock.release()
+writing.join()
+assert os.path.exists(c._path(9))
+# a chat dropped while its write was on its way: the drop wins
+c.add(10, [{"id": 1, "time": 1}])
+real_fdopen = bm.os.fdopen
+def dropping(fd, *a, **k):
+    c.drop(10)  # comes in while the text goes to disk
+    return real_fdopen(fd, *a, **k)
+from unittest.mock import patch  # noqa: E402
+with patch.object(bm.os, "fdopen", dropping):
+    c.flush()
+assert not os.path.exists(c._path(10)) and not os.path.exists(c._path(10) + ".new")
 ok("the message cache")

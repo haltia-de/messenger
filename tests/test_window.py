@@ -201,6 +201,14 @@ assert not app.win.get_visible() and app.backend.accounts["max"].me
 app.activate()
 spin(0.2)
 assert app.win.get_visible()
+# «back» to the list re-places only rows that changed: no sort of all of them
+from unittest.mock import patch  # noqa: E402
+with patch.object(app.list, "invalidate_sort") as resort:
+    app.open(mama)
+    spin(0.1)
+    app.show_list()
+    spin(0.1)
+assert not resort.called and rows() == [dacha, mama]
 ok("list")
 
 # --- the settings: what is changed often first, the rest under «Дополнительно» -------------
