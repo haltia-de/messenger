@@ -869,6 +869,9 @@ async def video_consent():
         await socket.notify("media-settings-changed", participantId="remote", mediaSettings={"isVideoEnabled": True})
         await until(lambda: call.remote_video is True)
         assert not call.video  # A peer cannot turn our camera on.
+        await socket.notify("media-settings-changed", participantId="remote",
+                            mediaSettings={"isVideoEnabled": False, "isAudioEnabled": False})
+        await until(lambda: call.remote_audio is False and call.remote_video is False)
         # Opening the camera blocks its own thread, never the loop; two quick
         # taps are folded: on, then off, and it ends off.
         opened, release = threading.Event(), threading.Event()

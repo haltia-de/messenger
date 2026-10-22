@@ -457,6 +457,17 @@ label.emoji-group { font-size: 18px; color: #77767b; }
 label.play-over { font-size: 44px; color: #ffffff; background-color: rgba(0, 0, 0, 0.55);
                   border-radius: 40px; padding: 4px 22px 4px 28px; }
 label.qr-step { font-size: 28px; color: #2e3436; }
+button.call-switch { background-image: none; background-color: #f2f2f0; border: 2px solid #c0bfbc;
+                     transition: none; }  /* the new state at once, not fading over 200 ms */
+button.call-switch.on { background-color: #c4dcf7; border-color: #3584e4; }
+button.call-switch.alert { background-color: #f6d5d1; border-color: #e01b24; }
+button.call-switch.alert label.switch-state { color: #a51d2d; }
+label.switch-state { font-size: 28px; font-weight: bold; color: #2e3436; }
+label.switch-action { font-size: 20px; color: #5e5c64; }
+label.peer-note { font-size: 26px; color: #a51d2d; background-color: #f6d5d1;
+                  border-radius: 14px; padding: 10px 16px; }
+label.peer-off { font-size: 28px; color: #ffffff; background-color: rgba(0, 0, 0, 0.6);
+                 border-radius: 14px; padding: 12px 20px; }
 label.call-icon { font-size: 34px; }
 label.call-status { font-size: 22px; color: #5e5c64; }
 label.call-status.taken { color: #26a269; }
@@ -717,6 +728,34 @@ def avatar(name, key, url, photo, size=64):
     if url:
         photo(url, came, size=size * 2, owner=box)
     return box
+
+
+SWITCHES = {  # what a call's switch says: (icon, state, what a tap does), on and off
+    "mic": (("audio-input-microphone-symbolic", "Микрофон включён", "нажмите — выключить"),
+            ("microphone-disabled-symbolic", "Микрофон выключен", "нажмите — включить")),
+    "camera": (("camera-video-symbolic", "Камера включена", "нажмите — выключить"),
+               ("camera-disabled-symbolic", "Камера выключена", "нажмите — включить"))}
+
+
+def set_switch(button, what, on):
+    """A call's microphone or camera button as a switch that shows its state:
+    an icon (crossed when off), the state in large letters, what a tap does,
+    and its colour (blue on; the microphone off red, as it matters)."""
+    icon, state, action = SWITCHES[what][0 if on else 1]
+    if button.get_child() is not None:
+        button.remove(button.get_child())
+    row = Gtk.Box(spacing=16, halign=Gtk.Align.CENTER)
+    row.pack_start(Gtk.Image.new_from_icon_name(icon, Gtk.IconSize.DND), False, False, 0)
+    words = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+    words.pack_start(label(state, "switch-state"), False, False, 0)
+    words.pack_start(label(action, "switch-action"), False, False, 0)
+    row.pack_start(words, False, False, 0)
+    button.add(row)
+    row.show_all()
+    style = button.get_style_context()
+    (style.add_class if on else style.remove_class)("on")
+    (style.add_class if not on and what == "mic" else style.remove_class)("alert")
+    button.state_text, button.on = state, on  # for the tests
 
 
 def phone_of(text):
@@ -2078,6 +2117,10 @@ REMOTE_STALE = 3.0  # s without the peer's frames: their video is gone
 REMOTE_MAX = 480  # px, the longer side of the peer's frames handed to GTK
 VIDEO_CAPS = ("application/x-rtp,media=video,encoding-name=VP8,payload=%d,clock-rate=90000,"
               "max-fs=(string)1200,max-fr=(string)15")  # RFC 7741: what we can take, ~480x640 at 15/s
+# What the camera sends, best first; a tablet that cannot keep up steps down
+# (adapt_video), the last step off. 320×240 looked much worse than «Камера».
+VIDEO_SIZES = ((640, 480, 15), (320, 240, 15), (160, 120, 10))
+VIDEO_BITRATE = {640: 900000, 320: 350000, 160: 150000}  # bit/s for each width
 ADAPT_KEPT = .7  # the share of the camera's frames the encoder keeps up with
 
 
@@ -2186,7 +2229,7 @@ class CallAudio:
         self.video_pushed = 0  # the camera's frames handed to the encoder
         self.remote_bin = None  # the peer's video decoding, once it comes
         self.failed_bins = []  # video branches given up: their late errors are not the call's
-        self.video_size = (320, 240, 15)
+        self.video_size = VIDEO_SIZES[0]
         try:
             # RFC 7587 section 7 requires /2 in Opus SDP even for mono.
             # Keep it in RTP caps: without it the MAX peer never answers.
@@ -2503,11 +2546,14 @@ class CallAudio:
             rate = camera.get_by_name("rate")
             if source.get_factory().get_name() == "libcamerasrc":
                 linked = source.link_filtered(rate, self.Gst.Caps.from_string(
-                    "video/x-raw,width=320,height=240"))
+                    "video/x-raw,width=%d,height=%d" % (width, height)))
             else:
                 linked = source.link(rate)
             if not linked:
                 raise RuntimeError("camera format unavailable")
+            encoder = self.video_bin.get_by_name("video_encoder") if hasattr(self.video_bin, "get_by_name") else None
+            if encoder is not None:  # as many bits as the picture's size wants
+                encoder.set_property("target-bitrate", VIDEO_BITRATE.get(width, 350000))
             generation = self.video_generation
             camera.get_by_name("send").connect("new-sample", self._send_video, generation)
             camera.get_by_name("preview").connect("new-sample", self._frame_sample, True, generation)
@@ -2677,6 +2723,7 @@ class VoiceCall:
         self.since = None  # time.time() the talk began (active)
         self.video_error = None
         self.remote_video = None
+        self.remote_audio = None  # the peer's microphone, as it says (False: off)
         self.frame = None
         self.accepted = False
         self.sequence = 0
@@ -2855,7 +2902,9 @@ class VoiceCall:
                         self.candidates.append(data["candidate"])
         elif name == "media-settings-changed":
             if self.participant is not None and str(event.get("participantId")) == str(self.participant):
-                self.remote_video = bool((event.get("mediaSettings") or {}).get("isVideoEnabled"))
+                said = event.get("mediaSettings") or {}
+                self.remote_video = bool(said.get("isVideoEnabled"))
+                self.remote_audio = said.get("isAudioEnabled") is not False
                 self.show(self.state)
         elif name in ("hungup", "closed-conversation"):
             await self.end(remote=True, remote_reason=event.get("reason"))
@@ -2988,8 +3037,9 @@ class VoiceCall:
         A camera slow in dim light delivers fewer frames: that is no load."""
         if not self.video_wanted or not self.video or delivered <= 0 or encoded >= delivered * ADAPT_KEPT:
             return
-        if self.audio.video_size != (160, 120, 10):
-            self.audio.video_size = (160, 120, 10)
+        smaller = [v for v in VIDEO_SIZES if v[0] < self.audio.video_size[0]]
+        if smaller:
+            self.audio.video_size = smaller[0]
             await self.camera(True)
         else:
             self.video_wanted = False
@@ -3520,6 +3570,7 @@ class Account:
                     "photo": self.portraits.get(call.peer), "state": state,
                     "video_invitation": call.video_invitation, "video": call.video,
                     "video_error": call.video_error, "remote_video": call.remote_video,
+                    "remote_audio": call.remote_audio,
                     "video_wanted": call.video_wanted,
                     "muted": getattr(call, "muted", False), "since": getattr(call, "since", None)})
                 if call.closed:
@@ -6411,15 +6462,19 @@ class Max(Gtk.Application):
         for button in (self.call_answer, self.call_end):
             button.get_style_context().add_class("call-control")
         self.call_answer.connect("clicked", lambda _b: self.call_action("answer", video=self.call_video_invitation))
-        self.call_mute = Gtk.Button(label="Выключить микрофон")
+        self.call_mute = Gtk.Button()
         self.call_mute.get_style_context().add_class("call-control")
+        self.call_mute.get_style_context().add_class("call-switch")
         self.call_mute.connect("clicked", lambda _b: self.call_action("mute"))
         self.call_since = None  # the talk's start, for its time on the screen
         self.call_clock = None
         self.call_muted = False
         self.call_note = None
-        self.call_camera = Gtk.Button(label="Включить камеру")
+        self.call_camera = Gtk.Button()
         self.call_camera.get_style_context().add_class("call-control")
+        self.call_camera.get_style_context().add_class("call-switch")
+        set_switch(self.call_mute, "mic", True)
+        set_switch(self.call_camera, "camera", False)
         self.call_camera.connect("clicked", lambda _b: self.call_action("camera"))
         self.call_end.connect("clicked", lambda _b: self.call_action("end"))
         identity = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
@@ -6440,8 +6495,11 @@ class Max(Gtk.Application):
         self.call_remote.set_vexpand(True)
         self.call_video_area.add(self.call_remote)
         self.call_own_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        # The own picture small at the bottom right, as on a phone.
         self.call_own_box.set_halign(Gtk.Align.END)
-        self.call_own_box.set_valign(Gtk.Align.START)
+        self.call_own_box.set_valign(Gtk.Align.END)
+        self.call_own_box.set_margin_end(12)
+        self.call_own_box.set_margin_bottom(12)
         self.call_own = CallPicture(mirror=True)
         self.call_own.set_size_request(128, 96)
         self.call_own_box.pack_start(self.call_own, False, False, 0)
@@ -6450,11 +6508,21 @@ class Max(Gtk.Application):
         self.call_own_box.pack_start(own_label, False, False, 0)
         self.call_own_box.show_all()
         self.call_video_area.add_overlay(self.call_own_box)
-        self.call_video_caption = Gtk.Label(wrap=True, halign=Gtk.Align.CENTER, valign=Gtk.Align.END)
+        # The peer's camera off: said on its picture, not a black screen.
+        self.call_remote_off = label("Собеседник выключил камеру", "peer-off", xalign=0.5, wrap=True)
+        self.call_remote_off.set_halign(Gtk.Align.CENTER)
+        self.call_remote_off.set_valign(Gtk.Align.CENTER)
+        self.call_remote_off.set_no_show_all(True)
+        self.call_video_area.add_overlay(self.call_remote_off)
+        self.call_video_caption = Gtk.Label(wrap=True, halign=Gtk.Align.CENTER, valign=Gtk.Align.START)
         self.call_video_caption.get_style_context().add_class("call-video-caption")
         self.call_video_area.add_overlay(self.call_video_caption)
         self.call_video_caption.show()
         self.call_remote.show()
+        # What the peer switched off: a band above the picture or the portrait.
+        self.call_peer = label("", "peer-note", xalign=0.5, wrap=True)
+        self.call_peer.set_no_show_all(True)
+        self.call_box.pack_start(self.call_peer, False, False, 0)
         self.call_box.pack_start(self.call_video_area, True, True, 0)
         self.call_box.pack_start(identity_scroll, True, True, 0)
         # As on a phone: in the talk the microphone and the camera side by side,
@@ -8278,10 +8346,12 @@ class Max(Gtk.Application):
         return False
 
     def show_call_video(self):
-        """The video area while there is a picture to show, else the portrait."""
+        """The video area while there is a picture to show, else the portrait;
+        the peer's picture missing while the own shows is said, not black."""
         shown = self.call_remote.surface is not None or self.call_own.surface is not None
         self.call_video_area.set_visible(shown)
         self.call_identity.set_visible(not shown)
+        self.call_remote_off.set_visible(shown and self.call_remote.surface is None)
 
     def call_changed(self, call):
         state = call["state"]
@@ -8300,18 +8370,26 @@ class Max(Gtk.Application):
         self.call_muted = bool(call.get("muted"))
         self.call_note = call.get("video_error")  # said instead of the talk's time
         self.call_mute.set_visible(state == "active")
-        self.call_mute.set_label("Включить микрофон" if self.call_muted else "Выключить микрофон")
+        set_switch(self.call_mute, "mic", not self.call_muted)
         self.call_since = call.get("since") if state == "active" else None
         if state == "active" and self.call_clock is None:
             self.call_clock = GLib.timeout_add_seconds(1, self.call_tick)
         self.call_camera.set_visible(state == "active" and video_supported())
         wanted = call.get("video_wanted", self.call_video)
-        self.call_camera.set_label("Выключить камеру" if wanted else "Включить камеру")
+        set_switch(self.call_camera, "camera", wanted)
         # While the camera follows a tap, a second tap is not taken for another.
         self.call_camera.set_sensitive(wanted == self.call_video)
         self.call_own_box.set_visible(self.call_video)
         if call.get("remote_video") is False:
             self.call_remote.picture(None)  # said so: no need to wait for frames to stop
+        live = state in ("connecting", "active")
+        notes = []
+        if live and call.get("remote_audio") is False:
+            notes.append("🔇 Собеседник выключил микрофон")
+        if live and call.get("remote_video") is False and (self.call_video or call.get("video_invitation")):
+            notes.append("📷 Собеседник выключил камеру")
+        self.call_peer.set_text("\n".join(notes))
+        self.call_peer.set_visible(bool(notes))
         if not self.call_video:
             self.call_own.picture(None)
         if terminal or state in ("ringing", "dialling"):

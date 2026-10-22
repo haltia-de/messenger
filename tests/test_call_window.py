@@ -207,7 +207,7 @@ assert app.call_label.get_text() == "Разговор" and app.call_mute.get_vis
 app.call_changed({"id": "synthetic-invitation", "name": "Тестовый собеседник", "state": "active",
                   "since": time.time() - 65, "muted": True})
 assert app.call_label.get_text() == "Разговор 1:05 · микрофон выключен"
-assert app.call_mute.get_label() == "Включить микрофон"
+assert app.call_mute.state_text == "Микрофон выключен" and app.call_mute.get_style_context().has_class("alert")
 requests.clear()
 with patch.object(app.backend, "call", side_effect=dial):
     app.call_mute.clicked()
@@ -324,7 +324,7 @@ with patch.object(app.backend, "call", side_effect=dial):
 assert requests[0] == ("answer", {"conversation": "video-ui", "video": True})
 # A tap: the button says what was asked at once, and waits for the camera.
 app.call_changed(dict(video_call, state="active", video=False, video_wanted=True))
-assert app.call_camera.get_label() == "Выключить камеру" and not app.call_camera.get_sensitive()
+assert app.call_camera.state_text == "Камера включена" and not app.call_camera.get_sensitive()
 app.call_changed(dict(video_call, state="active", video=True))
 assert app.call_camera.get_sensitive()
 # Feed the mailbox from a worker just like Gst: GTK drawing happens later.
@@ -362,6 +362,19 @@ with patch.object(bm, "REMOTE_STALE", .3):
     assert (app.call_remote.surface.get_width(), app.call_remote.surface.get_height()) == (24, 32)
     wait(lambda: app.call_remote.surface is None)
     assert not app.call_video_area.get_visible() and app.call_identity.get_visible()
+# What the peer switched off is said: their microphone in a band, their
+# camera on their (black) picture; the own picture small at the bottom right.
+app.call_changed(dict(video_call, state="active", video=True, remote_video=False, remote_audio=False))
+assert app.call_peer.get_visible()
+assert "микрофон" in app.call_peer.get_text() and "камеру" in app.call_peer.get_text()
+app.call_frame("video-ui", True, (16, 12, bytes(4 * 16 * 12)))
+wait(lambda: app.call_own.surface is not None)
+assert app.call_video_area.get_visible() and app.call_remote_off.get_visible()
+assert app.call_own_box.get_valign() == bm.Gtk.Align.END and app.call_own_box.get_halign() == bm.Gtk.Align.END
+assert app.call_camera.state_text == "Камера включена" and app.call_camera.get_style_context().has_class("on")
+shot("peer-off.png")
+app.call_changed(dict(video_call, state="active", video=True, remote_video=True, remote_audio=True))
+assert not app.call_peer.get_visible()
 app.call_changed(dict(video_call, state="ended"))
 assert not app.call_mute.get_visible() and not app.call_camera.get_visible()
 video_probe.stop()
