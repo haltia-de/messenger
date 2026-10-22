@@ -1,5 +1,23 @@
 # Что нового · What's new
 
+## 2.9.2 (2026-10-22)
+
+### Русский
+
+В звонке камера запрашивает правильный размер, поэтому больше не гаснет сама.
+
+Для входящих звонков звучит своя мелодия.
+
+Повторное касание кнопки звонка в течение секунды не принимается.
+
+### English
+
+The camera in a call asks for the right size, so it no longer goes dark by itself.
+
+Incoming calls now play our own melody.
+
+A second tap on a call button within a second is ignored.
+
 ## 2.9.1 (2026-10-22)
 
 ### Русский

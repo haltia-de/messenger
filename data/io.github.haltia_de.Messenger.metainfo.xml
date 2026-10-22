@@ -20,6 +20,16 @@
   </content_rating>
   <requires><control>touch</control></requires>
   <releases>
+    <release version="2.9.2" date="2026-10-22">
+      <description>
+        <p>The camera in a call asks for the right size, so it no longer goes dark by itself.</p>
+        <p>Incoming calls now play our own melody.</p>
+        <p>A second tap on a call button within a second is ignored.</p>
+        <p xml:lang="ru">В звонке камера запрашивает правильный размер, поэтому больше не гаснет сама.</p>
+        <p xml:lang="ru">Для входящих звонков звучит своя мелодия.</p>
+        <p xml:lang="ru">Повторное касание кнопки звонка в течение секунды не принимается.</p>
+      </description>
+    </release>
     <release version="2.9.1" date="2026-10-22">
       <description>
         <p>«Видеозвонки» (Video calls) is now in Настройки → Основное (Settings → General). It is off for now: calls are voice only until the tablet’s video issue is fixed. Turn it on to use video calls as before.</p>
