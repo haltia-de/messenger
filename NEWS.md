@@ -10,6 +10,8 @@
 
 На экране звонка правильно показано, когда собеседник выключил микрофон.
 
+На экране звонка кнопки микрофона и камеры — круглые значки в одном ряду с «Завершить», рядом кнопка «Во весь экран».
+
 ### English
 
 «Видеозвонки» (Video calls) is now in Настройки → Основное (Settings → General). It is off for now: calls are voice only until the tablet’s video issue is fixed. Turn it on to use video calls as before.
@@ -17,6 +19,8 @@
 «Аудиозвонки» (Audio calls) lets you turn off voice calls. The program asks before recording a voice message; you can turn this question off in the settings.
 
 The call screen correctly shows when the other person has turned off their microphone.
+
+On the call screen the microphone and camera buttons are round icons in one row with «Завершить» (End), next to a full-screen button.
 
 ## 2.9.0 (2026-10-22)
 

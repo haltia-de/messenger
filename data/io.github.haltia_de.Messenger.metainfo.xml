@@ -25,9 +25,11 @@
         <p>«Видеозвонки» (Video calls) is now in Настройки → Основное (Settings → General). It is off for now: calls are voice only until the tablet’s video issue is fixed. Turn it on to use video calls as before.</p>
         <p>«Аудиозвонки» (Audio calls) lets you turn off voice calls. The program asks before recording a voice message; you can turn this question off in the settings.</p>
         <p>The call screen correctly shows when the other person has turned off their microphone.</p>
+        <p>On the call screen the microphone and camera buttons are round icons in one row with «Завершить» (End), next to a full-screen button.</p>
         <p xml:lang="ru">В Настройки → Основное появился переключатель «Видеозвонки». Пока он выключен: звонки идут только голосом, пока не исправлена проблема с видео на планшете. Если включить его, видеозвонки работают как раньше.</p>
         <p xml:lang="ru">Переключатель «Аудиозвонки» позволяет выключить голосовые звонки. Перед записью голосового сообщения программа спрашивает подтверждение; этот вопрос можно отключить в настройках.</p>
         <p xml:lang="ru">На экране звонка правильно показано, когда собеседник выключил микрофон.</p>
+        <p xml:lang="ru">На экране звонка кнопки микрофона и камеры — круглые значки в одном ряду с «Завершить», рядом кнопка «Во весь экран».</p>
       </description>
     </release>
     <release version="2.9.0" date="2026-10-22">
