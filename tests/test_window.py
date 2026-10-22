@@ -458,6 +458,10 @@ assert app.stack.get_visible_child_name() == "chats" and app.sharing is None
 app.do_open([bm.Gio.File.new_for_path(shared)], 1, "")
 spin(0.1)
 row = [r for r in app.fwd_list.get_children() if r.chat_id == mama][0]
+app.fwd_list.emit("row-activated", row)  # at once (the launching touch): not a choice
+spin(0.1)
+assert app.sharing and app.stack.get_visible_child_name() == "forward"
+app.share_at -= 1  # a moment later: the person's own choice
 app.fwd_list.emit("row-activated", row)
 wait(lambda: app.attachbar.get_children(), what="the copy attached")
 assert app.open_chat == mama and app.stack.get_visible_child_name() == "chat"
@@ -465,6 +469,10 @@ assert app.open_chat == mama and app.stack.get_visible_child_name() == "chat"
 assert copy.startswith(bm.SHARED + os.sep) and os.path.basename(copy) == "Открытка.png"
 assert open(copy, "rb").read() == open(shared, "rb").read()
 assert not app.share_bar.get_visible()
+sends = len(fake.asked("send"))
+app.entry.emit("activate")  # a key (Enter) never sends what another program gave
+spin(0.2)
+assert len(fake.asked("send")) == sends and app.attached and app.sub.get_text() == "Нажмите «Отправить»"
 for c in list(app.attachbar.get_children()):  # not sent here: the draft taken off again
     [b for b in c.get_children() if isinstance(b, Gtk.Button)][0].clicked()
 spin(0.1)
