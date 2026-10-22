@@ -1,5 +1,15 @@
 # Что нового · What's new
 
+## 2.9.4 (2026-10-22)
+
+### Русский
+
+Реакции из официальных приложений MAX приходят сразу, на любые сообщения; при открытии чата подтягиваются реакции, поставленные без вас.
+
+### English
+
+Reactions from the official MAX apps arrive at once, on any message; opening a chat brings the reactions put while you were away.
+
 ## 2.9.3 (2026-10-22)
 
 ### Русский
