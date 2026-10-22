@@ -1,5 +1,43 @@
 # Что нового · What's new
 
+## 2.8.0 (2026-10-22)
+
+### Русский
+
+В видеозвонке собеседник виден на большом экране, а ваше изображение — в углу. Камеру можно включать и выключать кнопками «Включить камеру» и «Выключить камеру», а на входящий звонок — «Ответить без видео». На планшете используется передняя камера.
+
+Экран звонка теперь как у телефона: зелёная кнопка «Ответить» рядом с красной «Отклонить», кнопка «Выключить микрофон» и время разговора. Звонки появляются в истории чата, о пропущенном звонке приходит уведомление.
+
+У ваших сообщений появились ✓ и ✓✓: отправлено и прочитано. Сообщение, которое не удалось отправить, остаётся с пометкой «Не отправлено» и кнопкой «Повторить» и отправляется само, когда связь вернётся. То, что вы набираете в это время, не теряется и не отправляется дважды.
+
+Касание сообщения открывает меню с «Копировать» и «Переслать». Меню чата открывается кнопкой «⋮» или касанием его названия.
+
+Голосовое сообщение можно записать касанием кнопки микрофона, а затем отправить кнопкой «Отправить».
+
+Видео воспроизводится по касанию предпросмотра, фото увеличивается двойным касанием.
+
+Другие программы могут передавать файлы в «Сообщения»: остаётся выбрать «Кому отправить?». Документы из сообщений открываются в системной программе, PDF — в «Документах».
+
+Часто используемые настройки теперь идут первыми.
+
+### English
+
+In a video call, the other person fills the screen and your own picture sits in a corner. Use «Включить камеру» (Turn camera on) and «Выключить камеру» (Turn camera off) to control the camera, or «Ответить без видео» (Answer without video) for an incoming call. The tablet uses its front camera.
+
+The call screen now works like a phone: a green «Ответить» (Answer) beside a red «Отклонить» (Decline), «Выключить микрофон» (Mute microphone) and the talk’s time. Calls appear in the chat’s history, and a notification announces a missed call.
+
+Your messages now show ✓ and ✓✓ for sent and read. A message that could not be sent stays marked «Не отправлено» (Not sent) with «Повторить» (Retry) and goes by itself when the connection returns. What you type meanwhile is never lost or sent twice.
+
+A tap on a message opens its menu with «Копировать» (Copy) and «Переслать» (Forward). Open the chat’s menu with «⋮» or a tap on its name.
+
+You can record a voice message with a tap on the microphone button, then send it with «Отправить» (Send).
+
+A video plays with a tap on its preview, and a photo is enlarged with a double tap.
+
+Other programs can send files to Messages: choose «Кому отправить?» (Who to send to?). Documents from messages open in the system’s program, PDF in Documents.
+
+The settings used most often now come first.
+
 ## 2.7.0 (2026-10-21)
 
 ### Русский
