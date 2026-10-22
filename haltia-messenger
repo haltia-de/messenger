@@ -5536,6 +5536,8 @@ class Max(Gtk.Application):
         self.clip.set_tooltip_text("Прикрепить фото или файл")
         self.clip.connect("clicked", lambda _b: self.attach())
         self.attached = []  # attachment()s waiting to be sent with the message
+        self.sending = False  # a typed message on its way: Enter sends no second
+        self.unsent = {}  # chat id -> (text, files) not sent, back when it is opened
         self.attachbar = Gtk.Box(spacing=10)
         self.attachbar.set_margin_start(16)
         self.attachbar.set_margin_end(16)
@@ -7031,6 +7033,9 @@ class Max(Gtk.Application):
         self.sub.set_text("" if not view.empty else "загрузка…")
         self.back.show()
         self.inputbar.set_visible(s.get("type") != "CHANNEL")
+        unsent = self.unsent.pop(chat_id, None)
+        if unsent:
+            self.unsent_back(chat_id, *unsent)
         self.stack.set_visible_child_name("chat")
         # Nothing focused: the on-screen keyboard comes when the entry is tapped,
         # not over the messages being read (and never in a channel).
@@ -7345,9 +7350,19 @@ class Max(Gtk.Application):
         chat_id = self.open_chat
         if not (text or files) or chat_id is None:
             return
+        if not voice:
+            if self.sending:
+                return  # Enter again while it goes: one message, not two
+            # The draft goes now: what is typed or attached meanwhile is new.
+            self.sending = True
+            self.entry.set_text("")
+            self.attached = []
+            self.show_attached()
         self.sendb.set_sensitive(False)
 
         def done(msg, err):
+            if not voice:
+                self.sending = False
             self.sendb.set_sensitive(True)
             if err:
                 log_line("send %s: %r" % ("voice" if voice else "message", err))
@@ -7355,13 +7370,11 @@ class Max(Gtk.Application):
                                   if isinstance(err, Offline) else "не отправлено, попробуйте ещё раз")
                 if voice:
                     remove_file(voice["path"])
+                else:
+                    self.unsent_back(chat_id, text, files)
                 return
             if voice:
                 remove_file(voice["path"])
-            else:
-                self.entry.set_text("")
-                self.attached = []
-                self.show_attached()
             self.sub.set_text("")
             self.smile.set_active(False)
             view = self.views.get(chat_id)
@@ -7376,6 +7389,17 @@ class Max(Gtk.Application):
             self.backend.run(self.backend.send(chat_id, text, files), done)
         else:
             self.backend.run(self.backend.send(chat_id, text), done)
+
+    def unsent_back(self, chat_id, text, files):
+        """A message that could not go back where it was written: in the
+        entry if its chat is open and nothing new was typed, else kept for
+        when the chat is opened again. Never lost, never over new text."""
+        if self.open_chat == chat_id and not self.entry.get_text().strip():
+            self.entry.set_text(text)
+            self.attached = files + [f for f in self.attached if f not in files]
+            self.show_attached()
+        else:
+            self.unsent[chat_id] = (text, files)
 
     # --- attachments ------------------------------------------------------------
     def attach(self):
