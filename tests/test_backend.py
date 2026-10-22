@@ -883,6 +883,11 @@ assert c.read(9) == [{"id": 1, "time": 1}] and time.monotonic() - began < 0.05
 c.write_lock.release()
 writing.join()
 assert os.path.exists(c._path(9))
+# a chat that cannot be written does not keep the others from the disk
+c.add(11, [{"id": 1, "time": 1, "bad": object()}])
+c.add(12, [{"id": 1, "time": 1}])
+c.flush()
+assert os.path.exists(c._path(12)) and not os.path.exists(c._path(11))
 # a chat dropped while its write was on its way: the drop wins
 c.add(10, [{"id": 1, "time": 1}])
 real_fdopen = bm.os.fdopen

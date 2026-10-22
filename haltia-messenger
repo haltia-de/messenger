@@ -4013,12 +4013,19 @@ class MessageCache:
         to take the chats as they are (as text); the disk is written without
         it, so opening a chat never waits for a slow eMMC. A chat dropped
         meanwhile wins: its old text is not put back."""
-        with self.lock:
-            self.timer = None
-            dirty, self.dirty = self.dirty, set()
-            out = [(chat_id, self.gen.get(chat_id, 0),
-                    json.dumps(self.chats.get(chat_id, []), ensure_ascii=False)) for chat_id in dirty]
+        # The write lock first: two flushes (the timer's, the shutdown's) take
+        # their snapshots in the order they write, never an older one last.
         with self.write_lock:
+            with self.lock:
+                self.timer = None
+                dirty, self.dirty = self.dirty, set()
+                out = []
+                for chat_id in dirty:
+                    try:
+                        out.append((chat_id, self.gen.get(chat_id, 0),
+                                    json.dumps(self.chats.get(chat_id, []), ensure_ascii=False)))
+                    except (TypeError, ValueError) as exc:  # one chat's, the others still go
+                        log_line("cache %s: %r" % (chat_id, exc))
             for chat_id, gen, text in out:
                 try:
                     path = self._path(chat_id)
@@ -4031,10 +4038,11 @@ class MessageCache:
                             os.replace(path + ".new", path)
                         else:
                             os.remove(path + ".new")
-                except (OSError, TypeError, ValueError) as exc:
+                except OSError as exc:
                     log_line("cache %s: %r" % (chat_id, exc))
                     with self.lock:
-                        self.dirty.add(chat_id)  # tried again by the next flush
+                        if self.gen.get(chat_id, 0) == gen:  # not if dropped meanwhile
+                            self.dirty.add(chat_id)  # tried again by the next flush
 
 
 def load_json(path, default):
