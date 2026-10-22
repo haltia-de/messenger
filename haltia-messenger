@@ -155,6 +155,7 @@ from haltia_kit.vault import AUTO, Locked, Vault  # noqa: E402
 # ~/.local/share, ~/.cache and ~/.config.
 DATA = os.path.join(GLib.get_user_data_dir(), "haltia-messenger")
 PHOTOS = os.path.join(GLib.get_user_cache_dir(), "haltia-messenger")
+DOCS = os.path.join(PHOTOS, "documents")  # files opened from messages, under their names
 CONFIG = os.path.join(GLib.get_user_config_dir(), "haltia")  # messenger.conf, [messenger]
 # Where b8k-max (before 2.0) kept them: its folders by that name under these.
 BASES = [GLib.get_user_config_dir(), GLib.get_user_data_dir(), GLib.get_user_cache_dir()]
@@ -4656,18 +4657,25 @@ class Media:
             return False
         return True
 
-    def file(self, url):
-        """A file in the browser (another messenger's: fetched, then opened
-        as a file); False if it cannot be."""
+    def file(self, url, name="файл", done=None):
+        """A file of a message opened by the desktop's own program for it (a
+        PDF in «Документы» on the tablet): fetched under its name into DOCS
+        first, so its type is known; done(opened) on the GTK side. False if
+        it is not to be fetched at all."""
         how = self.how(url)
         if not how:
             log_line("file refused: %s" % where(url))
             return False
         log_line("file %s" % where(url))
-        if how == "own":
-            self._later(url, lambda path: path and self.open_uri(GLib.filename_to_uri(path)))
-            return True
-        return bool(self.open_uri(url))
+
+        def fetched(path):
+            opened = bool(path) and bool(self.open_uri(GLib.filename_to_uri(path)))
+            if path and not opened:
+                log_line("file: nothing opens %s" % os.path.splitext(path)[1])
+            if done:
+                done(opened)
+        self.save(url, DOCS, name, fetched, replace=True)
+        return True
 
 
 # --- the chat list ---------------------------------------------------------------
@@ -5748,7 +5756,12 @@ class Mpris:
 # --- the window -------------------------------------------------------------
 class Max(Gtk.Application):
     def __init__(self, link=None, media=None, recorder=None):
-        super().__init__(application_id=APP_ID)
+        # HANDLES_OPEN: another program sends a file here (X-Haltia-Share in
+        # the .desktop file); a second launch hands it to the running one.
+        super().__init__(application_id=APP_ID, flags=Gio.ApplicationFlags.HANDLES_OPEN)
+        self.add_main_option("background", 0, GLib.OptionFlags.NONE, GLib.OptionArg.NONE,
+                             "Start without showing the window", None)
+        self.sharing = None  # files another program sent, while a chat is chosen for them
         # Typed messages on their way, as bubbles at once: id -> {"chat", "text",
         # "files", "m": the bubble's dict, its "state" sending or failed}.
         self.queue = {}
@@ -6230,6 +6243,19 @@ class Max(Gtk.Application):
         fwd.set_margin_start(24)
         fwd.set_margin_end(24)
         fwd.set_margin_top(16)
+        # Files another program sent: which, and «Отмена» (sending files only).
+        self.share_bar = Gtk.Box(spacing=16)
+        self.share_note = label("", "setting", wrap=True)
+        self.share_bar.pack_start(self.share_note, True, True, 0)
+        drop = Gtk.Button(label="Отмена")
+        drop.get_style_context().add_class("plain")
+        drop.set_valign(Gtk.Align.CENTER)
+        drop.connect("clicked", lambda _b: self.end_forward())
+        self.share_bar.pack_end(drop, False, False, 0)
+        self.share_bar.set_no_show_all(True)
+        self.share_note.show()
+        drop.show()
+        fwd.pack_start(self.share_bar, False, False, 0)
         self.fwd_entry = Gtk.SearchEntry()
         self.fwd_entry.get_style_context().add_class("input")
         self.fwd_entry.set_placeholder_text("Кому переслать")
@@ -7033,11 +7059,38 @@ class Max(Gtk.Application):
     # forwarding a message
     def show_forward(self, chat_id, msg_id):
         self.forwarding = (chat_id, msg_id)
+        self.sharing = None
+        self.share_bar.hide()
         self.title.set_text("Переслать")
         self.sub.set_text("")
+        self.fwd_entry.set_placeholder_text("Кому переслать")
         self.fwd_entry.set_text("")
         self.fill_forward()
         self.stack.set_visible_child_name("forward")
+
+    def do_open(self, files, _n, _hint):
+        """Files another program sent (haltia_kit.share launches the program
+        with them; a second launch hands them over): «Кому отправить?»."""
+        paths = [f.get_path() for f in files if f.get_path() and os.path.isfile(f.get_path())]
+        self.activate()
+        if paths:
+            self.show_share(paths)
+
+    def show_share(self, paths):
+        """Choose the chat for files sent from another program; the chat
+        opens with them attached, sent by the usual «Отправить»."""
+        self.forwarding = None
+        self.sharing = list(paths)
+        self.share_note.set_text("📎 " + ", ".join(os.path.basename(p) for p in paths))
+        self.share_bar.show()
+        self.title.set_text("Кому отправить?")
+        self.sub.set_text("")
+        self.back.show()
+        self.fwd_entry.set_placeholder_text("Найти чат")
+        self.fwd_entry.set_text("")
+        self.fill_forward()
+        self.stack.set_visible_child_name("forward")
+        self.win.present()
 
     def fill_forward(self):
         """The chats a message can go to: dialogs and groups, the newest
@@ -7046,10 +7099,12 @@ class Max(Gtk.Application):
         for child in self.fwd_list.get_children():
             child.destroy()
         self.fwd_found = None
-        source = (self.chatlist.get(self.forwarding[0]) or {}).get("account", "max")
+        # A message within its messenger (between messengers: not yet); a
+        # file from another program to any.
+        source = (self.chatlist.get(self.forwarding[0]) or {}).get("account", "max") \
+            if self.forwarding else None
         for c, _pinned, _quiet in self.chatlist.entries("chats"):
-            # within its messenger (between messengers: not yet)
-            if c.get("type") != "CHANNEL" and c.get("account", "max") == source:
+            if c.get("type") != "CHANNEL" and source in (None, c.get("account", "max")):
                 self.fwd_list.add(self.chat_row((c, False, False)))
         self.fwd_list.show_all()
         self.search_forward()
@@ -7060,6 +7115,16 @@ class Max(Gtk.Application):
         self.fwd_list.invalidate_filter()
 
     def forward_to(self, target):
+        if self.sharing:
+            paths, self.sharing = self.sharing, None
+            self.share_bar.hide()
+            self.open(target)
+            # A draft, as if attached here: seen above the entry, sent by «Отправить».
+            for path in paths:
+                if not any(f["path"] == path for f in self.attached):
+                    self.attached.append(attachment(path))
+            self.show_attached()
+            return
         if not self.forwarding:
             return
         source, msg_id = self.forwarding
@@ -7087,8 +7152,14 @@ class Max(Gtk.Application):
         self.backend.run(self.backend.forward(target, msg_id, source), done)
 
     def end_forward(self):
-        """Back from choosing where to forward: to the chat the message is in."""
+        """Back from choosing where to forward (or where to send files from
+        another program: they are dropped): to the chat it came from."""
         self.forwarding = None
+        self.sharing = None
+        self.share_bar.hide()
+        if self.open_chat is None:  # files from another program, chosen from the list
+            self.show_list()
+            return
         s = self.chatlist.get(self.open_chat) or {}
         self.title.set_text(s.get("title", ""))
         self.stack.set_visible_child_name("chat" if self.open_chat is not None else "chats")
@@ -7888,8 +7959,8 @@ class Max(Gtk.Application):
         return False
 
     def open_media(self, chat_id, msg_id, item, button):
-        """A video full screen in the shell's player, a file in the browser;
-        MAX gives the link on request."""
+        """A video full screen in the shell's player, a file in the desktop's
+        program for it; MAX gives the link on request."""
         button.set_sensitive(False)
 
         def done(url, err):
@@ -7901,8 +7972,14 @@ class Max(Gtk.Application):
                 self.sound_end()  # the voice playing stops for it
                 if not self.media.video(url, self.title.get_text()):
                     self.sub.set_text("не удалось открыть видео")
-            elif not self.media.file(url):
-                self.sub.set_text("нечем открыть файл")
+            else:
+                # Fetched, then opened by the desktop's program for its type.
+                button.set_sensitive(False)
+                if not self.media.file(url, item.get("name") or "файл", lambda opened: (
+                        button.set_sensitive(True),
+                        opened or self.sub.set_text("нечем открыть файл"))):
+                    button.set_sensitive(True)
+                    self.sub.set_text("нечем открыть файл")
 
         self.backend.run(self.backend.media_url(chat_id, msg_id, item), done)
 
@@ -8310,4 +8387,4 @@ if __name__ == "__main__":
     # Started by XDG autostart with no graphical session: nothing to do.
     if not Gtk.init_check(sys.argv)[0]:
         sys.exit(0)
-    Max().run(None)
+    Max().run(sys.argv)

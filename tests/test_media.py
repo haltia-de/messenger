@@ -181,11 +181,20 @@ assert not bm.Media(missing, hands.open_uri, hands.fetch, hands.player).video(
 assert "video: no player" in log()
 ok("video")
 
-# --- files: the browser -------------------------------------------------------------------
-assert media.file("https://fd.oneme.ru/f.pdf") and hands.opened == ["https://fd.oneme.ru/f.pdf"]
-assert not media.file("https://evil.com/f.pdf") and len(hands.opened) == 1
-hands.browser = False
-assert not media.file("https://fd.oneme.ru/g.pdf")
+# --- files: fetched under their names, opened by the desktop's program for them -----------
+opened = []
+docs = bm.Media(hands.spawn, hands.open_uri, hands.fetch, hands.player, hands.download)
+assert docs.file("https://fd.oneme.ru/f.pdf", "Договор.pdf", opened.append)
+drain()
+doc = os.path.join(bm.DOCS, "Договор.pdf")
+assert opened == [True] and hands.opened == [bm.GLib.filename_to_uri(doc)] and os.path.exists(doc)
+assert not docs.file("https://evil.com/f.pdf", "x.pdf") and len(hands.opened) == 1
+hands.browser = False  # nothing opens such a file
+assert docs.file("https://fd.oneme.ru/g.pdf", "g.pdf", opened.append)
+drain()
+assert opened == [True, False]
+hands.browser = True
+hands.downloaded.clear()
 ok("files")
 
 # --- saving: a harmless name, never over another, nothing left of a failure --------------
@@ -264,9 +273,9 @@ assert tgm.video("tg:video:5:3", "Мама")
 drain()
 cmd = hands.spawned[-1]
 assert any(c.startswith(bm.PHOTOS) for c in cmd) and not any(c.startswith("tg:") for c in cmd)
-assert tgm.file("tg:file:5:4")
+assert tgm.file("tg:file:5:4", "Счёт.pdf")
 drain()
-assert hands.opened[-1].startswith("file://") and hands.opened[-1].endswith(".img")
+assert hands.opened[-1] == bm.GLib.filename_to_uri(os.path.join(bm.DOCS, "Счёт.pdf"))
 paths = []
 tgm.save("tg:file:5:4", folder, "Договор.pdf", paths.append)
 drain()

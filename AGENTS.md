@@ -281,7 +281,7 @@ chats of the message's messenger (between messengers: step 4). At the
   `PHOTO_DAYS` unshown), plays voice through libmpv (`voice`/`toggle`/`stop`, `on_time`/`on_end`;
   an `end-file` with reason ABORTED is a stop or a switch, not an end), starts a video in
   `haltia-vplay` (`b8k-vplay` before 2.0; on `PATH`, Видео's package) or `mpv --fs` with `ytdl=no` and `load-unsafe-playlists=no` (`video(url, title)`), and
-  gives a file to the browser (`file(url)`). What fails goes to `~/.cache/haltia-messenger/haltia-messenger.log` (`LOG`; the link's
+  opens a file by the desktop's program for its type (`file(url, name, done)`: fetched under its name into `DOCS`, the cache's `documents/`, then a `file://` URI — a PDF opens in «Документы» on the tablet). What fails goes to `~/.cache/haltia-messenger/haltia-messenger.log` (`LOG`; the link's
   losses and restarts too; `player.log` before 2.4, removed by `prune`)
   (600, host and path only; the players' own output too). Its hands come in at creation —
   `spawn`, `open_uri`, `fetch`, `player` — real by default, `tests/fake_hands.py` in tests.
@@ -309,6 +309,15 @@ chats of the message's messenger (between messengers: step 4). At the
   Media's worker threads into the account's link (`link.download`) — into the photo cache;
   voice, video and files are played or opened from there once fetched (a voice stopped or
   switched meanwhile does not start late; one that cannot be fetched is told as `on_end`).
+- **Files from other programs** (haltia-de/haltia's `docs/plans/share-and-documents.md`;
+  haltia_kit.share is the sender). The `.desktop` file has `X-Haltia-Share=true`, the
+  `MimeType=` of what MAX takes (concrete types, not `image/*`: validators refuse wildcards)
+  and `Exec=haltia-messenger %U`; `Max` is `HANDLES_OPEN` (a second launch hands the files to
+  the running one; `--background` is a main option now that `run(sys.argv)` parses them).
+  `do_open` → `show_share(paths)`: the `forward` page as «Кому отправить?» (the files named
+  above the search, «Отмена» drops them; chats of every messenger, no channels); a chat chosen
+  opens with the files as a draft (`attached`), sent by the usual «Отправить». The files are
+  not copied: they are sent from where the sender left them.
 - **Reactions.** Message dicts carry `reactions` ([[emoji, count]]) and `yours`; a long press on a
   bubble (`ChatView`'s `on_hold`) opens `Max.pick_reaction`, a popover of `REACTIONS`.
   `Backend.react` uses `messages.add_reaction`/`remove_reaction`; when MAX answers without counts

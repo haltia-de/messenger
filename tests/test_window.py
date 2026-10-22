@@ -391,6 +391,35 @@ app.open(mama)
 spin(0.2)
 ok("forward")
 
+# --- a file from another program (haltia_kit.share): «Кому отправить?», then a draft ------------
+shared = os.path.join(os.environ["HOME"], "Открытка.png")
+with open(shared, "wb") as fh:
+    fh.write(hands.photo_bytes if hasattr(hands, "photo_bytes") and hands.photo_bytes else b"png")
+app.show_list()
+app.do_open([bm.Gio.File.new_for_path(shared)], 1, "")
+spin(0.2)
+assert app.stack.get_visible_child_name() == "forward" and app.title.get_text() == "Кому отправить?"
+assert app.share_bar.get_visible() and "Открытка.png" in app.share_note.get_text()
+targets = [r.chat_id for r in app.fwd_list.get_children()]
+assert mama in targets and dacha in targets and news not in targets
+shot("share.png")
+[b for b in walk(app.share_bar) if isinstance(b, Gtk.Button)][0].clicked()  # «Отмена»: dropped
+spin(0.1)
+assert app.stack.get_visible_child_name() == "chats" and app.sharing is None
+app.do_open([bm.Gio.File.new_for_path(shared)], 1, "")
+spin(0.1)
+row = [r for r in app.fwd_list.get_children() if r.chat_id == mama][0]
+app.fwd_list.emit("row-activated", row)
+spin(0.2)
+assert app.open_chat == mama and app.stack.get_visible_child_name() == "chat"
+assert [c.attachment["path"] for c in app.attachbar.get_children()] == [shared]
+assert not app.share_bar.get_visible()
+for c in list(app.attachbar.get_children()):  # not sent here: the draft taken off again
+    [b for b in c.get_children() if isinstance(b, Gtk.Button)][0].clicked()
+spin(0.1)
+assert not app.attached
+ok("a file from another program")
+
 # --- a message deleted for everyone by its sender: gone here too --------------------------------
 doomed = fake.incoming(mama, "Ой, не тебе", MAMA)
 wait(lambda: any(w.msg_id == doomed.id for w in holds_of(app.view)), what="the message to delete")
@@ -681,9 +710,10 @@ vid.clicked()  # the voice stops for the video
 wait(lambda: hands.spawned, what="player")
 assert hands.spawned[-1][-1] == "https://vd.okcdn.ru/v.mp4" and hands.sound.did[-1] == ("stop",)
 assert play.state == "play"
-doc.clicked()  # a file: opened; its save button keeps it
+doc.clicked()  # a file: fetched under its name, opened by the desktop's program; its save button keeps it
 wait(lambda: hands.opened, what="file")
-assert hands.opened == ["https://fd.oneme.ru/f.pdf"]
+assert len(hands.opened) == 1 and hands.opened[0].startswith(bm.GLib.filename_to_uri(bm.DOCS))
+assert hands.downloaded[-1][0] == "https://fd.oneme.ru/f.pdf"
 # an audio file plays in the bubble too: its link is asked of MAX first
 song = fake.incoming(mama, "", MAMA, attaches=[file(7, "Песня про лето.mp3", 3_200_000)])
 fake.media[(mama, song.id, "file")] = "https://fd.oneme.ru/song.mp3"

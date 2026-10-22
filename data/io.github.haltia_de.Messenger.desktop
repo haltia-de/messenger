@@ -6,12 +6,15 @@ GenericName=MAX client
 GenericName[ru]=Клиент MAX
 Comment=An unofficial client for the MAX messenger
 Comment[ru]=Неофициальный клиент для мессенджера MAX
-Exec=haltia-messenger
+Exec=haltia-messenger %U
 Icon=io.github.haltia_de.Messenger
 Terminal=false
 Categories=GTK;Network;InstantMessaging;Chat;
 Keywords=MAX;max;МАКС;макс;messenger;chat;messages;мессенджер;чат;сообщения;
 StartupNotify=true
+MimeType=image/jpeg;image/png;image/gif;image/webp;image/heic;video/mp4;video/quicktime;video/webm;audio/mpeg;audio/ogg;audio/mp4;audio/x-m4a;application/pdf;
 X-Flatpak-RenamedFrom=io.github.trudenboy.Max.desktop;
 X-B8K-Home=true
 X-B8K-Replaces=max
+# Files other programs send here (haltia_kit.share): «Кому отправить?».
+X-Haltia-Share=true
