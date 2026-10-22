@@ -518,6 +518,74 @@ async def stop_reasons():
     ok("account stop rejects incoming, cancels outgoing and hangs up accepted calls")
 
 
+async def link_stability():
+    from fake_link import FakeLink
+    # A lost MAX connection leaves a call alone (its ws2 and ICE decide), and
+    # is told once, not at every attempt to connect again.
+    told = []
+    class UI:
+        def connected(self, account, on):
+            told.append(on)
+            return False
+        def signin(self, *_a):
+            return False
+    account = bm.Backend(UI(), FakeLink()).accounts["max"]
+    account.online = True
+    call = account.call = bm.VoiceCall("talk", "test-person", True, lambda *args: None)
+    call.accepted, call.state = True, "active"
+    with patch.object(bm, "log_line") as log:
+        for _n in range(3):
+            await account.on_disconnect("ConnectionError()")
+    assert not call.closed and account.call is call and log.call_count == 1
+    while bm.GLib.MainContext.default().iteration(False):
+        pass
+    assert told == [False]
+    await call.end("HUNGUP")
+    # Two starts at once (a double tap, a switch while the keyring answers):
+    # one connection.
+    fake = FakeLink()
+    backend = bm.Backend(UI(), fake)
+    backend.loop = asyncio.get_running_loop()
+    slow = asyncio.Event()
+    async def signed_in():
+        await slow.wait()
+        return True
+    fake.signed_in = signed_in
+    lives = []
+    async def live(self):
+        lives.append(self)
+        await asyncio.Event().wait()  # connected, till stopped
+    with patch.object(bm, "messenger_on", return_value=True), patch.object(bm.Account, "live", live):
+        starts = [asyncio.create_task(backend.begin("max", quiet=True)) for _n in range(2)]
+        await asyncio.sleep(.05)
+        slow.set()
+        await asyncio.gather(*starts)
+        await asyncio.sleep(.1)
+        assert len(lives) == 1
+        task = backend.accounts["max"].task
+        await backend.accounts["max"].stop()
+        assert backend.accounts["max"].task is None and task.done()
+        # The keyring failing at the start: said, and nothing hangs
+        async def broken():
+            raise bm.GLib.Error("no reply from the keyring")
+        fake.signed_in = broken
+        await backend.begin("max", quiet=True)
+        assert backend.accounts["max"].task is None
+    # PyMax tries again ever later while offline, and quickly once connected
+    link = bm.PyMaxLink("unused")
+    link.client = SimpleNamespace(extra_config=SimpleNamespace(reconnect_delay=bm.RECONNECT_FIRST))
+    events = []
+    async def on_disconnect(why):
+        events.append(why)
+    link.events = SimpleNamespace(on_disconnect=on_disconnect)
+    delays = []
+    for _n in range(6):
+        await link._disconnected(OSError("no network"), True, link.client.extra_config.reconnect_delay)
+        delays.append(link.client.extra_config.reconnect_delay)
+    assert delays == [6.0, 12.0, 24.0, 48.0, 60.0, 60.0] and len(events) == 6
+    ok("a lost connection leaves a call; one start per account; the keyring's failure; backoff")
+
+
 async def busy_invitation():
     from fake_link import FakeLink
     fake = FakeLink(can={"calls"})
@@ -871,6 +939,7 @@ async def main():
     await unavailable_media()
     await connection_states()
     await stop_reasons()
+    await link_stability()
     await busy_invitation()
     await quit_hangup()
     await quit_during_dial()
