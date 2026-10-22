@@ -366,7 +366,7 @@ with patch.object(bm, "REMOTE_STALE", .3):
 # camera on their (black) picture; the own picture small at the bottom right.
 app.call_changed(dict(video_call, state="active", video=True, remote_video=False, remote_audio=False))
 assert app.call_peer.get_visible()
-assert "микрофон" in app.call_peer.get_text() and "камеру" in app.call_peer.get_text()
+assert "микрофон" in app.call_peer.get_text() and "Камера собеседника выключена" in app.call_peer.get_text()
 app.call_frame("video-ui", True, (16, 12, bytes(4 * 16 * 12)))
 wait(lambda: app.call_own.surface is not None)
 assert app.call_video_area.get_visible() and app.call_remote_off.get_visible()

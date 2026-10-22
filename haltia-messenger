@@ -2121,6 +2121,8 @@ VIDEO_CAPS = ("application/x-rtp,media=video,encoding-name=VP8,payload=%d,clock-
 # (adapt_video), the last step off. 320×240 looked much worse than «Камера».
 VIDEO_SIZES = ((640, 480, 15), (320, 240, 15), (160, 120, 10))
 VIDEO_BITRATE = {640: 900000, 320: 350000, 160: 150000}  # bit/s for each width
+VIDEO_START = [VIDEO_SIZES[0]]  # a call starts at the size that last kept up, this run
+ADAPT_EVERY = 5  # s between looks at whether the encoder keeps up
 ADAPT_KEPT = .7  # the share of the camera's frames the encoder keeps up with
 
 
@@ -2229,7 +2231,7 @@ class CallAudio:
         self.video_pushed = 0  # the camera's frames handed to the encoder
         self.remote_bin = None  # the peer's video decoding, once it comes
         self.failed_bins = []  # video branches given up: their late errors are not the call's
-        self.video_size = VIDEO_SIZES[0]
+        self.video_size = VIDEO_START[0]  # the size that last worked here
         try:
             # RFC 7587 section 7 requires /2 in Opus SDP even for mono.
             # Keep it in RTP caps: without it the MAX peer never answers.
@@ -2359,6 +2361,9 @@ class CallAudio:
         old.get_static_pad("src").unlink(pad)
         self.pipeline.remove(old)
         sender = self._sender_bin(payload)
+        # As many bits as the picture's size wants, not vp8enc's default.
+        sender.get_by_name("video_encoder").set_property(
+            "target-bitrate", VIDEO_BITRATE.get(self.video_size[0], 350000))
         self.pipeline.add(sender)
         if not sender.get_static_pad("src").link(pad) == self.Gst.PadLinkReturn.OK:
             self.pipeline.remove(sender)
@@ -3039,7 +3044,7 @@ class VoiceCall:
             return
         smaller = [v for v in VIDEO_SIZES if v[0] < self.audio.video_size[0]]
         if smaller:
-            self.audio.video_size = smaller[0]
+            self.audio.video_size = VIDEO_START[0] = smaller[0]  # the next call starts there
             await self.camera(True)
         else:
             self.video_wanted = False
@@ -3048,9 +3053,14 @@ class VoiceCall:
             self.show(self.state)
 
     async def quality(self):
+        """Every ADAPT_EVERY s whether the encoder keeps up (a too big picture
+        steps down within seconds, not a minute); the counters in the log
+        every 15 s."""
         previous = None
+        ticks = 0
         while not self.closed:
-            await asyncio.sleep(15)
+            await asyncio.sleep(ADAPT_EVERY)
+            ticks += 1
             try:
                 if self.video and hasattr(self.audio, "video_frames"):
                     current = (self.audio.video_frames, self.audio.video_pushed,
@@ -3060,8 +3070,9 @@ class VoiceCall:
                     previous = current
                 else:
                     previous = None
-                counters = await self.audio.stats()
-                log_line("voice quality: " + json.dumps(counters))
+                if ticks % max(1, 15 // ADAPT_EVERY) == 0:
+                    counters = await self.audio.stats()
+                    log_line("voice quality: " + json.dumps(counters))
             except Exception:
                 pass  # statistics must never end a working call
 
@@ -6509,7 +6520,9 @@ class Max(Gtk.Application):
         self.call_own_box.show_all()
         self.call_video_area.add_overlay(self.call_own_box)
         # The peer's camera off: said on its picture, not a black screen.
-        self.call_remote_off = label("Собеседник выключил камеру", "peer-off", xalign=0.5, wrap=True)
+        # Not «выключил»: a picture that does not come may be a failed decode
+        # or a peer without a camera too.
+        self.call_remote_off = label("Камера собеседника выключена", "peer-off", xalign=0.5, wrap=True)
         self.call_remote_off.set_halign(Gtk.Align.CENTER)
         self.call_remote_off.set_valign(Gtk.Align.CENTER)
         self.call_remote_off.set_no_show_all(True)
@@ -8387,7 +8400,7 @@ class Max(Gtk.Application):
         if live and call.get("remote_audio") is False:
             notes.append("🔇 Собеседник выключил микрофон")
         if live and call.get("remote_video") is False and (self.call_video or call.get("video_invitation")):
-            notes.append("📷 Собеседник выключил камеру")
+            notes.append("📷 Камера собеседника выключена")
         self.call_peer.set_text("\n".join(notes))
         self.call_peer.set_visible(bool(notes))
         if not self.call_video:

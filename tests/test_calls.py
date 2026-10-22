@@ -196,6 +196,7 @@ def sender_rebuilt():
     audio = bm.CallAudio.__new__(bm.CallAudio)
     audio.Gst, audio.closed, audio.failed_bins = Gst, False, []
     audio.pipeline = Gst.Pipeline.new("call")
+    audio.video_size = (640, 480, 15)
     sink = Gst.ElementFactory.make("fakesink", None)
     audio.pipeline.add(sink)
     audio.video_pad = sink.get_static_pad("sink")
@@ -206,6 +207,8 @@ def sender_rebuilt():
     assert audio.rebuild_sender()
     assert audio.video_bin is not old and old.get_parent() is None
     assert audio.video_bin.get_by_name("video_pay").get_property("pt") == 102
+    assert audio.video_bin.get_by_name("video_encoder").get_property("target-bitrate") == \
+        bm.VIDEO_BITRATE[audio.video_size[0]]  # not vp8enc's default
     assert audio.video_bin.get_static_pad("src").get_peer() == audio.video_pad
     audio.closed = True
     assert not audio.rebuild_sender()
@@ -841,9 +844,11 @@ async def video_consent():
         assert call.audio.video_size == (320, 240, 15) and call.video
         await call.adapt_video(3, 15)
         assert call.audio.video_size == (160,120,10) and call.video
+        assert bm.VIDEO_START[0] == (160, 120, 10)  # the next call starts at what kept up
         await call.adapt_video(3, 15)
         assert not call.video and not call.audio.camera and call.state == "active"
         assert not call.video_wanted  # turned off: adaptation never turns it on again
+        bm.VIDEO_START[0] = bm.VIDEO_SIZES[0]
         await call.adapt_video(0, 15)
         assert not call.video
         call.audio.fail = True
