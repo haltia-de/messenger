@@ -2128,6 +2128,59 @@ class CallRinger:
             self.pipeline = None
 
 
+class Ringback:
+    """The tone a caller hears while the other's phone rings: 425 Hz, 0.8 s
+    on and 3.2 s off (RINGBACK), as Russian phone lines give it. Made, not a
+    file; the call's own role, so it plays where the call will be heard."""
+    def __init__(self, sink='pulsesink stream-properties="props,media.role=phone"'):
+        self.pipeline = None
+        self.timer = None
+        self.sink = sink
+        self.on = False
+
+    def start(self):
+        if self.pipeline is not None:
+            return
+        try:
+            Gst, _rtc, _sdp = call_media()
+            Gst.init(None)
+            self.pipeline = Gst.parse_launch(
+                "audiotestsrc wave=sine freq=425 is-live=true ! volume name=level mute=true "
+                "! audioconvert ! audioresample ! " + self.sink)
+            self.pipeline.get_by_name("level").set_property("volume", ring_volume() * .5)
+            if self.pipeline.set_state(Gst.State.PLAYING) == Gst.StateChangeReturn.FAILURE:
+                self.stop()
+                log_line("voice call: ringback output failed")
+                return
+            self.on = False
+            self._beat()
+        except (ImportError, ValueError, GLib.Error):
+            self.stop()
+            log_line("voice call: ringback unavailable")
+
+    def _beat(self):
+        """Tone on, then off: the cadence by timers."""
+        if self.pipeline is None:
+            return False
+        self.on = not self.on
+        self.pipeline.get_by_name("level").set_property("mute", not self.on)
+        self.timer = GLib.timeout_add(RINGBACK[0 if self.on else 1], self._beat)
+        return False
+
+    def stop(self):
+        if self.timer is not None:
+            GLib.source_remove(self.timer)
+            self.timer = None
+        if self.pipeline is not None:
+            Gst, _rtc, _sdp = call_media()
+            self.pipeline.set_state(Gst.State.NULL)
+            self.pipeline = None
+        self.on = False
+
+
+RINGBACK = (800, 3200)  # ms of the ringback tone, then of its silence
+
+
 def video_calls():
     """«Видеозвонки» in the settings, off by default for now (issue #55, the
     author's decision of 22 October 2026: on the B8000-H a long video call
@@ -6425,6 +6478,7 @@ class Max(Gtk.Application):
         # Keep an independent logind fd for haltia-sleep on the tablet.
         self.call_logind = Awake(NAME, "call", app=False)
         self.call_ringer = CallRinger()
+        self.call_ringback = Ringback()  # what the caller hears while dialling
         self.call_notice = None  # the ringing call whose notification is up
         self.call_notice_at = 0.0  # monotonic time it was sent
         self.call_portrait = None
@@ -6489,6 +6543,7 @@ class Max(Gtk.Application):
         self.call_awake.release()
         self.call_logind.release()
         self.call_ringer.stop()
+        self.call_ringback.stop()
         self.withdraw_call_notice(now=True)  # no later: the program is going
         self.backend.cache.flush()  # what the last two seconds changed
         recent = getattr(self, "recent", None)  # no window ever built: none
@@ -8735,6 +8790,10 @@ class Max(Gtk.Application):
         else:
             self.call_ringer.stop()
             self.withdraw_call_notice()
+        if state == "dialling":
+            self.call_ringback.start()
+        else:
+            self.call_ringback.stop()
         return False
 
     def withdraw_call_notice(self, now=False):
