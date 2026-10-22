@@ -328,6 +328,11 @@ class FakeLink:
         msg.yours = emoji
         return ([list(r) for r in msg.reactions], emoji) if self.counts else None
 
+    async def reactions(self, chat_id, msg_ids):
+        self._call("reactions", chat_id=chat_id, msg_ids=list(msg_ids))
+        return {m.id: [list(r) for r in m.reactions] for m in self.msgs.get(chat_id, [])
+                if m.id in msg_ids}
+
     async def media_url(self, chat_id, msg_id, item):
         self._call("media_url", chat_id=chat_id, msg_id=msg_id, kind=item["kind"])
         return self.media.get((chat_id, msg_id, item["kind"]))
