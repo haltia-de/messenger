@@ -1318,6 +1318,19 @@ app.record_cancel.clicked()
 spin(0.3)
 assert not app.recorder.recording() and len(fake.asked("send")) == n + 3
 assert app.entry.get_visible() and not app.record_cancel.get_visible()
+# asked first (on by default): a touch by chance records nothing
+app.voice_ask = True
+questions.clear()
+answer[0] = False
+app.record_released()  # the microphone tapped, not recording
+assert questions[-1] == ("Записать голосовое сообщение?", "Записать") and not app.recorder.recording()
+answer[0] = True
+app.record_released()
+assert app.recorder.recording() and app.record_locked and app.record_cancel.get_visible()
+app.record_cancel.clicked()
+spin(0.2)
+assert not app.recorder.recording()
+app.voice_ask = False
 # voice messages switched off in the settings: no microphone
 label_ = [w for w in walk(app.stack.get_child_by_name("settings"))
           if isinstance(w, Gtk.Label) and w.get_text() == "Голосовые сообщения"][0]

@@ -247,7 +247,7 @@ MAX Desktop шлёт `accept-call` с `isAudioEnabled: false` и включае�
 | `registered-peer` | `participantId`, `participantType`, `peerId`, `platform: "ANDROID"`, `clientType: "ONE_ME"` | устройство собеседника на связи (у него звонит) |
 | `accepted-call` | `participantId`, `peerId`, `mediaSettings`, `capabilities: "3c03f"` | собеседник ответил |
 | `transmitted-data` | `participantId`, `peerId`, `data{sdp{type, sdp, p2pRelay}, capabilities: "1"}` или `data{candidate{candidate, sdpMid, sdpMLineIndex, usernameFragment}}` | SDP и ICE собеседника |
-| `media-settings-changed` | `participantId`, `mediaSettings` | собеседник включил или выключил микрофон |
+| `media-settings-changed` | `participantId`, `mediaSettings` | собеседник включил или выключил микрофон или камеру; **выключенное поле не приходит вовсе** (не `false`): микрофон выключен — нет `isAudioEnabled` (планшет, 22 октября 2026) |
 | `hungup` | `participantId`, `externalId{type, id}`, `reason`, `deviceCount`, `traceId`, `markers` | собеседник ушёл или передумал |
 | `closed-conversation` | `reason` | звонок окончен |
 | `feature-set-changed`, `features-per-role-changed` | | не нужны |

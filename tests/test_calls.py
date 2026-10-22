@@ -626,6 +626,24 @@ async def voice_only():
     ok("voice only (#55): no video offered, decoded, or answered")
 
 
+async def calls_switched_off():
+    from fake_link import FakeLink
+    fake = FakeLink(can={"calls"})
+    account = bm.Backend(object(), fake).accounts["max"]
+    account.online = True
+    invitation = {"conversationId": "off", "callerId": 20, "vcp": literal(params)}
+    made = []
+    with patch.object(account, "new_call", side_effect=lambda *a, **k: made.append((a, k)) or Mock()):
+        with patch.object(bm, "calls_allowed", lambda video: False):
+            await account.on_call_frame(137, invitation)
+        assert not made  # not rung here at all
+        with patch.object(bm, "calls_allowed", lambda video: not video), \
+                patch.object(bm, "video_calls", lambda: False):
+            await account.on_call_frame(137, dict(invitation, type="VIDEO"))
+        assert made and made[-1][1]["video"] is False  # rings as a voice call
+    ok("voice and video calls switched off apart: not rung, or a video call as a voice one")
+
+
 async def busy_invitation():
     from fake_link import FakeLink
     fake = FakeLink(can={"calls"})
@@ -923,6 +941,13 @@ async def video_consent():
         await socket.notify("media-settings-changed", participantId="remote",
                             mediaSettings={"isVideoEnabled": False, "isAudioEnabled": False})
         await until(lambda: call.remote_audio is False and call.remote_video is False)
+        # as MAX really says it: a switched-off one is left out, not false
+        await socket.notify("media-settings-changed", participantId="remote",
+                            mediaSettings={"isAudioEnabled": True, "isVideoEnabled": True})
+        await until(lambda: call.remote_audio is True and call.remote_video is True)
+        await socket.notify("media-settings-changed", participantId="remote",
+                            mediaSettings={"isVideoEnabled": True})
+        await until(lambda: call.remote_audio is False and call.remote_video is True)
         # Opening the camera blocks its own thread, never the loop; two quick
         # taps are folded: on, then off, and it ends off.
         opened, release = threading.Event(), threading.Event()
@@ -995,6 +1020,7 @@ async def main():
     await stop_reasons()
     await link_stability()
     await voice_only()
+    await calls_switched_off()
     await busy_invitation()
     await quit_hangup()
     await quit_during_dial()
