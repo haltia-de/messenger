@@ -506,6 +506,18 @@ ok("emoji")
 # --- search: a person by phone, then a channel by link -----------------------------------------
 app.show_list()
 app.show_find()
+# own chats narrow as one types, without «Найти»; «Найти или написать» says what it is for
+assert app.title.get_text() == "Найти или написать"
+app.find_entry.set_text("Дач")
+assert not [r for r in walk(app.found) if isinstance(r, Gtk.ListBoxRow)]  # not at every letter
+spin(0.4)
+own_rows = [r for r in walk(app.found) if isinstance(r, Gtk.ListBoxRow)]
+assert [r.chat_id for r in own_rows] == [dacha] and "«Найти»" in app.find_hint.get_text()
+assert not fake.asked("search")  # nobody asked while typing
+app.find_entry.set_text("8 900 123 45 67")
+spin(0.4)
+assert not [r for r in walk(app.found) if isinstance(r, Gtk.ListBoxRow)]
+assert app.find_hint.get_text() == "Нажмите «Найти», чтобы написать человеку."
 app.find_entry.set_text("8 900 123 45 67")
 app.find()
 wait(lambda: len(buttons(app.found)) == 2, what="person card")
