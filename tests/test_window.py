@@ -203,6 +203,22 @@ spin(0.2)
 assert app.win.get_visible()
 ok("list")
 
+# --- the settings: what is changed often first, the rest under «Дополнительно» -------------
+app.show_settings()
+spin(0.1)
+page = app.stack.get_child_by_name("settings").get_child().get_child()
+texts = [w.get_text() for w in walk(page) if isinstance(w, Gtk.Label)]
+heads = [t for t in texts if t in ("Основное", "Мессенджеры", "Дополнительно")]
+assert heads == ["Основное", "Мессенджеры", "Дополнительно"], heads
+assert texts.index("Оповещение о новом сообщении") < texts.index("Мессенджеры")
+assert texts.index("Дополнительно") < texts.index("Отправлять телеметрию в MAX")
+assert texts.index("Дополнительно") < texts.index("Сообщения только от контактов")
+assert not any("долгое нажатие" in t for t in texts)  # saving is the ⤓ beside a photo or file
+shot("settings.png")
+app.go_back()
+spin(0.1)
+ok("settings")
+
 # --- incoming: a notification from a contact, none from a stranger or a channel ---------------
 row_before = app.rows[mama]
 buzzes.clear()
