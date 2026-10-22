@@ -942,12 +942,14 @@ wait(lambda: app.offline.get_visible(), what="the bar")
 assert app.stack.get_visible_child_name() == "chat"  # the person stays where they are
 app.entry.set_text("Позвоню вечером")
 app.send()
-wait(lambda: app.sendb.get_sensitive(), what="the send answered")
-assert app.entry.get_text() == "Позвоню вечером" and app.sub.get_text().startswith("Нет связи")
+[out] = list(app.queue)  # not lost: waiting in the chat, marked
+wait(lambda: app.queue[out]["m"]["state"] == "failed", what="not sent")
 assert not [a for a in fake.asked("send") if a.get("text") == "Позвоню вечером"]
 shot("offline.png")
 fake.back()
 wait(lambda: not app.offline.get_visible(), what="the bar gone")
+wait(lambda: not app.queue, what="sent when back")
+assert [a for a in fake.asked("send") if a.get("text") == "Позвоню вечером"]
 fake.give_up()  # PyMax gave up: started again, the chat still in front
 wait(lambda: fake.runs == 2 and app.backend.accounts["max"].online, what="the link again")
 spin(0.1)
@@ -1012,50 +1014,59 @@ assert [c.attachment["name"] for c in app.attachbar.get_children()] == ["Дач�
 app.clip.clicked()  # both again: the photo not twice
 assert [c.attachment["name"] for c in app.attachbar.get_children()] == ["Дача.JPG", "Счёт.pdf"]
 shot("attachments.png")
-fake.drop()  # no connection: nothing lost
+fake.drop()  # no connection: nothing lost, it waits as a bubble and goes when it can
 wait(lambda: app.offline.get_visible(), what="the bar")
 app.entry.set_text("Вот счёт")
 app.send()
-wait(lambda: app.sendb.get_sensitive(), what="the send answered")
-assert len(app.attachbar.get_children()) == 2 and app.entry.get_text() == "Вот счёт"
-fake.back()
-wait(lambda: not app.offline.get_visible(), what="the bar gone")
-app.send()
-wait(lambda: app.sendb.get_sensitive(), what="sent")
-assert not app.attachbar.get_visible()
+assert app.entry.get_text() == "" and not app.attachbar.get_visible()  # it left the entry at once
+[out] = list(app.queue)
+m, box = app.view.msgs[out]
+assert m["text"] == "Вот счёт\n📎 Дача.JPG, Счёт.pdf" and m["mine"]
+wait(lambda: box.ticks.get_text() == "⚠ Не отправлено", what="not sent")
+assert box.unsent.get_visible() and [b.get_label() for b in box.unsent.get_children()] == ["Повторить", "Убрать"]
+shot("unsent.png")
+app.entry.set_text("Новое")  # typed meanwhile: stays
+fake.back()  # the connection back: it goes by itself
+wait(lambda: not app.queue, what="sent when the connection came back")
+assert out not in app.view.msgs
 assert fake.asked("send")[-1] == {"chat_id": mama, "text": "Вот счёт",
                                   "files": [("photo", "Дача.JPG", None), ("file", "Счёт.pdf", None)]}
-assert app.entry.get_text() == "" and app.chatlist.get(mama)["last"] == "Вы: Вот счёт"
+assert app.entry.get_text() == "Новое" and app.chatlist.get(mama)["last"] == "Вы: Вот счёт"
 sent = app.backend.cache.read(mama)[-1]
 assert sent["photos"] == ["https://i.oneme.ru/sent/Дача.JPG"] and sent["media"][0]["name"] == "Счёт.pdf"
-# Enter twice while it goes: one message; what is typed meanwhile stays
+# Enter twice: one message
 n = len(fake.asked("send"))
 app.entry.set_text("Раз")
 app.send()
 app.send()
-assert app.entry.get_text() == ""  # the draft went with the send
-app.entry.set_text("Два")
-wait(lambda: app.sendb.get_sensitive(), what="the send answered")
+wait(lambda: not app.queue, what="sent")
 assert len(fake.asked("send")) == n + 1 and fake.asked("send")[-1]["text"] == "Раз"
-assert app.entry.get_text() == "Два"
-# not sent while something new was typed: kept, back when the chat is opened
+# «Убрать» on one not sent: back in the entry, if nothing new is typed
 fake.drop()
 wait(lambda: app.offline.get_visible(), what="the bar")
+app.entry.set_text("Два")
 app.send()
-app.entry.set_text("Три")
-wait(lambda: app.sendb.get_sensitive(), what="the send refused")
-assert app.entry.get_text() == "Три"
-app.entry.set_text("Четыре")  # a second not sent while «Три» is typed: kept with the first
+[out] = list(app.queue)
+box = app.view.msgs[out][1]
+wait(lambda: box.unsent.get_visible(), what="not sent")
+[b for b in box.unsent.get_children() if b.get_label() == "Убрать"][0].clicked()
+assert not app.queue and out not in app.view.msgs and app.entry.get_text() == "Два"
+# «Повторить» while still offline: it tries, and says so again
 app.send()
-app.entry.set_text("Три")
-wait(lambda: app.sendb.get_sensitive(), what="the second send refused")
-fake.back()
-wait(lambda: not app.offline.get_visible(), what="the bar gone")
-app.entry.set_text("")
-app.show_list()
+[out] = list(app.queue)
+box = app.view.msgs[out][1]
+wait(lambda: box.unsent.get_visible(), what="not sent")
+[b for b in box.unsent.get_children() if b.get_label() == "Повторить"][0].clicked()
+assert box.ticks.get_text() == "🕓"
+wait(lambda: box.unsent.get_visible(), what="not sent again")
+app.show_list()  # its chat's view built anew: the message is still there, marked
+app.views.pop(mama).destroy()
+app.view = None
 app.open(mama)
-spin(0.2)
-assert app.entry.get_text() == "Два Четыре", app.entry.get_text()
+spin(0.3)
+assert out in app.view.msgs and app.view.msgs[out][1].ticks.get_text() == "⚠ Не отправлено"
+fake.back()
+wait(lambda: not app.queue, what="sent at last")
 app.entry.set_text("")
 # a voice message: held, let go
 assert app.recorder.available()
