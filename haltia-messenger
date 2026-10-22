@@ -281,7 +281,6 @@ MAIN_TAB = {"source_type": 5, "source_id": 1, "tab_config": 2}  # going to the c
 FLUSH_SEC = 3  # events go out in small batches, as the app sends them
 REACTIONS = ("👍", "❤️", "😂", "😮", "😢", "🔥")  # offered on a long press of a message
 REACTIONS_ASKED = 50  # newest messages of the chat in front whose reactions are asked
-REACTIONS_EVERY = 30  # s between those asks while the chat stays in front
 # The emoji panel of the message entry, by group; the recent ones come first.
 EMOJI = (
     ("Лица", "😀 😃 😄 😁 😆 😅 😂 🤣 😊 😇 🙂 😉 😌 😍 🥰 😘 😗 😋 😛 😜 🤪 🤗 🤔 🤨 "
@@ -1184,12 +1183,18 @@ class PyMaxLink:
                 self.tasks.add(task)
                 task.add_done_callback(self.tasks.discard)
                 return
-            if frame.opcode == Opcode.NOTIF_MSG_REACTIONS_CHANGED:
-                # PyMax 2.4.1 drops it: its event wants messageId as a string,
-                # MAX sends a number (the official app's log, 22 October 2026).
+            if frame.opcode in (Opcode.NOTIF_MSG_REACTIONS_CHANGED, Opcode.NOTIF_MSG_YOU_REACTED):
+                # PyMax 2.4.1 drops the first (its event wants messageId as a
+                # string, MAX sends a number) and has no event for the second.
+                # MAX sends REACTIONS_CHANGED to the message's author and
+                # YOU_REACTED, the counts in reactionInfo, to the others in the
+                # chat: its yourReaction is the one who reacted, not the
+                # account (the official app's log, 22 October 2026).
                 chat_id, msg_id = payload.get("chatId"), payload.get("messageId")
-                if chat_id is not None and msg_id is not None:
-                    reactions = [[c["reaction"], c["count"]] for c in payload.get("counters") or []
+                info = payload.get("reactionInfo") if frame.opcode == Opcode.NOTIF_MSG_YOU_REACTED \
+                    else payload
+                if chat_id is not None and msg_id is not None and isinstance(info, dict):
+                    reactions = [[c["reaction"], c["count"]] for c in info.get("counters") or []
                                  if c.get("reaction") and c.get("count")]
                     task = asyncio.ensure_future(
                         self.events.on_reaction(int(chat_id), int(msg_id), reactions))
@@ -6878,7 +6883,6 @@ class Max(Gtk.Application):
         self.clip.connect("clicked", lambda _b: self.attach())
         self.attached = []  # attachment()s waiting to be sent with the message (the open chat's)
         self.drafts = {}  # chat id -> {"text", "attached"} written there and not sent yet
-        self.react_timer = None  # watch_reactions' timer of the chat in front
         self.attachbar = Gtk.Box(spacing=10)
         self.attachbar.set_margin_start(16)
         self.attachbar.set_margin_end(16)
@@ -9075,23 +9079,17 @@ class Max(Gtk.Application):
         return False
 
     def watch_reactions(self, chat_id):
-        """The others' reactions on the newest messages of the chat in front,
-        asked at once and every REACTIONS_EVERY s while it stays there: MAX
-        tells a reaction only to the message's author."""
-        if self.react_timer:
-            GLib.source_remove(self.react_timer)
+        """The reactions of the newest messages of a chat opened, as the
+        official app asks them: those put while away came in no event (MAX's
+        events come live; the cached messages have the old counts)."""
         def ask():
             view = self.views.get(chat_id)
-            if self.open_chat != chat_id or view is None:
-                self.react_timer = None
-                return False
-            if self.stack.get_visible_child_name() == "chat" and self.win.get_mapped():
+            if self.open_chat == chat_id and view is not None:
                 self.backend.run(self.backend.reactions(chat_id, view.newest_ids()), lambda got, err: (
                     None if err or not got else
                     [self.reacted(chat_id, i, r, ...) for i, r in got.items()]))
-            return True
-        GLib.timeout_add(1500, lambda: ask() and False)  # once the history is in
-        self.react_timer = GLib.timeout_add_seconds(REACTIONS_EVERY, ask)
+            return False
+        GLib.timeout_add(1500, ask)  # once the history is in
 
     def reacted(self, chat_id, msg_id, reactions, yours):
         """New reactions of a message (yours: ... when not known to change)."""
