@@ -20,6 +20,12 @@
   </content_rating>
   <requires><control>touch</control></requires>
   <releases>
+    <release version="2.9.4" date="2026-10-22">
+      <description>
+        <p>Reactions from the official MAX apps arrive at once, on any message; opening a chat brings the reactions put while you were away.</p>
+        <p xml:lang="ru">Реакции из официальных приложений MAX приходят сразу, на любые сообщения; при открытии чата подтягиваются реакции, поставленные без вас.</p>
+      </description>
+    </release>
     <release version="2.9.3" date="2026-10-22">
       <description>
         <p>Reactions from other MAX apps now show up here too.</p>
