@@ -738,6 +738,14 @@ async def video_consent():
         accepted = next(v for v in socket.sent if isinstance(v, dict) and v["command"] == "accept-call")
         assert accepted["mediaSettings"]["isVideoEnabled"] == answer_video
         call.audio_state("connected")
+        # The microphone off: the peer is told, the call goes on
+        call.toggle_mute()
+        await until(lambda: any(isinstance(v, dict) and v.get("command") == "change-media-settings"
+                                and v["mediaSettings"]["isAudioEnabled"] is False for v in socket.sent))
+        assert call.muted and shown[-1] == call.video and not call.closed
+        call.toggle_mute()
+        assert not call.muted and call.media_settings()["isAudioEnabled"]
+        assert call.since is not None  # the talk's start, for its time on the screen
 
         async def switch(on):
             if call.video_wanted != on:

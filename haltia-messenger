@@ -355,6 +355,13 @@ button.gear {
 label.call-name { font-size: 36px; font-weight: bold; }
 label.call-state { font-size: 26px; }
 button.call-control { min-height: 80px; font-size: 30px; border-radius: 18px; }
+/* Green to take a call, as on every phone (Haltia's palette: #26a269). */
+button.call-answer { background-image: none; background-color: #26a269; border-color: #26a269;
+                     color: #ffffff; }
+button.call-answer label { color: #ffffff; }
+button.call-control.destructive-action { background-image: none; background-color: #e01b24;
+                                         border-color: #e01b24; color: #ffffff; }
+button.call-control.destructive-action label { color: #ffffff; }
 label.setting { font-size: 26px; }
 switch { min-width: 120px; min-height: 56px; border-radius: 28px; }
 switch slider { min-width: 56px; min-height: 56px; border-radius: 28px; }
@@ -2067,7 +2074,7 @@ class CallAudio:
             # Keep it in RTP caps: without it the MAX peer never answers.
             self.pipeline = Gst.parse_launch(
                 "webrtcbin name=rtc bundle-policy=max-bundle " + source +
-                " ! audioconvert ! audioresample ! audio/x-raw,rate=48000,channels=1 "
+                " ! audioconvert ! volume name=microphone ! audioresample ! audio/x-raw,rate=48000,channels=1 "
                 "! opusenc bitrate=32000 audio-type=voice inband-fec=true packet-loss-percentage=10 "
                 "complexity=5 ! rtpopuspay pt=111 "
                 "! application/x-rtp,media=audio,encoding-name=OPUS,payload=111,clock-rate=48000,"
@@ -2306,6 +2313,12 @@ class CallAudio:
             source.emit("push-buffer", buffer)
         return self.Gst.FlowReturn.OK
 
+    def set_mute(self, muted):
+        """The microphone off (silence goes) or on again."""
+        microphone = self.pipeline.get_by_name("microphone") if self.pipeline else None
+        if microphone is not None:
+            microphone.set_property("mute", bool(muted))
+
     def set_video(self, enabled):
         """Open only on a tap; stopping releases the device immediately.
         It blocks (finding the camera takes a second or more with libcamera):
@@ -2542,6 +2555,8 @@ class VoiceCall:
         self.video = bool(video) if not incoming else False
         self.video_wanted = self.video  # what the person asked for; video follows it
         self.sender_rebuilt = 0  # the video sender is built anew once after a failure
+        self.muted = False  # the microphone switched off in the call
+        self.since = None  # time.time() the talk began (active)
         self.video_error = None
         self.remote_video = None
         self.frame = None
@@ -2565,7 +2580,23 @@ class VoiceCall:
         self.hangup_done = asyncio.Event()  # send attempt finished, including pending ws2 opens
 
     def media_settings(self):
-        return dict(self.SETTINGS, isVideoEnabled=self.video)
+        return dict(self.SETTINGS, isVideoEnabled=self.video, isAudioEnabled=not self.muted)
+
+    def toggle_mute(self):
+        """«Выключить/Включить микрофон»: the peer hears silence meanwhile."""
+        if self.closed or self.audio is None:
+            return
+        self.muted = not self.muted
+        if hasattr(self.audio, "set_mute"):
+            self.audio.set_mute(self.muted)
+        self.show(self.state)
+
+        async def tell():
+            try:
+                await self.command("change-media-settings", mediaSettings=self.media_settings())
+            except Exception:
+                log_line("voice call: media settings not acknowledged")
+        self.job(tell())
 
     def hangup_reason(self):
         return "HUNGUP" if self.accepted else "REJECTED" if self.incoming else "CANCELED"
@@ -2573,6 +2604,8 @@ class VoiceCall:
     def show(self, state):
         if not self.closed:
             log_line("voice call: " + state)
+            if state == "active" and self.since is None:
+                self.since = time.time()
             self.state = state
             self.changed(self, state)
 
@@ -3079,6 +3112,8 @@ class Backend:
                 call.job(call.answer(video=video))
             elif action == "camera":
                 call.toggle_camera()
+            elif action == "mute":
+                call.toggle_mute()
             elif action == "end":
                 await call.end(call.hangup_reason())
 
@@ -3346,7 +3381,8 @@ class Account:
                     "photo": self.portraits.get(call.peer), "state": state,
                     "video_invitation": call.video_invitation, "video": call.video,
                     "video_error": call.video_error, "remote_video": call.remote_video,
-                    "video_wanted": call.video_wanted})
+                    "video_wanted": call.video_wanted,
+                    "muted": getattr(call, "muted", False), "since": getattr(call, "since", None)})
                 if call.closed:
                     self.call = None
                     if (call.incoming and not call.accepted
@@ -6099,15 +6135,19 @@ class Max(Gtk.Application):
         self.call_label = label("", "call-state", xalign=0.5, wrap=True)
         self.call_hint = label("Звук через динамики", "hint", xalign=0.5)
         self.call_answer = Gtk.Button(label="Ответить")
-        self.call_answer.get_style_context().add_class("suggested-action")
+        self.call_answer.get_style_context().add_class("call-answer")
         self.call_end = Gtk.Button(label="Завершить")
         self.call_end.get_style_context().add_class("destructive-action")
         for button in (self.call_answer, self.call_end):
             button.get_style_context().add_class("call-control")
         self.call_answer.connect("clicked", lambda _b: self.call_action("answer", video=self.call_video_invitation))
-        self.call_audio_answer = Gtk.Button(label="Ответить без видео")
-        self.call_audio_answer.get_style_context().add_class("call-control")
-        self.call_audio_answer.connect("clicked", lambda _b: self.call_action("answer", video=False))
+        self.call_mute = Gtk.Button(label="Выключить микрофон")
+        self.call_mute.get_style_context().add_class("call-control")
+        self.call_mute.connect("clicked", lambda _b: self.call_action("mute"))
+        self.call_since = None  # the talk's start, for its time on the screen
+        self.call_clock = None
+        self.call_muted = False
+        self.call_note = None
         self.call_camera = Gtk.Button(label="Включить камеру")
         self.call_camera.get_style_context().add_class("call-control")
         self.call_camera.connect("clicked", lambda _b: self.call_action("camera"))
@@ -6147,9 +6187,20 @@ class Max(Gtk.Application):
         self.call_remote.show()
         self.call_box.pack_start(self.call_video_area, True, True, 0)
         self.call_box.pack_start(identity_scroll, True, True, 0)
-        for child in (self.call_answer, self.call_audio_answer, self.call_camera, self.call_end):
-            self.call_box.pack_start(child, False, False, 0)
+        # As on a phone: in the talk the microphone and the camera side by side,
+        # under them «Отклонить» (red) beside «Ответить» (green), or «Завершить» alone.
+        switches = Gtk.Box(spacing=16, homogeneous=True)
+        for child in (self.call_mute, self.call_camera):
+            switches.pack_start(child, True, True, 0)
+            child.set_no_show_all(True)
+        switches.show()
+        answers = Gtk.Box(spacing=16, homogeneous=True)
+        for child in (self.call_end, self.call_answer):
+            answers.pack_start(child, True, True, 0)
             child.show()
+        answers.show()
+        self.call_box.pack_start(switches, False, False, 0)
+        self.call_box.pack_start(answers, False, False, 0)
         column.pack_start(self.stack, True, True, 0)
         # A separate page uses all available room, without losing the chat
         # underneath. Navigation cannot hide the hang-up button.
@@ -7775,7 +7826,6 @@ class Max(Gtk.Application):
             self.call_pages.set_visible_child_name("messages")
             return
         self.call_answer.set_sensitive(False)
-        self.call_audio_answer.set_sensitive(False)
         self.call_ringer.stop()
         if action == "answer":
             self.stop_sound()
@@ -7791,7 +7841,7 @@ class Max(Gtk.Application):
             self.call_video_area.hide()
             self.call_identity.show()
             self.call_camera.hide()
-            self.call_audio_answer.hide()
+            self.call_mute.hide()
             self.call_button.set_sensitive(True)
             self.call_label.set_text("Не удалось соединиться. Позвоните ещё раз, когда будете готовы.")
             self.call_answer.hide()
@@ -7799,6 +7849,17 @@ class Max(Gtk.Application):
             self.call_end.show()
             self.call_box.show()
             self.call_pages.set_visible_child_name("call")
+
+    def call_tick(self):
+        """The talk's time and the microphone, once a second while it lasts."""
+        if self.call_id is None or self.call_since is None:
+            self.call_clock = None
+            return False
+        if self.call_note:
+            return True
+        said = "Разговор %s" % mmss(int(time.time() - self.call_since))
+        self.call_label.set_text(said + (" · микрофон выключен" if self.call_muted else ""))
+        return True
 
     def call_frame(self, conversation, own, frame):
         # Called by Gst streaming threads: one latest frame per stream, one
@@ -7847,15 +7908,20 @@ class Max(Gtk.Application):
         terminal = state in ("ended", "failed", "unsupported")
         self.call_id = None if terminal else call["id"]
         text = {"ringing": "Входящий звонок", "dialling": "Звоним…",
-                "connecting": "Соединяемся…", "active": "Разговор · микрофон включён",
+                "connecting": "Соединяемся…", "active": "Разговор",
                 "ended": "Звонок завершён", "failed": "Связь прервалась",
                 "unsupported": "Этот вид соединения пока не поддерживается"}[state]
         self.call_video = bool(call.get("video")) and not terminal
         self.call_video_invitation = bool(call.get("video_invitation"))
         if state == "ringing" and self.call_video_invitation:
-            text = "Видеозвонок от " + call["name"]
-        self.call_audio_answer.set_visible(state == "ringing" and self.call_video_invitation)
-        self.call_audio_answer.set_sensitive(state == "ringing")
+            text = "Видеозвонок"  # from whom: the name above
+        self.call_muted = bool(call.get("muted"))
+        self.call_note = call.get("video_error")  # said instead of the talk's time
+        self.call_mute.set_visible(state == "active")
+        self.call_mute.set_label("Включить микрофон" if self.call_muted else "Выключить микрофон")
+        self.call_since = call.get("since") if state == "active" else None
+        if state == "active" and self.call_clock is None:
+            self.call_clock = GLib.timeout_add_seconds(1, self.call_tick)
         self.call_camera.set_visible(state == "active" and video_supported())
         wanted = call.get("video_wanted", self.call_video)
         self.call_camera.set_label("Выключить камеру" if wanted else "Включить камеру")
@@ -7875,6 +7941,8 @@ class Max(Gtk.Application):
         self.call_name.set_text(call["name"])
         self.call_hint.show()
         self.call_label.set_text(text)
+        if state == "active" and not call.get("video_error"):
+            self.call_tick()
         portrait = (call["id"], call.get("photo"))
         if portrait != self.call_portrait:
             self.call_portrait = portrait
