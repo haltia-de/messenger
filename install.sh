@@ -23,6 +23,8 @@ ln -sf haltia-messenger "$root$prefix/bin/b8k-max"
 install -D -m 644 "$here/data/$app.desktop" "$share/applications/$app.desktop"
 install -D -m 644 "$here/data/$app.svg" "$share/icons/hicolor/scalable/apps/$app.svg"
 install -D -m 644 "$here/data/$app.metainfo.xml" "$share/metainfo/$app.metainfo.xml"
+install -D -m 644 "$here/data/ringtone.wav" "$share/haltia-messenger/ringtone.wav"
+install -D -m 644 "$here/data/ringtone.md" "$share/haltia-messenger/ringtone.md"
 install -D -m 644 "$here/data/$app.autostart.desktop" "$root/etc/xdg/autostart/$app.desktop"
 # The old id's .desktop file, hidden: pins and links to it still start the program.
 install -D -m 644 "$here/data/$old.desktop" "$share/applications/$old.desktop"

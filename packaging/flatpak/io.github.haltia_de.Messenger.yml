@@ -194,6 +194,8 @@ modules:
       - install -D -m 644 data/io.github.haltia_de.Messenger.desktop /app/share/applications/io.github.haltia_de.Messenger.desktop
       - install -D -m 644 data/io.github.haltia_de.Messenger.svg /app/share/icons/hicolor/scalable/apps/io.github.haltia_de.Messenger.svg
       - install -D -m 644 data/io.github.haltia_de.Messenger.metainfo.xml /app/share/metainfo/io.github.haltia_de.Messenger.metainfo.xml
+      - install -D -m 644 data/ringtone.wav /app/share/haltia-messenger/ringtone.wav
+      - install -D -m 644 data/ringtone.md /app/share/haltia-messenger/ringtone.md
     sources:
       - type: dir
         path: ../..

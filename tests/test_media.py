@@ -4,8 +4,14 @@
 through, the one header, redirects, the photo cache and its pruning, voice,
 the player's command line, files, the log."""
 import os
+import array
+import shutil
+import sys
+import tempfile
 import time
 import urllib.request
+import wave
+from unittest.mock import patch
 
 from common import load, ok
 
@@ -28,6 +34,27 @@ def log():
         return open(bm.LOG).read()
     except OSError:
         return ""
+
+
+# --- the bundled call melody: audible phrases and a quiet loop boundary ----------
+ringtone = bm.ringtone_file()
+with wave.open(ringtone, "rb") as sound:
+    assert sound.getnchannels() == 1 and sound.getsampwidth() == 2
+    assert sound.getframerate() == 24000 and sound.getnframes() == 4 * 24000
+    samples = array.array("h", sound.readframes(sound.getnframes()))
+    if sys.byteorder != "little":
+        samples.byteswap()
+    assert 10000 < max(abs(sample) for sample in samples) < 32767
+    assert any(samples[:24000]) and any(samples[24000:48000])
+    assert not any(samples[-24000:])  # a pause before repeating; no splice click
+with tempfile.TemporaryDirectory() as prefix:
+    os.makedirs(os.path.join(prefix, "bin"))
+    installed = os.path.join(prefix, "share", "haltia-messenger", "ringtone.wav")
+    os.makedirs(os.path.dirname(installed))
+    shutil.copyfile(ringtone, installed)
+    with patch.object(bm, "__file__", os.path.join(prefix, "bin", "haltia-messenger")):
+        assert bm.ringtone_file() == installed
+ok("bundled ringtone PCM, headroom, phrases, quiet tail and installation-prefix lookup")
 
 
 # --- which links: https on MAX's hosts only ------------------------------------------------
