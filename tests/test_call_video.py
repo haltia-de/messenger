@@ -6,6 +6,7 @@ import asyncio
 from common import load, ok
 
 bm = load()
+bm.SETTINGS.set("calls_video", True)  # «Видеозвонки» on here (off by default, #55); voice-only below
 
 
 async def video_pair():
