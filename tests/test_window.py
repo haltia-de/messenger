@@ -1344,3 +1344,29 @@ with _patch.object(app.media, "photo", lambda url, done, **k: asked.append((url,
     assert app.viewer_pix is late
     app.close_photo()
 ok("a view out of sight; the photo asked last")
+
+# --- pictures: a person's photo, round, in the list and in the chat's header -----------------
+NINA = fake.person(77, "Нина", contact=True, photo="https://i.oneme.ru/nina.jpg")
+nina = fake.dialog(NINA)
+fake.incoming(nina, "Здравствуй", NINA)
+app.show_list()
+wait(lambda: nina in app.rows, what="Нина's row")
+wait(lambda: any(isinstance(w, Gtk.Image) for w in walk(app.rows[nina])), what="her photo in the list")
+face = [w for w in walk(app.rows[nina]) if isinstance(w, Gtk.Image)][0]
+assert face.get_pixbuf().get_width() == 64 and face.get_pixbuf().get_has_alpha()  # round, as the initials were
+assert app.chatlist.get(nina)["photo"] == "https://i.oneme.ru/nina.jpg"
+# a new message redraws her row: her face at once, kept round in memory (no initials flash)
+fetched = len(hands.fetched)
+fake.incoming(nina, "Как ты?", NINA)
+wait(lambda: app.chatlist.get(nina)["last"] == "Как ты?", what="the new message")
+assert any(isinstance(w, Gtk.Image) for w in walk(app.rows[nina]))
+assert not [w for w in walk(app.rows[nina]) if isinstance(w, Gtk.DrawingArea)]  # no initials
+assert ("https://i.oneme.ru/nina.jpg", 64) in bm.FACES
+app.open(nina)
+wait(lambda: any(isinstance(w, Gtk.Image) for w in walk(app.head_face)), what="her photo in the header")
+assert app.head_face.get_visible()
+shot("avatars.png")
+app.show_list()
+spin(0.1)
+assert not app.head_face.get_visible()
+ok("pictures")
