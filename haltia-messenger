@@ -9014,6 +9014,7 @@ class Max(Gtk.Application):
         MAX says, or count it here if MAX sent no counts."""
         def done(res, err):
             if err:
+                log_line("reaction not put: %s %s" % (type(err).__name__, getattr(err, "error", "") or ""))
                 if self.open_chat == chat_id:
                     self.sub.set_text("реакция не отправлена, попробуйте ещё раз")
                 return
