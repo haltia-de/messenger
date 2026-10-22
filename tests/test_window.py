@@ -299,6 +299,12 @@ fake.counts = True
 fake.reaction(mama, first, [("👍", 3), ("😂", 1)])
 wait(lambda: len(chips(v, first)) == 2, what="someone's reaction")
 assert [b.get_label() for b in chips(v, first)] == ["👍 3", "😂 1"]
+# MAX tells a reaction only to the message's author: the chat in front asks
+# its newest messages' reactions, so one put on another's message shows too
+next(m for m in fake.msgs[mama] if m.id == first).reactions = [["🔥", 2]]
+app.watch_reactions(mama)
+wait(lambda: [b.get_label() for b in chips(v, first)] == ["🔥 2"], what="asked reactions")
+assert first in fake.asked("reactions")[-1]["msg_ids"]
 app.edit.clicked()  # the chat's menu: rename, pin, notifications, delete
 spin(0.1)
 assert list(menu_items()) == ["✏️ Переименовать", "📌 Закрепить сверху", "🔕 Без оповещений",
