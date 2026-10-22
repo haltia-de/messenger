@@ -70,7 +70,7 @@ def camera_refresh():
                 "v4l2src" if failure == "raw-fallback" and n else "libcamerasrc")
             source.link_filtered.return_value = not (failure == "link-twice" or
                 (n == 0 and failure in ("link", "raw-fallback")))
-            peers.append(SimpleNamespace(front=True, make=Mock(return_value=source)))
+            peers.append(SimpleNamespace(front=True, make=lambda source=source: source))  # kit 2.3.0: no size
         discoveries = [[], [peers[1]]] if failure == "missing" else [[peers[0]], [peers[1]]]
         if failure == "persistent":
             discoveries = [[], []]
@@ -137,7 +137,9 @@ def turned_camera():
     from gi.repository import Gst
     import haltia_kit
     Gst.init(None)
-    def make():
+    asked = []
+    def make(caps=None):  # haltia-kit 2.3.1: the size asked before the turn
+        asked.append(caps)
         box = Gst.Bin.new(None)
         src = Gst.ElementFactory.make("videotestsrc", None)
         src.set_property("is-live", True)
@@ -172,6 +174,13 @@ def turned_camera():
             time.sleep(.05)
         audio.camera.set_state(Gst.State.NULL)
     assert sizes and all(h > w for w, h in sizes), sizes  # upright, as turned
+    assert asked[-1] == "video/x-raw,width=480,height=360" and audio.sized
+    # haltia-kit 2.3.0's make() takes no size: the plain source, sized by the call
+    old = SimpleNamespace(front=True, make=lambda: make())
+    with patch.dict(bm.os.environ, {"HALTIA_CAMERA_SOURCE": ""}), \
+            patch.object(haltia_kit, "camera", SimpleNamespace(cameras=lambda: [old]), create=True):
+        assert audio._start_camera(None) and not audio.sized
+        audio.camera.set_state(Gst.State.NULL)
     ok("a camera turned with the screen: its source found inside, its picture upright")
 
 

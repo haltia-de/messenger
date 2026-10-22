@@ -2577,13 +2577,19 @@ class CallAudio:
             if not found:
                 raise RuntimeError("no camera")
             chosen = next((c for c in found if c.front), found[0])
-            source = chosen.make()
+            width, height, _fps = self.video_size
+            try:
+                # haltia-kit 2.3.1: the size asked of the camera before kit
+                # turns the picture with the screen (a bin: source, size, flip).
+                source = chosen.make(caps="video/x-raw,width=%d,height=%d" % (width, height))
+                self.sized = True
+            except TypeError:  # haltia-kit 2.3.0: the source alone, sized below
+                source = chosen.make()
+                self.sized = False
         if source is None:
             raise RuntimeError("no camera source")
-        # haltia-kit 2.4 turns the picture with the screen: make() gives a bin,
-        # the source then a videoflip. Its kind is the source's inside it.
-        inner = self._source_of(source)
-        self.camera_kind = inner.get_factory().get_name()
+        # Its kind is the source's, inside kit's bin if it is one (read only).
+        self.camera_kind = self._source_of(source).get_factory().get_name()
         if previous_kind == "libcamerasrc" and self.camera_kind != "libcamerasrc":
             # A raw Bayer V4L2 node is not a replacement for libcamera's ISP.
             raise RuntimeError("libcamera unavailable")
@@ -2607,16 +2613,11 @@ class CallAudio:
         try:
             camera.add(source)
             rate = camera.get_by_name("rate")
-            size = self.Gst.Caps.from_string("video/x-raw,width=%d,height=%d" % (width, height))
-            if self.camera_kind == "libcamerasrc" and inner is source:
-                linked = source.link_filtered(rate, size)
-            elif self.camera_kind == "libcamerasrc":
-                # The size is asked of libcamera before the turn, between the
-                # source and kit's videoflip: else it gives its own (960×640).
-                pad = inner.get_static_pad("src").get_peer()
-                turn = pad.get_parent_element() if pad is not None else None
-                linked = turn is not None and inner.unlink(turn) is None and \
-                    inner.link_filtered(turn, size) and source.link(rate)
+            if self.camera_kind == "libcamerasrc" and not getattr(self, "sized", False):
+                # kit 2.3.0's plain source: the size asked here, else libcamera
+                # gives its own (960×640, much heavier).
+                linked = source.link_filtered(rate, self.Gst.Caps.from_string(
+                    "video/x-raw,width=%d,height=%d" % (width, height)))
             else:
                 linked = source.link(rate)
             if not linked:
