@@ -86,7 +86,20 @@ assert card(app.settings_cards).state == "out"  # the settings draw the same
 shot("login.png")
 buttons(c)["Войти по QR-коду"].clicked()
 wait(lambda: card(app.login_cards).state == "waiting", what="the QR code")
-assert any(isinstance(w, Gtk.Image) for w in card(app.login_cards).get_children())
+def every(w):
+    yield w
+    if isinstance(w, Gtk.Container):
+        for c in w.get_children():
+            yield from every(c)
+
+
+assert any(isinstance(w, Gtk.Image) for w in every(card(app.login_cards)))
+# beside the code, the way to it on the phone: three large steps
+steps = [w.get_text() for w in every(card(app.login_cards))
+         if isinstance(w, Gtk.Label) and w.get_style_context().has_class("qr-step")]
+assert steps == ["1.  Откройте MAX на телефоне", "2.  Настройки → Устройства",
+                 "3.  «Войти по QR-коду» и наведите камеру на этот код"], steps
+shot("login-qr.png")
 assert fake.runs == 1
 fake.scan()
 wait(lambda: app.stack.get_visible_child_name() == "chats", what="the list")
@@ -147,7 +160,8 @@ wait(lambda: card(app.settings_cards, "telegram").state == "out", what="Telegram
 assert app.tagged and row_time(mama).startswith("MAX · ")  # two messengers: each row says whose
 buttons(card(app.settings_cards, "telegram"))["Войти по QR-коду"].clicked()
 wait(lambda: card(app.settings_cards, "telegram").state == "waiting", what="Telegram's QR code")
-assert any("Подключить устройство" in h for h in hints(card(app.settings_cards, "telegram")))
+assert any("Подключить устройство" in w.get_text() for w in every(card(app.settings_cards, "telegram"))
+           if isinstance(w, Gtk.Label))
 tg.scan()
 wait(lambda: card(app.settings_cards, "telegram").state == "password", what="the password asked")
 shot("telegram-password.png")

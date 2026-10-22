@@ -1062,7 +1062,7 @@ spin(0.2)
 app.show_qr("max", qr)  # MAX ended the login: the code, from the chat
 assert app.stack.get_visible_child_name() == "login" and not app.back.get_visible()
 card = [c for c in app.login_cards.get_children() if c.account == "max"][0]
-assert card.state == "waiting" and any(isinstance(w, bm.Gtk.Image) for w in card.get_children())
+assert card.state == "waiting" and any(isinstance(w, bm.Gtk.Image) for w in walk(card))  # beside its steps
 app.show_chats("max", list(listed.values()))
 assert app.stack.get_visible_child_name() == "chats"
 ok("no connection, and a login from anywhere")
