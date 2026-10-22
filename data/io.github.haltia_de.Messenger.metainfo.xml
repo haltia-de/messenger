@@ -25,9 +25,11 @@
         <p>The camera in a call asks for the right size, so it no longer goes dark by itself.</p>
         <p>Incoming calls now play our own melody.</p>
         <p>A second tap on a call button within a second is ignored.</p>
+        <p>Video in a call adapts more gently: the load is not judged for the first 15 seconds, quality drops only after two checks in a row, and the camera no longer switches itself off.</p>
         <p xml:lang="ru">В звонке камера запрашивает правильный размер, поэтому больше не гаснет сама.</p>
         <p xml:lang="ru">Для входящих звонков звучит своя мелодия.</p>
         <p xml:lang="ru">Повторное касание кнопки звонка в течение секунды не принимается.</p>
+        <p xml:lang="ru">Видео в звонке подстраивается мягче: первые 15 секунд нагрузка не оценивается, качество снижается только после двух проверок подряд, а камера сама больше не выключается.</p>
       </description>
     </release>
     <release version="2.9.1" date="2026-10-22">

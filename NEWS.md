@@ -10,6 +10,8 @@
 
 Повторное касание кнопки звонка в течение секунды не принимается.
 
+Видео в звонке подстраивается мягче: первые 15 секунд нагрузка не оценивается, качество снижается только после двух проверок подряд, а камера сама больше не выключается.
+
 ### English
 
 The camera in a call asks for the right size, so it no longer goes dark by itself.
@@ -17,6 +19,8 @@ The camera in a call asks for the right size, so it no longer goes dark by itsel
 Incoming calls now play our own melody.
 
 A second tap on a call button within a second is ignored.
+
+Video in a call adapts more gently: the load is not judged for the first 15 seconds, quality drops only after two checks in a row, and the camera no longer switches itself off.
 
 ## 2.9.1 (2026-10-22)
 
