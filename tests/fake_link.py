@@ -31,6 +31,7 @@ def user(uid, name):
 class FakeLink:
     hosts = ("max.ru",)
     can = frozenset({"phone", "links", "search", "react", "forward", "telemetry", "invites"})
+    seen_by = "time"  # as MAX: a chat's seen is a time
 
     def dialog_id(self, peer):
         """A dialog's id: as MAX numbers it (own id XOR theirs), or, with a
@@ -129,6 +130,11 @@ class FakeLink:
         if chat is not None and chat.last is not None and chat.last.id in msg_ids:
             chat.last = self.msgs[cid][-1] if self.msgs[cid] else None
         self._push(self.events.on_delete(cid, list(msg_ids)))
+
+    def peer_read(self, cid, mark):
+        """The others read the chat up to mark (MAX's NOTIF_MARK). The chats
+        are the same objects the account holds: it keeps the mark itself."""
+        self._push(self.events.on_read(cid, mark))
 
     def reaction(self, cid, msg_id, reactions):
         self._push(self.events.on_reaction(cid, msg_id, [list(r) for r in reactions]))

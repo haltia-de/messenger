@@ -312,6 +312,8 @@ label.badge {
 label.msg { font-size: 25px; }
 label.who { font-size: 19px; font-weight: bold; color: #1c71d8; }
 label.when { font-size: 16px; color: #77767b; }
+label.ticks { font-size: 22px; font-weight: bold; color: #77767b; }
+label.ticks.read { color: #1c71d8; }
 label.day { font-size: 19px; color: #5e5c64; background-color: #dcdcda;
             border-radius: 14px; padding: 4px 16px; }
 .inputbar { background-color: #dcdcda; padding: 10px; }
@@ -756,12 +758,16 @@ def max_message(msg):
     return out
 
 
-def max_chat(c):
-    """A PyMax Chat as the link's own."""
+def max_chat(c, me=None):
+    """A PyMax Chat as the link's own. Its participants are {id: read mark}:
+    the others' newest mark is how far they have read (seen, a time)."""
     members = list(c.participants or {})
+    seen = max((int(v or 0) for uid, v in (c.participants or {}).items() if uid != me),
+               default=0) if me is not None else 0
     return Chat(c.id, kind(c.type), c.title or None, members,
                 c.participants_count or len(members), c.new_messages or 0,
-                max_message(c.last_message) if c.last_message else None, c.last_event_time or 0)
+                max_message(c.last_message) if c.last_message else None, c.last_event_time or 0,
+                seen=seen)
 
 
 def max_person(user):
@@ -809,6 +815,7 @@ class Chat:
     last: Message = None  # its last message
     time: int = 0  # ms of its last event
     link: str = None  # a public channel's or group's link (https://…), to join it by
+    seen: int = 0  # how far the others have read the account's messages (the link's seen_by)
 
 
 # --- MAX, in its own thread -------------------------------------------------
@@ -949,6 +956,8 @@ class PyMaxLink:
     # What it can besides messages (Account.can): find by phone, join by
     # link, reactions, forwarding, telemetry, its own invite setting.
     can = frozenset({"phone", "links", "search", "react", "forward", "telemetry", "invites"})
+    seen_by = "time"  # a chat's seen is a time: own messages up to it are read
+    me_id = None  # the account's own id, once signed in
 
     @staticmethod
     def dialog_of(me, user):
@@ -982,6 +991,7 @@ class PyMaxLink:
         self.client.on_start()(self._started)
         self.client.on_message()(self._message)
         self.client.on_reaction_update()(self._reaction)
+        self.client.on_message_read()(self._read)
         self.client.on_disconnect()(self._disconnected)
         await self.client.start()
 
@@ -1078,8 +1088,9 @@ class PyMaxLink:
         except AttributeError:
             agent = None
         me = client.me.contact if client.me else None
+        self.me_id = me.id if me else None
         await self.events.on_login(max_person(me) if me else None,
-                                   [max_chat(c) for c in client.chats or []],
+                                   [max_chat(c, self.me_id) for c in client.chats or []],
                                    [max_person(u) for u in client.contacts or [] if u],
                                    agent, device.client_session_id)
 
@@ -1092,6 +1103,12 @@ class PyMaxLink:
     async def _reaction(self, event, _client):
         reactions = [[c.reaction, c.count] for c in event.counters or [] if c.count]
         await self.events.on_reaction(event.chat_id, int(event.message_id), reactions)
+
+    async def _read(self, event, _client):
+        """NOTIF_MARK: someone read a chat up to a time; another than the
+        account means its messages up to then are read."""
+        if not event.set_as_unread and event.user_id != self.me_id:
+            await self.events.on_read(event.chat_id, int(event.mark))
 
     async def dial(self, conversation, peer, video=False):
         device = self.client._app.session.device_id
@@ -1110,10 +1127,10 @@ class PyMaxLink:
     # chats and people
     async def chats_page(self, marker=None):
         """A page of the chat list, the newest first, older than marker (ms)."""
-        return [max_chat(c) for c in await self._api.chats.fetch_chats(marker) or []]
+        return [max_chat(c, self.me_id) for c in await self._api.chats.fetch_chats(marker) or []]
 
     async def chats(self, ids):
-        return [max_chat(c) for c in await self._api.chats.get_chats(list(ids)) or [] if c]
+        return [max_chat(c, self.me_id) for c in await self._api.chats.get_chats(list(ids)) or [] if c]
 
     async def users(self, ids):
         return [max_person(u) for u in await self._api.users.get_users(list(ids)) or [] if u]
@@ -1157,10 +1174,10 @@ class PyMaxLink:
         frame = LinkInfoPayload(link=link[at:] if at != -1 else link)
         response = await self.client._app.invoke(Opcode.LINK_INFO, frame.to_payload())
         chat = parse_payload_item_model(response, ChatPayloadKey.CHAT, Chat)
-        return max_chat(chat) if chat is not None else None
+        return max_chat(chat, self.me_id) if chat is not None else None
 
     async def join(self, link):
-        return max_chat(await self._api.chats.join_channel(link))  # groups too
+        return max_chat(await self._api.chats.join_channel(link), self.me_id)  # groups too
 
     async def leave(self, chat_id):
         """Out of a group or channel."""
@@ -1434,7 +1451,7 @@ def tg_message(msg, me=None):
     return out
 
 
-def tg_chat(entity, me, unread=0, last=None):
+def tg_chat(entity, me, unread=0, last=None, seen=0):
     """A Chat of Telethon's user (a dialog with them), group or channel."""
     from telethon import utils
     from telethon.tl import types
@@ -1447,7 +1464,7 @@ def tg_chat(entity, me, unread=0, last=None):
         broadcast = isinstance(entity, types.Channel) and entity.broadcast
         kind, title, members = "CHANNEL" if broadcast else "CHAT", entity.title, [me]
     count = getattr(entity, "participants_count", None) or len(members)
-    chat = Chat(cid, kind, title, members, count, unread)
+    chat = Chat(cid, kind, title, members, count, unread, seen=seen or 0)
     if last is not None:
         chat.last = tg_message(last, me)
         chat.time = chat.last.time
@@ -1470,6 +1487,7 @@ class TelethonLink:
     prefix = "tg:"
     hosts = TG_HOSTS
     can = frozenset({"phone", "links", "search", "react", "forward"})
+    seen_by = "id"  # a chat's seen is a message id: own messages up to it are read
 
     @staticmethod
     def dialog_of(_me, user):
@@ -1536,11 +1554,13 @@ class TelethonLink:
             client.add_event_handler(self._message, tev.NewMessage())
             client.add_event_handler(self._deleted, tev.MessageDeleted())
             client.add_event_handler(self._reaction, tev.Raw(types.UpdateMessageReactions))
+            client.add_event_handler(self._read, tev.MessageRead(inbox=False))
             me = await client.get_me()
             self.me = tg_id(me.id)
             chats = []
             async for d in client.iter_dialogs(limit=300):
-                chats.append(tg_chat(d.entity, self.me, d.unread_count, d.message))
+                chats.append(tg_chat(d.entity, self.me, d.unread_count, d.message,
+                                     getattr(d.dialog, "read_outbox_max_id", 0)))
                 person = tg_person(d.entity)
                 self.people[person.id] = person
             try:
@@ -1588,6 +1608,10 @@ class TelethonLink:
 
         counts, _yours = tg_reactions(update.reactions)
         await self.events.on_reaction(tg_id(utils.get_peer_id(update.peer)), update.msg_id, counts)
+
+    async def _read(self, event):
+        """The account's messages read up to max_id (Telegram's seen is an id)."""
+        await self.events.on_read(tg_id(event.chat_id), event.max_id)
 
     async def _peer(self, some_id):
         return await self.client.get_input_entity(tg_number(some_id))
@@ -3442,6 +3466,14 @@ class Account:
         self.cache.react(chat_id, msg_id, reactions)
         GLib.idle_add(self.ui.reacted, chat_id, msg_id, reactions, ...)
 
+    async def on_read(self, chat_id, mark):
+        """The others read the account's messages in a chat up to mark (a time
+        or an id, as the link's seen_by says): ✓✓ on them."""
+        chat = self.chats.get(chat_id)
+        if chat is not None and mark > (chat.seen or 0):
+            chat.seen = mark
+            GLib.idle_add(self.ui.seen, chat_id, mark)
+
     # --- names, summaries, messages ---------------------------------------------
     async def lookup(self, ids):
         ids = [i for i in ids if i and i not in self.names]
@@ -3498,7 +3530,8 @@ class Account:
         peer = self.peer(chat)
         return {"id": chat.id, "account": self.id, "title": self.title(chat), "type": chat.kind,
                 "last": self.preview(last), "time": (last.time if last else 0) or chat.time,
-                "unread": chat.unread, "peer": peer,
+                "unread": chat.unread, "peer": peer, "seen": chat.seen or 0,
+                "seen_by": getattr(self.link, "seen_by", "time"),
                 "stranger": peer is not None and peer not in self.known}
 
     def message(self, msg):
@@ -4833,8 +4866,10 @@ class ChatView:
     photo. Everything is called on the GTK side."""
 
     def __init__(self, chat_id, kind, cached, fetch_older, on_hold, on_media, on_react,
-                 photo, on_photo=lambda url: None, on_forward=None, on_save=None, missed=None):
+                 photo, on_photo=lambda url: None, on_forward=None, on_save=None, missed=None,
+                 seen=0, seen_by="time"):
         self.chat_id = chat_id
+        self.seen_mark, self.seen_by = seen or 0, seen_by  # how far the others have read
         self.group = kind in ("CHAT", "CHANNEL")  # senders' names over their bubbles
         self.channel = kind == "CHANNEL"  # its posts keep the ↪ beside them
         self.fetch_older, self.on_hold = fetch_older, on_hold
@@ -5027,6 +5062,31 @@ class ChatView:
                 m["yours"] = yours
             self._fill_reactions(msg_id)
 
+    def read(self, m):
+        """Have the others read this own message?"""
+        if not self.seen_mark:
+            return False
+        if self.seen_by == "id":
+            return isinstance(m["id"], int) and m["id"] <= self.seen_mark
+        return (m["time"] or 0) <= self.seen_mark
+
+    def _tick(self, m, ticks):
+        read = self.read(m)
+        ticks.set_text("✓✓" if read else "✓")
+        ticks.set_tooltip_text("Прочитано" if read else "Доставлено")
+        (ticks.get_style_context().add_class if read else
+         ticks.get_style_context().remove_class)("read")
+
+    def seen(self, mark):
+        """The others read up to mark: their ✓ become ✓✓."""
+        if mark <= self.seen_mark:
+            return
+        self.seen_mark = mark
+        for m, box in self.msgs.values():
+            ticks = getattr(box, "ticks", None)
+            if ticks is not None:
+                self._tick(m, ticks)
+
     def message(self, msg_id):
         """The message as built, or None."""
         return self.msgs[msg_id][0] if msg_id in self.msgs else None
@@ -5204,7 +5264,17 @@ class ChatView:
         bubble.pack_start(reacts, False, False, 0)
         self.msgs[m["id"]] = (m, reacts)
         self._fill_reactions(m["id"])
-        bubble.pack_start(label(when(m["time"], full=True), "when", xalign=1.0), False, False, 0)
+        at = label(when(m["time"], full=True), "when", xalign=1.0)
+        if m["mine"]:
+            # ✓ sent, ✓✓ read, as in MAX and Telegram: «дошло ли?»
+            foot = Gtk.Box(spacing=6, halign=Gtk.Align.END)
+            foot.pack_start(at, False, False, 0)
+            reacts.ticks = label("", "ticks")
+            foot.pack_start(reacts.ticks, False, False, 0)
+            self._tick(m, reacts.ticks)
+            bubble.pack_start(foot, False, False, 0)
+        else:
+            bubble.pack_start(at, False, False, 0)
         hold.msg_id = m["id"]
         hold.show_all()
         return hold
@@ -7371,7 +7441,9 @@ class Max(Gtk.Application):
                 photo=self.media.photo, on_photo=self.show_photo,
                 on_forward=lambda msg_id: self.show_forward(chat_id, msg_id),
                 on_save=lambda m, item, b: self.save_message(chat_id, m, [item], b),
-                missed=self.missed_calls.get(str(chat_id)))
+                missed=self.missed_calls.get(str(chat_id)),
+                seen=self.about(chat_id).get("seen", 0),
+                seen_by=self.about(chat_id).get("seen_by", "time"))
         self.views[chat_id] = view  # most recently used last
         while len(self.views) > VIEWS:
             old_id = next(iter(self.views))
@@ -7874,6 +7946,16 @@ class Max(Gtk.Application):
         view = self.views.get(chat_id)
         if view:
             view.reacted(msg_id, reactions, yours)
+        return False
+
+    def seen(self, chat_id, mark):
+        """The others read a chat up to mark (Backend: on_read)."""
+        s = self.chatlist.get(chat_id)
+        if s is not None:
+            s["seen"] = max(s.get("seen") or 0, mark)
+        view = self.views.get(chat_id)
+        if view:
+            view.seen(mark)
         return False
 
     # emoji in the message
