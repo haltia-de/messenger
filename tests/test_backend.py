@@ -178,12 +178,10 @@ assert out["forwarded"] == "Работа"  # from a group: its name
 pl = bm.forward_payload(-80, "117455094100479781", 11, -1792000000000)
 assert pl["message"]["link"] == {"type": "FORWARD", "messageId": 117455094100479781, "chatId": 11}
 assert pl["chatId"] == -80 and pl["message"]["cid"] == -1792000000000
-import json  # noqa: E402
 assert '"messageId": 117455094100479781' in json.dumps(pl)
 ok("forwarding")
 
 # --- 2.0's rename: b8k-max's session, data, cache and settings move over once ------------------
-import shutil  # noqa: E402
 for d in (bm.DATA, bm.PHOTOS, bm.CONFIG):
     shutil.rmtree(d, ignore_errors=True)
 OLD_DATA = os.path.join(bm.BASES[1], "b8k-max")

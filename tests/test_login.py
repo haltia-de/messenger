@@ -168,6 +168,9 @@ wait(lambda: card(app.settings_cards, "telegram").state == "in", what="in Telegr
 assert "Вход выполнен: Я" in hints(card(app.settings_cards, "telegram"))
 wait(lambda: sasha in app.rows, what="Telegram's chat in the list")
 assert row_time(sasha).startswith("Telegram · ") and mama in app.rows
+app.open(sasha)  # a Telegram chat opens (its id is a string: «chat-%s», not %d)
+assert app.stack.get_visible_child_name() == "chat" and app.open_chat == sasha
+app.show_list()
 switch(card(app.settings_cards, "telegram")).set_active(False)
 wait(lambda: sasha not in app.chatlist.chats and not app.tagged, what="Telegram off")
 ok("Telegram: the QR code, the cloud password, the rows say whose")
