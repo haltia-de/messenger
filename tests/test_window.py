@@ -1182,10 +1182,70 @@ assert ms >= 3000 and fake.asked("send")[-1]["text"] == ""
 wait(lambda: not os.path.exists(recorded), what="the recording removed")
 assert app.entry.get_visible() and not app.mic.get_style_context().has_class("recording")
 n = len(fake.asked("send"))
-app.record_start()  # a tap, not a message: nothing sent
+app.record_start()  # too short, not a message: nothing sent
 app.record_stop(True)
-wait(lambda: app.sub.get_text() == "Держите кнопку, пока говорите", what="the hint")
+wait(lambda: app.sub.get_text() == "Слишком коротко: скажите подольше", what="the hint")
 assert len(fake.asked("send")) == n
+# held, let go after a while: it goes, as before
+app.record_start()
+app.record_began -= 2
+app.recorder.began -= 2
+app.record_released()
+wait(lambda: len(fake.asked("send")) == n + 1, what="the held voice sent")
+assert not app.recorder.recording()
+# tapped: it records on without the finger, «Отправить» sends it
+app.record_start()
+app.record_released()
+assert app.recorder.recording() and app.record_locked and app.record_cancel.get_visible()
+assert not app.entry.get_visible() and app.sendb.get_visible()
+app.recorder.began -= 3
+spin(0.3)
+assert "«Отправить»" in app.record_label.get_text()
+shot("recording-tapped.png")
+app.mic.hold.emit("cancel", None)  # a finger sliding off changes nothing now
+assert app.recorder.recording()
+app.sendb.clicked()
+wait(lambda: len(fake.asked("send")) == n + 2, what="the tapped voice sent")
+assert fake.asked("send")[-1]["files"][0][0] == "voice" and not app.record_cancel.get_visible()
+# tapped, then the microphone again: it goes too
+app.record_start()
+app.record_released()
+app.recorder.began -= 3
+app.record_start()
+wait(lambda: len(fake.asked("send")) == n + 3, what="the voice sent by the microphone")
+# tapped, then the chat left (back, another chat, the window hidden): it
+# stops, nothing goes anywhere, the microphone is off
+for leave in (lambda: app.go_back(), lambda: app.open(dacha), lambda: app.win.hide()):
+    app.open(mama)
+    spin(0.1)
+    app.record_start()
+    app.record_released()
+    app.recorder.began -= 3
+    leave()
+    spin(0.3)
+    assert not app.recorder.recording() and not app.record_locked
+    assert len(fake.asked("send")) == n + 3
+    app.win.show()
+    app.sendb.clicked()  # «Отправить» later sends nothing recorded
+    spin(0.2)
+    assert len(fake.asked("send")) == n + 3
+app.open(mama)
+spin(0.1)
+# a voice left recording goes by itself at its longest: the microphone stops
+app.record_start()
+app.record_released()
+app.recorder.began -= bm.VOICE_LONGEST
+wait(lambda: len(fake.asked("send")) == n + 4, what="the longest voice sent")
+assert not app.recorder.recording()
+n += 1
+# tapped, then «Отмена»: nothing goes
+app.record_start()
+app.record_released()
+app.recorder.began -= 3
+app.record_cancel.clicked()
+spin(0.3)
+assert not app.recorder.recording() and len(fake.asked("send")) == n + 3
+assert app.entry.get_visible() and not app.record_cancel.get_visible()
 # voice messages switched off in the settings: no microphone
 label_ = [w for w in walk(app.stack.get_child_by_name("settings"))
           if isinstance(w, Gtk.Label) and w.get_text() == "Голосовые сообщения"][0]
