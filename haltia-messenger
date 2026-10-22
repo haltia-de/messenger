@@ -4478,6 +4478,7 @@ RECONNECT_FIRST = 3.0  # s before MAX is connected again after a loss; doubled e
 RECONNECT_MOST = 60.0  # s, at most
 FIND_HINT = ("Имя — среди ваших чатов. Номер телефона — чтобы написать человеку. "
              "Название — канал или группа.")
+SHARE_SETTLE = 0.8  # s after «Кому отправить?» shows before a chat chosen counts
 FIND_PAUSE = 250  # ms after the last letter before the own chats are looked through
 TAP_RECORD = 0.6  # s: the microphone let go sooner was tapped: it records on
 VOICE_LONGEST = 600  # s: a voice this long goes by itself, the microphone stops
@@ -6238,6 +6239,7 @@ class Max(Gtk.Application):
         self.add_main_option("background", 0, GLib.OptionFlags.NONE, GLib.OptionArg.NONE,
                              "Start without showing the window", None)
         self.sharing = None  # files another program sent, while a chat is chosen for them
+        self.share_at = 0.0  # when «Кому отправить?» was shown
         # Typed messages on their way, as bubbles at once: id -> {"chat", "text",
         # "files", "m": the bubble's dict, its "state" sending or failed}.
         self.queue = {}
@@ -6670,7 +6672,7 @@ class Max(Gtk.Application):
         self.entry = Gtk.Entry()
         self.entry.get_style_context().add_class("input")
         self.entry.set_placeholder_text("Сообщение")
-        self.entry.connect("activate", lambda _e: self.send())
+        self.entry.connect("activate", lambda _e: self.send(by_key=True))
         self.sendb = Gtk.Button(label="Отправить")
         self.sendb.get_style_context().add_class("send")
         # The button must not take the focus from the entry: that hid the
@@ -6697,7 +6699,8 @@ class Max(Gtk.Application):
         self.clip.set_focus_on_click(False)
         self.clip.set_tooltip_text("Прикрепить фото или файл")
         self.clip.connect("clicked", lambda _b: self.attach())
-        self.attached = []  # attachment()s waiting to be sent with the message
+        self.attached = []  # attachment()s waiting to be sent with the message (the open chat's)
+        self.drafts = {}  # chat id -> {"text", "attached"} written there and not sent yet
         self.attachbar = Gtk.Box(spacing=10)
         self.attachbar.set_margin_start(16)
         self.attachbar.set_margin_end(16)
@@ -7397,7 +7400,23 @@ class Max(Gtk.Application):
         self.chatlist.mute(s["id"])
         self.fill_list()
 
+    def keep_draft(self):
+        """The open chat's unsent words and files kept with it, and the entry
+        emptied: a draft belongs to its chat, never goes with a message in
+        another (a photo shared into one chat went with the next anywhere)."""
+        if self.open_chat is None:
+            return
+        text, files = self.entry.get_text(), list(self.attached)
+        if text.strip() or files:
+            self.drafts[self.open_chat] = {"text": text, "attached": files}
+        else:
+            self.drafts.pop(self.open_chat, None)
+        self.entry.set_text("")
+        self.attached = []
+        self.show_attached()
+
     def show_list(self):
+        self.keep_draft()
         self.open_chat = None
         self.back.hide()
         self.title.set_text(NAME)
@@ -7418,6 +7437,7 @@ class Max(Gtk.Application):
 
     # the search: a person by phone, a channel or group by link, own chats by name
     def show_find(self):
+        self.keep_draft()
         self.open_chat = None
         # Here one also writes to someone new: by their number.
         self.title.set_text("Найти или написать")
@@ -7724,6 +7744,8 @@ class Max(Gtk.Application):
         self.sharing = list(paths)
         self.share_note.set_text("📎 " + ", ".join(os.path.basename(p) for p in paths))
         self.share_bar.show()
+        self.share_at = time.monotonic()
+        log_line("share: %d file(s), choosing a chat" % len(paths))
         self.title.set_text("Кому отправить?")
         self.sub.set_text("")
         self.back.show()
@@ -7757,6 +7779,12 @@ class Max(Gtk.Application):
 
     def forward_to(self, target):
         if self.sharing:
+            if time.monotonic() - self.share_at < SHARE_SETTLE:
+                # The touch that launched this (in another program) is no
+                # choice: a row under it right away is not taken.
+                log_line("share: a chat chosen at once, not taken")
+                return
+            log_line("share: a chat chosen")
             paths, self.sharing = self.sharing, None
             self.share_bar.hide()
             self.open(target)
@@ -7785,7 +7813,8 @@ class Max(Gtk.Application):
                     return  # left meanwhile
                 for path in copies:
                     if not any(f["path"] == path for f in self.attached):
-                        self.attached.append(attachment(path))
+                        # from another program: goes by «Отправить» only
+                        self.attached.append(dict(attachment(path), shared=True))
                 self.show_attached()
                 if len(copies) < len(paths):
                     self.sub.set_text("не все файлы удалось взять")
@@ -8506,6 +8535,13 @@ class Max(Gtk.Application):
 
     def open(self, chat_id):
         start = time.monotonic()
+        if self.open_chat != chat_id:
+            self.keep_draft()  # the chat left keeps its own
+            draft = self.drafts.pop(chat_id, None)
+            if draft:
+                self.entry.set_text(draft["text"])
+                self.attached = list(draft["attached"])
+                self.show_attached()
         if self.replying and self.replying[0] != chat_id:
             self.reply_to(None)  # an answer belongs to its chat
         if self.record_chat is not None and self.record_chat != chat_id:
@@ -8895,12 +8931,13 @@ class Max(Gtk.Application):
         self.entry.set_position(pos)
         self.recent = ([emoji] + [e for e in self.recent or [] if e != emoji])[:RECENT]
 
-    def send(self, voice=None):
+    def send(self, voice=None, by_key=False):
         """The entry's text and the files waiting above it (or a voice
         message just recorded: voice) into the open chat. A typed one leaves
         the entry at once and waits in the chat as a bubble (🕓) till it is
         sent; one that could not go stays there (⚠, «Повторить»), and goes
-        by itself when the connection is back."""
+        by itself when the connection is back. Files another program sent
+        go only by the «Отправить» button, never by a key (by_key)."""
         if voice is None and self.recorder.recording():
             self.record_stop(True)  # «Отправить» while it records: the voice goes
             return
@@ -8908,6 +8945,9 @@ class Max(Gtk.Application):
         files = [voice] if voice else list(self.attached)
         chat_id = self.open_chat
         if not (text or files) or chat_id is None:
+            return
+        if by_key and any(f.get("shared") for f in files):
+            self.sub.set_text("Нажмите «Отправить»")
             return
         if voice:
             self.send_voice(chat_id, voice)
