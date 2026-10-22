@@ -3785,10 +3785,11 @@ def qr_png(text, path, box=12, border=2):
     pixbuf.savev(path, "png", [], [])
 
 
-def focus_accept(parent, tries=20):
+def focus_accept(parent, tries=40):
     """Focus the accept button of GTK's file dialog shown for parent (what a
     FileChooserNative shows outside a portal); a portal's dialog is another
-    program's, so after some idle turns without one this gives up."""
+    program's, so after two seconds without one this gives up. Looked for
+    every 50 ms: idle turns alone passed before a slow dialog was shown."""
     for w in Gtk.Window.list_toplevels():
         if isinstance(w, Gtk.FileChooserDialog) and w.get_visible() \
                 and w.get_transient_for() is parent:
@@ -3799,7 +3800,7 @@ def focus_accept(parent, tries=20):
                 accept.grab_focus()
             return False
     if tries > 1:
-        GLib.idle_add(focus_accept, parent, tries - 1)
+        GLib.timeout_add(50, focus_accept, parent, tries - 1)
     return False
 
 
