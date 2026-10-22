@@ -181,11 +181,39 @@ assert not bm.Media(missing, hands.open_uri, hands.fetch, hands.player).video(
 assert "video: no player" in log()
 ok("video")
 
-# --- files: the browser -------------------------------------------------------------------
-assert media.file("https://fd.oneme.ru/f.pdf") and hands.opened == ["https://fd.oneme.ru/f.pdf"]
-assert not media.file("https://evil.com/f.pdf") and len(hands.opened) == 1
-hands.browser = False
-assert not media.file("https://fd.oneme.ru/g.pdf")
+# --- files: fetched under their names, opened by the desktop's program for them -----------
+opened = []
+docs = bm.Media(hands.spawn, hands.open_uri, hands.fetch, hands.player, hands.download)
+assert docs.file("https://fd.oneme.ru/f.pdf", "Договор.pdf", opened.append)
+drain()
+[doc] = [os.path.join(d, f) for d, _s, fs in os.walk(bm.DOCS) for f in fs]
+assert os.path.basename(doc) == "Договор.pdf" and os.path.dirname(doc) != bm.DOCS
+assert opened == [True] and hands.opened == [bm.GLib.filename_to_uri(doc)]
+# another message's file of the same name: its own folder, the first left as it was
+assert docs.file("https://fd.oneme.ru/other.pdf", "Договор.pdf", opened.append)
+drain()
+assert hands.opened[-1] != hands.opened[0] and open(doc, "rb").read() == b"file from https://fd.oneme.ru/f.pdf"
+hands.opened.pop()
+opened.pop()
+assert not docs.file("https://evil.com/f.pdf", "x.pdf") and len(hands.opened) == 1
+hands.browser = False  # nothing opens such a file
+assert docs.file("https://fd.oneme.ru/g.pdf", "g.pdf", opened.append)
+drain()
+assert opened == [True, False]
+hands.browser = True
+# only documents, pictures and text are opened; never a .desktop file or a script
+for name in ("ярлык.desktop", "скрипт.sh", "программа.exe", "без расширения"):
+    assert not docs.file("https://fd.oneme.ru/x", name, opened.append), name
+assert bm.openable("Отчёт.DOCX") and bm.openable("фото.jpg")
+# DOCS bounded: the documents opened longest ago go
+for k in range(bm.DOCS_KEPT + 5):
+    os.makedirs(os.path.join(bm.DOCS, "old%02d" % k), exist_ok=True)
+    os.utime(os.path.join(bm.DOCS, "old%02d" % k), (k, k))
+assert docs.file("https://fd.oneme.ru/new.pdf", "Новый.pdf", opened.append)
+drain()
+left = os.listdir(bm.DOCS)
+assert len(left) <= bm.DOCS_KEPT and "old00" not in left and opened[-1] is True
+hands.downloaded.clear()
 ok("files")
 
 # --- saving: a harmless name, never over another, nothing left of a failure --------------
@@ -264,9 +292,10 @@ assert tgm.video("tg:video:5:3", "Мама")
 drain()
 cmd = hands.spawned[-1]
 assert any(c.startswith(bm.PHOTOS) for c in cmd) and not any(c.startswith("tg:") for c in cmd)
-assert tgm.file("tg:file:5:4")
+assert tgm.file("tg:file:5:4", "Счёт.pdf")
 drain()
-assert hands.opened[-1].startswith("file://") and hands.opened[-1].endswith(".img")
+assert hands.opened[-1].startswith(bm.GLib.filename_to_uri(bm.DOCS)) and hands.opened[-1].endswith(
+    bm.GLib.filename_to_uri("/Счёт.pdf")[len("file://"):])
 paths = []
 tgm.save("tg:file:5:4", folder, "Договор.pdf", paths.append)
 drain()
