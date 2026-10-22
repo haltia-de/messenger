@@ -1148,7 +1148,6 @@ class PyMaxLink:
         self._watch_login()
         self.client.on_start()(self._started)
         self.client.on_message()(self._message)
-        self.client.on_reaction_update()(self._reaction)
         self.client.on_message_read()(self._read)
         self.client.on_disconnect()(self._disconnected)
         await self.client.start()
@@ -1171,7 +1170,8 @@ class PyMaxLink:
         dispatcher.haltia_peeks = True
 
     def _peek(self, frame):
-        """A deletion in a frame from MAX: events.on_delete(chat, [ids])."""
+        """A deletion or a reaction in a frame from MAX: events.on_delete(chat,
+        [ids]), events.on_reaction(chat, msg, [[emoji, count]])."""
         from pymax.protocol import Opcode
         from pymax.types.domain import Message
 
@@ -1181,6 +1181,18 @@ class PyMaxLink:
                 task = asyncio.ensure_future(self.events.on_call_frame(int(frame.opcode), payload))
                 self.tasks.add(task)
                 task.add_done_callback(self.tasks.discard)
+                return
+            if frame.opcode == Opcode.NOTIF_MSG_REACTIONS_CHANGED:
+                # PyMax 2.4.1 drops it: its event wants messageId as a string,
+                # MAX sends a number (the official app's log, 22 October 2026).
+                chat_id, msg_id = payload.get("chatId"), payload.get("messageId")
+                if chat_id is not None and msg_id is not None:
+                    reactions = [[c["reaction"], c["count"]] for c in payload.get("counters") or []
+                                 if c.get("reaction") and c.get("count")]
+                    task = asyncio.ensure_future(
+                        self.events.on_reaction(int(chat_id), int(msg_id), reactions))
+                    self.tasks.add(task)
+                    task.add_done_callback(self.tasks.discard)
                 return
             if frame.opcode == Opcode.NOTIF_MSG_DELETE:
                 chat_id, ids = payload.get("chatId"), payload.get("messageIds") or []
@@ -1262,10 +1274,6 @@ class PyMaxLink:
 
     async def _message(self, msg, _client):
         await self.events.on_message(max_message(msg))
-
-    async def _reaction(self, event, _client):
-        reactions = [[c.reaction, c.count] for c in event.counters or [] if c.count]
-        await self.events.on_reaction(event.chat_id, int(event.message_id), reactions)
 
     async def _read(self, event, _client):
         """NOTIF_MARK: someone read a chat up to a time; another than the
