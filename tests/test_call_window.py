@@ -48,6 +48,7 @@ app.set_flags(app.get_flags() | bm.Gio.ApplicationFlags.NON_UNIQUE)
 app.register(None)
 # Exercise the real GIO freedesktop backend, including its desktop-entry hint.
 notifications, closed = [], []
+reply_delay = [0]  # ms before Notify answers: GIO knows no server id meanwhile
 connection = app.get_dbus_connection()
 interface = Gio.DBusNodeInfo.new_for_xml('''<node><interface name="org.freedesktop.Notifications">
 <method name="Notify"><arg type="s" direction="in"/><arg type="u" direction="in"/>
@@ -59,7 +60,11 @@ interface = Gio.DBusNodeInfo.new_for_xml('''<node><interface name="org.freedeskt
 def notification_call(_bus, _sender, _path, _iface, method, parameters, invocation):
     if method == "Notify":
         notifications.append(parameters.unpack())
-        invocation.return_value(GLib.Variant("(u)", (len(notifications),)))
+        answer = GLib.Variant("(u)", (len(notifications),))
+        if reply_delay[0]:
+            GLib.timeout_add(reply_delay[0], lambda: invocation.return_value(answer) and False)
+        else:
+            invocation.return_value(answer)
     else:
         closed.append(parameters.unpack()[0])
         invocation.return_value(None)
@@ -264,6 +269,106 @@ assert restored_view.call_note.get_visible()
 restored_view.destroy()
 ok("missed notification opens the chat; its dated local mark survives a restart without a fake message")
 ok("ringtone floor, clean error identity and one failed inhibitor attempt per call")
+
+# Video invitations never open a camera by presenting or drawing frames.
+video_probe = patch.object(bm, "video_supported", return_value=True)
+video_probe.start()
+app.open(dialog)
+assert app.video_button.get_visible()
+app.stack.set_visible_child_name("chats")
+assert not app.video_button.get_visible()
+app.open(group)
+assert not app.video_button.get_visible()
+app.open(dialog)
+video_call = {"id": "video-ui", "name": "Тестовый собеседник", "state": "ringing",
+              "video_invitation": True, "video": False}
+app.call_changed(video_call)
+assert "Видеозвонок" in app.call_label.get_text()
+assert app.call_audio_answer.get_visible() and app.call_end.get_visible()
+requests.clear()
+with patch.object(app.backend, "call", side_effect=dial):
+    app.call_audio_answer.clicked()
+    wait(lambda: len(requests) == 1)
+assert requests[0] == ("answer", {"conversation": "video-ui"})
+# A tap: the button says what was asked at once, and waits for the camera.
+app.call_changed(dict(video_call, state="active", video=False, video_wanted=True))
+assert app.call_camera.get_label() == "Выключить камеру" and not app.call_camera.get_sensitive()
+app.call_changed(dict(video_call, state="active", video=True))
+assert app.call_camera.get_sensitive()
+# Feed the mailbox from a worker just like Gst: GTK drawing happens later.
+import threading
+frame = (32, 24, bytes([80, 130, 180, 255]) * (32 * 24))
+worker = threading.Thread(target=lambda: [app.call_frame("video-ui", own, frame)
+                                        for _n in range(100) for own in (True, False)])
+worker.start()
+worker.join()
+assert len(app.call_frames) == 2 and app.call_frame_pending
+wait(lambda: app.call_remote.surface is not None and app.call_own.surface is not None)
+assert app.call_own_box.get_visible() and app.call_video_area.get_visible()
+assert app.call_end.get_visible() and app.call_camera.get_visible()
+for width, height in ((1280, 800), (800, 1280)):
+    app.win.resize(width, height)
+    until = time.monotonic() + .2
+    wait(lambda: time.monotonic() > until)
+    assert app.call_end.get_mapped() and app.call_camera.get_mapped()
+    assert app.call_end.get_allocation().height >= 80
+    assert app.call_camera.get_allocation().height >= 80
+    shot("video-call-%dx%d.png" % (width, height))
+shot("video-call.png")
+app.call_changed(dict(video_call, state="active", video=False, remote_video=False))
+assert app.call_own.surface is None and not app.call_video_area.get_visible()
+app.call_frame("old-video", True, frame)
+wait(lambda: not app.call_frame_pending)
+assert app.call_own.surface is None
+# The peer's picture goes when its frames stop, though it never said so.
+with patch.object(bm, "REMOTE_STALE", .3):
+    app.call_changed(dict(video_call, state="active", video=False))
+    app.call_frame("video-ui", False, (24, 32, bytes(4 * 24 * 32)))
+    wait(lambda: app.call_remote.surface is not None)
+    assert app.call_video_area.get_visible() and not app.call_identity.get_visible()
+    # Upright, as sent: no bands of its own (CallPicture fits it).
+    assert (app.call_remote.surface.get_width(), app.call_remote.surface.get_height()) == (24, 32)
+    wait(lambda: app.call_remote.surface is None)
+    assert not app.call_video_area.get_visible() and app.call_identity.get_visible()
+app.call_changed(dict(video_call, state="ended"))
+assert not app.call_audio_answer.get_visible() and not app.call_camera.get_visible()
+video_probe.stop()
+requests.clear()
+ok("video invitation, audio-only answer, bounded frame mailbox, own preview and stale-frame rejection")
+
+# The incoming call's notification leaves the server on every way the
+# ringing ends (critical ones stay in mako till closed): answered, with or
+# without video (connecting), declined, cancelled, missed, answered
+# elsewhere (ended), failed; also when the server has not answered yet.
+for video in (False, True):
+    for outcome in ("connecting", "ended", "failed"):
+        for delay in (0, 300):
+            reply_delay[0] = delay
+            conversation = "notice-%s-%s-%d" % (video, outcome, delay)
+            invitation = {"id": conversation, "name": "Тестовый собеседник", "state": "ringing",
+                          "video_invitation": video}
+            sent = len(notifications)
+            app.call_changed(invitation)
+            wait(lambda: len(notifications) == sent + 1)
+            server_id = len(notifications)
+            assert notifications[-1][1] == 0  # a new notification, not an earlier call's replaced
+            assert notifications[-1][3] == ("Видеозвонок" if video else "Входящий звонок")
+            if not delay:
+                settled = time.monotonic() + .2
+                wait(lambda: time.monotonic() > settled)  # the server's id is known to GIO
+            app.call_changed(dict(invitation, state=outcome))
+            wait(lambda: server_id in closed)
+            if outcome == "connecting":
+                app.call_changed(dict(invitation, state="ended"))
+            app.call_end.clicked()
+            assert app.call_id is None
+reply_delay[0] = 0
+# None of the window's incoming-call notifications stays on the server
+# (the earlier parts end calls at once after ringing, before Notify answers).
+ringing = {n + 1 for n, note in enumerate(notifications) if note[3] in ("Входящий звонок", "Видеозвонок")}
+replaced = {note[1] for note in notifications}
+wait(lambda: not ringing - replaced - set(closed))
+ok("the incoming call's notification is closed on the server however the ringing ends")
 
 app.backend.run(app.backend.stop("max"))
 wait(lambda: not app.backend.accounts["max"].online)

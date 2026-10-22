@@ -3,7 +3,8 @@
 import asyncio
 import base64
 import json
-from unittest.mock import Mock, patch
+import threading
+from unittest.mock import AsyncMock, Mock, patch
 from types import SimpleNamespace
 from common import load, ok
 
@@ -42,6 +43,116 @@ def media_probe():
 
 
 media_probe()
+
+
+# A missing video plugin must not withdraw working audio calls.
+for missing in ("vp8enc", "vp8dec", "appsink", None):
+    bm.video_supported.cache_clear()
+    gst = SimpleNamespace(init=Mock(), ElementFactory=SimpleNamespace(
+        find=Mock(side_effect=lambda name: None if name == missing else object())))
+    with patch.object(bm, "call_media", return_value=(gst, object(), object())) as probe:
+        assert bm.video_supported() == (missing is None)
+        assert bm.video_supported() == (missing is None)
+        assert probe.call_count == 1
+    bm.video_supported.cache_clear()
+ok("video support is probed once independently of voice support")
+
+
+def camera_refresh():
+    import haltia_kit
+    # A stale discovery, link or startup must be replaced, never reused.
+    for failure in ("missing", "link", "state", "persistent", "link-twice", "state-twice", "raw-fallback"):
+        peers = []
+        for n in range(2):
+            source = Mock()
+            source.get_factory.return_value.get_name.return_value = (
+                "v4l2src" if failure == "raw-fallback" and n else "libcamerasrc")
+            source.link_filtered.return_value = not (failure == "link-twice" or
+                (n == 0 and failure in ("link", "raw-fallback")))
+            peers.append(SimpleNamespace(front=True, make=Mock(return_value=source)))
+        discoveries = [[], [peers[1]]] if failure == "missing" else [[peers[0]], [peers[1]]]
+        if failure == "persistent":
+            discoveries = [[], []]
+        camera_module = SimpleNamespace(cameras=Mock(side_effect=discoveries))
+        pipelines = []
+        scheduled, statuses = [], []
+        audio = bm.CallAudio.__new__(bm.CallAudio)
+        audio.camera, audio.closed, audio.video_generation = None, False, 0
+        audio.video_bin, audio.video_size = object(), (320, 240, 15)
+        audio.loop = SimpleNamespace(call_soon_threadsafe=lambda cb, *a: scheduled.append((cb,a)))
+        audio.status = statuses.append
+        def pipeline(*_args):
+            pipe = Mock()
+            index = len(pipelines)
+            def state(value):
+                if value == "playing" and (failure == "state-twice" or (index == 0 and failure == "state")):
+                    audio._camera_bus(pipe.get_bus(), SimpleNamespace(type="error"), None)
+                    return "failure"
+                return "success"
+            pipe.set_state.side_effect = state
+            pipelines.append(pipe)
+            return pipe
+        audio.Gst = SimpleNamespace(
+            State=SimpleNamespace(NULL="null", PLAYING="playing"),
+            StateChangeReturn=SimpleNamespace(FAILURE="failure"),
+            MessageType=SimpleNamespace(ERROR="error"), BusSyncReply=SimpleNamespace(DROP="drop"),
+            Caps=SimpleNamespace(from_string=lambda text: text), parse_launch=pipeline)
+        with patch.dict(bm.os.environ, {"HALTIA_CAMERA_SOURCE": ""}), \
+                patch.object(haltia_kit, "camera", camera_module, create=True):
+            if failure in ("persistent", "link-twice", "state-twice", "raw-fallback"):
+                try:
+                    audio.set_video(True)
+                except RuntimeError:
+                    pass
+                else:
+                    raise AssertionError("failed camera unexpectedly opened")
+                assert audio.camera is None
+            else:
+                assert audio.set_video(True) is True
+                assert audio.camera is pipelines[-1]
+                # A queued error from the discarded source cannot stop the new one.
+                for cb, args in scheduled:
+                    cb(*args)
+                assert not statuses
+            assert camera_module.cameras.call_count == 2
+            for pipe in pipelines[:-1] if audio.camera is not None else pipelines:
+                assert any(c.args == ("null",) for c in pipe.set_state.call_args_list)
+            audio.set_video(False)
+            assert audio.camera is None and not audio.closed
+    ok("stale camera discovery/link/start retries once with fresh elements; no raw Bayer fallback")
+
+
+camera_refresh()
+
+
+def bus_errors():
+    # An error inside the video branches stops video only; any other ends the
+    # call. The log names the element and the code, never the debug text.
+    import gi
+    gi.require_version("Gst", "1.0")
+    from gi.repository import Gst
+    Gst.init(None)
+    audio = bm.CallAudio.__new__(bm.CallAudio)
+    audio.Gst, audio.closed = Gst, False
+    audio.video_bin, audio.remote_bin = Gst.Bin.new("send"), Gst.Bin.new("receive")
+    encoder, decoder = Gst.ElementFactory.make("identity", None), Gst.ElementFactory.make("queue", None)
+    audio.video_bin.add(encoder)
+    audio.remote_bin.add(decoder)
+    other = Gst.ElementFactory.make("fakesink", None)
+    statuses, lines = [], []
+    audio.status = statuses.append
+    audio.loop = SimpleNamespace(call_soon_threadsafe=lambda cb, *a: cb(*a))
+    error = bm.GLib.Error.new_literal(Gst.StreamError.quark(), "turn:secret@host", 1)
+    with patch.object(bm, "log_line", side_effect=lines.append):
+        for src in (encoder, decoder, other):
+            audio._bus(None, SimpleNamespace(type=Gst.MessageType.ERROR, src=src,
+                                             parse_error=lambda: (error, "turn:secret@host")), None)
+    assert statuses == ["video-failed", "video-failed", "failed"], statuses
+    assert "identity" in lines[0] and "fakesink" in lines[2] and not any("secret" in l for l in lines)
+    ok("video branch errors stop video only; logged by element and code without the debug text")
+
+
+bus_errors()
 
 
 def literal(value):
@@ -454,9 +565,10 @@ async def quit_during_dial(fails=False):
 
 async def missed_calls():
     from fake_link import FakeLink
-    notices = []
+    notices, states = [], {}
     class UI:
-        def call_changed(self, _call):
+        def call_changed(self, call):
+            states.setdefault(call["id"], []).append(call["state"])
             return False
         def missed_call(self, notice):
             notices.append(notice)
@@ -465,9 +577,21 @@ async def missed_calls():
     account = bm.Backend(UI(), fake).accounts["max"]
     account.me = fake.me.id
     account.names[10] = "Тестовый собеседник"
-    for case in ("remote", "timeout", "declined", "answered", "outgoing", "elsewhere"):
-        call = account.new_call(case, 10, case != "outgoing")
-        if case == "remote":
+    class Broken(Audio):
+        def close(self):
+            raise RuntimeError("synthetic teardown failure")
+    cases = ("remote", "timeout", "declined", "answered", "outgoing", "elsewhere", "stopped", "broken")
+    for video, case in ((v, c) for v in (False, True) for c in cases):
+        call = account.new_call(case, 10, case != "outgoing", video=video)
+        if case == "broken":
+            call.audio = Broken(None, None, None, None)
+            try:
+                await call.end("REJECTED")
+            except RuntimeError:
+                pass
+        elif case == "stopped":
+            await account.stop()
+        elif case == "remote":
             await account.on_call_frame(121, {"conversationId": case})
             await account.on_call_frame(121, {"conversationId": case})
         elif case == "elsewhere":
@@ -476,15 +600,189 @@ async def missed_calls():
             call.accepted = case == "answered"
             await call.end("REJECTED" if case == "declined" else "MISSED" if case == "timeout" else None)
         await call.end()  # A duplicate closure cannot create another notice.
-    while bm.GLib.MainContext.default().iteration(False):
-        pass
-    assert [n["id"] for n in notices] == ["remote", "timeout"]
+        while bm.GLib.MainContext.default().iteration(False):
+            pass
+        # Every way a call ends tells the window (which closes the ringing
+        # call's notification on it), for voice and video invitations alike.
+        assert states.pop(case)[-1] in ("ended", "failed"), case
+    assert [n["id"] for n in notices] == ["remote", "timeout"] * 2
     assert all(n["chat"] == fake.dialog_of(fake.me.id, 10) and n["peer"] == 10
                and n["name"] == "Тестовый собеседник" and n["time"] > 0 for n in notices)
-    ok("unanswered incoming closure and timeout are missed; decline, answer, outgoing and answer elsewhere are not")
+    ok("every end tells the window, even a failed teardown; unanswered closure and timeout are missed, not decline, answer, outgoing, answer elsewhere or stop")
+
+
+async def video_dial_flag():
+    link = bm.PyMaxLink.__new__(bm.PyMaxLink)
+    invoke = AsyncMock(return_value=SimpleNamespace(payload={"internalCallerParams": "{}"}))
+    link.client = SimpleNamespace(_app=SimpleNamespace(
+        session=SimpleNamespace(device_id="synthetic-device"), invoke=invoke))
+    for video in (False, True):
+        assert await link.dial("synthetic-conversation", 10, video=video) == {}
+        opcode, payload = invoke.call_args.args
+        assert opcode == 78 and payload["isVideo"] is video
+        assert payload["calleeIds"] == [10]
+    ok("video selection reaches opcode 78; voice retains isVideo=false")
+
+
+async def video_consent():
+    class VideoAudio(Audio):
+        def __init__(self, *args):
+            super().__init__(*args)
+            self.video_size = (320, 240, 15)
+            self.camera = False
+            self.fail = False
+            self.hold = None
+            self.threads = set()
+            self.asked = []  # set_video's calls, in order
+            self.sdp_first = None  # was the SDP out when the camera was asked to open
+        def set_video(self, enabled):
+            self.threads.add(threading.current_thread().name)
+            self.asked.append(bool(enabled))
+            if enabled and self.sdp_first is None:
+                self.sdp_first = "transmit-data" in self.sent()
+            if enabled and self.hold:
+                opened, release = self.hold
+                self.hold = None
+                opened.set()
+                release.wait(5)
+            self.camera = False
+            if self.closed:
+                return False  # hung up while it opened: never left on
+            if enabled and self.fail:
+                raise RuntimeError("synthetic busy camera")
+            self.camera = bool(enabled)
+            return self.camera
+        def close(self):
+            self.camera = False
+            super().close()
+    for answer_video in (True, False):
+        shown = []
+        socket = Socket()
+        call = bm.VoiceCall("video-consent", "test-person", True, lambda c, _s: shown.append(c.video),
+                            audio=VideoAudio, connect=lambda *_a, **_k: socket, video=True)
+        VideoAudio.sent = lambda _self, socket=socket: socket.commands()
+        task = asyncio.create_task(call.run(dict(params)))
+        await until(lambda: "change-participant-state" in socket.commands())
+        assert call.audio is None and not call.video
+        initial = next(v for v in socket.sent if isinstance(v, dict) and v["command"] == "change-media-settings")
+        assert not initial["mediaSettings"]["isVideoEnabled"]
+        await socket.notify("transmitted-data", participantId="remote", data={
+            "sdp": {"type": "offer", "sdp": "synthetic"}})
+        call.job(call.answer(video=answer_video))
+        await until(lambda: call.audio is not None and "transmit-data" in socket.commands()
+                    and call.audio.camera == answer_video)
+        assert call.video == answer_video and call.video_wanted == answer_video
+        # The SDP goes first: ICE does not wait for the camera to open.
+        assert call.audio.sdp_first in ((True,) if answer_video else (None,))
+        accepted = next(v for v in socket.sent if isinstance(v, dict) and v["command"] == "accept-call")
+        assert accepted["mediaSettings"]["isVideoEnabled"] == answer_video
+        call.audio_state("connected")
+
+        async def switch(on):
+            if call.video_wanted != on:
+                call.toggle_camera()
+            await until(lambda: call.video == on and call.audio.camera == on)
+        await switch(False)
+        gate = asyncio.Event()
+        async def slow_ack(*_args, **_kwargs):
+            await gate.wait()
+        with patch.object(call, "command", side_effect=slow_ack):
+            call.toggle_camera()
+            await until(lambda: call.audio.camera)
+            assert shown[-1] is True  # the own picture before the slow acknowledgement
+            gate.set()
+            await asyncio.sleep(0)
+        # A refused acknowledgement of a camera switch never ends the call.
+        async def refused(*_args, **_kwargs):
+            raise RuntimeError("synthetic refusal")
+        with patch.object(call, "command", side_effect=refused):
+            await switch(False)
+            await switch(True)
+        assert not call.closed and call.state == "active"
+        # A dim room slows the camera: no overload while the encoder keeps up.
+        await call.adapt_video(8, 9)
+        assert call.audio.video_size == (320, 240, 15) and call.video
+        await call.adapt_video(3, 15)
+        assert call.audio.video_size == (160,120,10) and call.video
+        await call.adapt_video(3, 15)
+        assert not call.video and not call.audio.camera and call.state == "active"
+        assert not call.video_wanted  # turned off: adaptation never turns it on again
+        await call.adapt_video(0, 15)
+        assert not call.video
+        call.audio.fail = True
+        call.toggle_camera()
+        await until(lambda: call.video_error and not call.video_wanted)
+        assert not call.video and not call.audio.camera and not call.closed
+        # The video branch's own error stops video, never the call.
+        call.audio.fail = False
+        await switch(True)
+        call.audio_state("video-failed")
+        await until(lambda: not call.video)
+        assert not call.closed and call.state == "active" and call.video_error
+        await socket.notify("media-settings-changed", participantId="remote", mediaSettings={"isVideoEnabled": True})
+        await until(lambda: call.remote_video is True)
+        assert not call.video  # A peer cannot turn our camera on.
+        # Opening the camera blocks its own thread, never the loop; two quick
+        # taps are folded: on, then off, and it ends off.
+        opened, release = threading.Event(), threading.Event()
+        call.audio.hold = (opened, release)
+        call.audio.asked.clear()
+        call.toggle_camera()
+        await until(opened.is_set)
+        call.toggle_camera()
+        await asyncio.sleep(.05)
+        assert not call.video and not call.video_wanted
+        release.set()
+        await until(lambda: call.audio.asked == [True, False] and not call.audio.camera)
+        assert not call.video and call.audio.threads == {"camera"}
+        # Hanging up while a camera opens: the loop answers at once, and the
+        # camera is not left on when it finishes opening.
+        opened, release = threading.Event(), threading.Event()
+        call.audio.hold = (opened, release)
+        call.toggle_camera()
+        await until(opened.is_set)
+        loop = asyncio.get_running_loop()
+        began = loop.time()
+        await asyncio.wait_for(call.end("HUNGUP"), 1)
+        assert loop.time() - began < .5 and opened.is_set() and not release.is_set()
+        release.set()
+        await asyncio.gather(task, return_exceptions=True)
+        await asyncio.sleep(.1)
+        assert call.audio.closed and not call.audio.camera
+    ok("video consent, SDP before the camera, folded taps, hang-up while a camera opens, non-fatal acks and video errors, dim light, overload downgrade and peer isolation")
+
+
+async def end_logging():
+    for remote in (False, True):
+        for reason in ("HUNGUP", "REJECTED", "CANCELED", "BUSY", "MISSED", "NETWORK_ERROR", "FAILED"):
+            call = bm.VoiceCall("private-conversation", "private-person", True, lambda *_a: None)
+            with patch.object(bm, "log_line") as log:
+                if remote:
+                    await call.event({"notification": "hungup", "reason": reason})
+                    assert call.end_reason is None  # Do not echo a remote hangup.
+                else:
+                    await call.end(reason)
+                    assert call.end_reason == reason
+                await call.end()  # Finally/duplicate frames cannot overwrite the reason.
+                label = "failed" if reason == "FAILED" else reason
+                log.assert_called_once_with("voice call: ended reason=%s by=%s state=ended" %
+                                            (label, "remote" if remote else "local"))
+    for reason in (None, "private-token\nHUNGUP", {"id": "private"}, ["HUNGUP"]):
+        call = bm.VoiceCall("private-conversation", "private-person", True, lambda *_a: None)
+        with patch.object(bm, "log_line") as log:
+            await call.event({"notification": "closed-conversation", "reason": reason})
+            log.assert_called_once_with("voice call: ended reason=unknown by=remote state=ended")
+    call = bm.VoiceCall("private-conversation", "private-person", False, lambda *_a: None)
+    with patch.object(bm, "log_line") as log:
+        await call.end(None, "failed")
+        log.assert_called_once_with("voice call: ended reason=failed by=local state=failed")
+    ok("terminal logs contain only allowed reasons and local/remote origin, once, without identifiers")
 
 
 async def main():
+    await end_logging()
+    await video_dial_flag()
+    await video_consent()
     await scenario(True)
     await scenario(False)
     await rejection()

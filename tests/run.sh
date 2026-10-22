@@ -67,7 +67,16 @@ display() {
 	while [ ! -e "$run/broadway$((n + 1)).socket" ] && [ $i -lt 50 ]; do sleep 0.1; i=$((i + 1)); done
 }
 
+[ $# -gt 0 ] || all=1
 [ $# -gt 0 ] || set -- test_chatlist.py test_media.py test_backend.py test_window.py test_login.py test_calls.py test_call_window.py test_call_shutdown.py
+# The real WebRTC media tests need GstWebRTC and libnice (the Flatpak has them).
+if [ -n "${all:-}" ]; then
+	if "$python" -c 'import gi; gi.require_version("GstWebRTC", "1.0"); from gi.repository import GstWebRTC' 2>/dev/null; then
+		set -- "$@" test_call_audio.py test_call_video.py
+	else
+		echo "(test_call_audio.py, test_call_video.py skipped: no GstWebRTC here; run them in the Flatpak)"
+	fi
+fi
 cd "$here"
 log=$(mktemp)
 trap 'kill $bw 2>/dev/null; rm -f "$log"' EXIT INT TERM

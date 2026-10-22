@@ -17,7 +17,8 @@ finish-args:
   - --share=ipc
   - --socket=wayland
   - --socket=fallback-x11
-  - --device=dri
+  # V4L2/libcamera access; the camera is opened only by the call controls.
+  - --device=all
   - --socket=pulseaudio
   # files are saved to «Загрузки/MAX» without a dialog unless the name is taken
   - --filesystem=xdg-download
