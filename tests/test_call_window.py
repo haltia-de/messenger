@@ -205,10 +205,10 @@ requests.clear()
 app.call_changed({"id": "synthetic-invitation", "name": "Тестовый собеседник", "state": "ended"})
 assert app.call_logind.fd is None
 wait(lambda: logind.released())
-assert app.call_end.get_label() == "Закрыть" and app.call_button.get_sensitive()
-app.call_end.clicked()
-assert not app.call_box.get_visible()
+# Straight back to the messages, nothing to close; said under the title.
+assert app.call_button.get_sensitive() and not app.call_box.get_visible()
 assert app.call_pages.get_visible_child_name() == "messages"
+assert app.sub.get_text() == "Звонок завершён"
 # A late callback for an older call cannot overwrite a new incoming call.
 app.call_changed({"id": "replacement", "name": "Другой собеседник", "state": "ringing"})
 app.call_changed({"id": "old-call", "name": "Старый собеседник", "state": "failed"})
@@ -232,8 +232,8 @@ app.call_result(None, bm.Offline())
 assert app.call_name.get_text() == "" and app.call_portrait is None
 portraits[-1](new)
 assert app.call_photo.get_storage_type() == bm.Gtk.ImageType.ICON_NAME
-assert not app.call_hint.get_visible() and app.call_end.get_label() == "Закрыть"
-app.call_end.clicked()
+assert not app.call_box.get_visible() and app.call_pages.get_visible_child_name() == "messages"
+assert app.sub.get_text().startswith("Не удалось соединиться")
 
 # A refused logind is tried once per call, not once per state/name update.
 logind.refuse = True
@@ -379,8 +379,7 @@ for video in (False, True):
             wait(lambda: server_id in closed)
             if outcome == "connecting":
                 app.call_changed(dict(invitation, state="ended"))
-            app.call_end.clicked()
-            assert app.call_id is None
+            assert app.call_id is None and not app.call_box.get_visible()
 reply_delay[0] = 0
 # None of the window's incoming-call notifications stays on the server
 # (the earlier parts end calls at once after ringing, before Notify answers).

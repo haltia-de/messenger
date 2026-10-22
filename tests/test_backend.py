@@ -297,6 +297,17 @@ def pm(text="", attaches=(), **more):
                                          **more))
 
 
+# a call in the history: whose, how it ended, how long
+rec = bm.max_message(pm("", [{"_type": "CALL", "conversationId": "c", "callType": "VIDEO",
+                              "hangupType": "HUNGUP", "duration": 65000, "contactIds": [5]}]))
+assert rec.call == {"video": True, "end": "HUNGUP", "duration": 65000} and not rec.notes
+assert bm.call_words(rec.call, False) == ("Входящий видеозвонок", "Принят · 1:05")
+for end, ms, mine, how in (("MISSED", 0, False, "Пропущен"), ("MISSED", 0, True, "Без ответа"),
+                           ("REJECTED", 0, False, "Отклонён"), ("REJECTED", 0, True, "Отклонён"),
+                           ("CANCELED", 0, False, "Пропущен"), ("CANCELED", 0, True, "Отменён"),
+                           ("HUNGUP", 24090, True, "Принят · 0:24")):
+    assert bm.call_words({"end": end, "duration": ms}, mine)[1] == how, (end, mine)
+assert bm.call_words({"end": "HUNGUP", "duration": 1}, True)[0] == "Исходящий звонок"
 # MAX's own messages come as keys: in words, an unknown one never as the key
 assert bm.max_message(pm("welcome.saved.dialog.message")).text.startswith("Это Избранное")
 assert bm.max_message(pm("some.new.service.key")).text == "Служебное сообщение"
@@ -506,6 +517,12 @@ assert m.fwd == {"chat": "Тётя Валя", "sender": None}
 m = bm.tg_message(tt.MessageService(id=6, peer_id=tt.PeerChat(9), date=T0,
                                     action=tt.MessageActionPinMessage()))
 assert m.chat == "tg:-9" and m.notes == ["закреплено сообщение"]
+m = bm.tg_message(tt.MessageService(id=7, peer_id=tt.PeerUser(77), date=T0, action=tt.MessageActionPhoneCall(
+    call_id=1, video=True, reason=tt.PhoneCallDiscardReasonHangup(), duration=65)))
+assert m.call == {"video": True, "end": "HUNGUP", "duration": 65000} and not m.notes
+m = bm.tg_message(tt.MessageService(id=8, peer_id=tt.PeerUser(77), date=T0, action=tt.MessageActionPhoneCall(
+    call_id=2, reason=tt.PhoneCallDiscardReasonMissed())))
+assert m.call == {"video": False, "end": "MISSED", "duration": 0}
 assert bm.tg_message(tmsg(text="моё", out=True), "tg:1").sender == "tg:1"  # Telegram leaves it out
 assert bm.tg_person(tt.User(id=77, first_name="Саша", last_name="Иванов")) == bm.Person("tg:77", "Саша Иванов")
 c = bm.tg_chat(tt.User(id=77, first_name="Саша"), "tg:1", unread=2, last=tmsg(text="Привет"), seen=41)

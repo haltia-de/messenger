@@ -10,7 +10,7 @@ from common import load, ok
 
 bm = load()
 from fake_hands import FakeHands  # noqa: E402
-from fake_link import FakeLink, audio, file, now_ms, photo, video  # noqa: E402
+from fake_link import FakeLink, audio, call, file, now_ms, photo, video  # noqa: E402
 from gi.repository import Gdk, GLib, Gtk  # noqa: E402
 
 SHOTS = os.environ.get("HALTIA_SHOTS")  # a directory to save screenshots in, if set
@@ -337,6 +337,21 @@ app.view.add(app.backend.accounts["max"].message(later))
 spin(0.2)
 assert ticks_of(v)[-1].get_text() == "✓"  # newer than what was read
 ok("read marks")
+
+# --- calls in the history: whose, how it ended, how long --------------------------------------
+answered = fake.incoming(mama, "", MAMA, attaches=[call(end="HUNGUP", duration=65000)])
+unanswered = fake.incoming(mama, "", MAMA, attaches=[call(video=True, end="CANCELED")])
+wait(lambda: any(w.msg_id == unanswered.id for w in holds_of(app.view)), what="the calls in the chat")
+for msg_id, words, cls in ((answered.id, ["Входящий звонок", "Принят · 1:05"], "taken"),
+                           (unanswered.id, ["Входящий видеозвонок", "Пропущен"], "missed")):
+    hold = [w for w in holds_of(app.view) if w.msg_id == msg_id][0]
+    texts = [w.get_text() for w in walk(hold) if isinstance(w, Gtk.Label)]
+    assert all(t in texts for t in words), texts
+    status = [w for w in walk(hold) if isinstance(w, Gtk.Label) and w.get_text() == words[1]][0]
+    assert status.get_style_context().has_class(cls)
+assert app.chatlist.get(mama)["last"] == "📞 Входящий видеозвонок, пропущен"
+shot("calls-history.png")
+ok("calls in the history")
 
 # --- forwarding a message ---------------------------------------------------------------------
 # a tap on a bubble, not only a long press: the reactions and the message's menu

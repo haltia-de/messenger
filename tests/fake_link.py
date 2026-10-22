@@ -102,7 +102,9 @@ class FakeLink:
                       reactions=[list(r) for r in reactions], yours=yours)
         for a in attaches:
             msg.parts.append(a["part"])
-            if "photo" in a:
+            if "call" in a:
+                msg.call = dict(a["call"])
+            elif "photo" in a:
                 msg.photos.append(a["photo"])
             elif "media" in a:
                 msg.media.append(dict(a["media"]))
@@ -360,6 +362,11 @@ def file(file_id, name, size):
 
 def photo(url):
     return {"part": "", "photo": url}
+
+
+def call(video=False, end="HUNGUP", duration=0):
+    """A call's record, as MAX puts one in the chat (CALL attach)."""
+    return {"part": "звонок", "call": {"video": video, "end": end, "duration": duration}}
 
 
 def sticker():
