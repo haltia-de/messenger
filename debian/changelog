@@ -1,3 +1,9 @@
+haltia-messenger (2.9.3) unstable; urgency=medium
+
+  * Reactions from other MAX apps now show up here too.
+
+ -- Haltia <rensomail@gmail.com>  Thu, 22 Oct 2026 20:00:00 +0300
+
 haltia-messenger (2.9.2) unstable; urgency=medium
 
   * The camera in a call asks for the right size, so it no longer goes dark

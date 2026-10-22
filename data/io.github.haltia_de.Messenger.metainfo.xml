@@ -20,6 +20,12 @@
   </content_rating>
   <requires><control>touch</control></requires>
   <releases>
+    <release version="2.9.3" date="2026-10-22">
+      <description>
+        <p>Reactions from other MAX apps now show up here too.</p>
+        <p xml:lang="ru">Реакции из других приложений MAX теперь видны и здесь.</p>
+      </description>
+    </release>
     <release version="2.9.2" date="2026-10-22">
       <description>
         <p>The camera in a call asks for the right size, so it no longer goes dark by itself.</p>
