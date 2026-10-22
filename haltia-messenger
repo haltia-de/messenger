@@ -7399,7 +7399,10 @@ class Max(Gtk.Application):
             self.attached = files + [f for f in self.attached if f not in files]
             self.show_attached()
         else:
-            self.unsent[chat_id] = (text, files)
+            # An earlier one not sent is kept too: both come back together.
+            before, kept = self.unsent.get(chat_id, ("", []))
+            self.unsent[chat_id] = (" ".join(t for t in (before, text) if t),  # an entry is one line
+                                    kept + [f for f in files if f not in kept])
 
     # --- attachments ------------------------------------------------------------
     def attach(self):

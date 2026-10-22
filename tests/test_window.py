@@ -992,13 +992,17 @@ app.send()
 app.entry.set_text("Три")
 wait(lambda: app.sendb.get_sensitive(), what="the send refused")
 assert app.entry.get_text() == "Три"
+app.entry.set_text("Четыре")  # a second not sent while «Три» is typed: kept with the first
+app.send()
+app.entry.set_text("Три")
+wait(lambda: app.sendb.get_sensitive(), what="the second send refused")
 fake.back()
 wait(lambda: not app.offline.get_visible(), what="the bar gone")
 app.entry.set_text("")
 app.show_list()
 app.open(mama)
 spin(0.2)
-assert app.entry.get_text() == "Два"
+assert app.entry.get_text() == "Два Четыре", app.entry.get_text()
 app.entry.set_text("")
 # a voice message: held, let go
 assert app.recorder.available()
