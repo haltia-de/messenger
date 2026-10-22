@@ -2950,8 +2950,11 @@ class VoiceCall:
             log_line("voice call: peer media audio=%s video=%s peer=%s" % (
                 said.get("isAudioEnabled"), said.get("isVideoEnabled"), ours))
             if ours:
-                self.remote_video = bool(said.get("isVideoEnabled"))
-                self.remote_audio = said.get("isAudioEnabled") is not False
+                self.remote_video = said.get("isVideoEnabled") is True
+                # MAX leaves a switched-off one out (seen on the tablet,
+                # 22 October 2026: «audio=None» while the peer was muted): only
+                # True is on.
+                self.remote_audio = said.get("isAudioEnabled") is True
                 self.show(self.state)
         elif name in ("hungup", "closed-conversation"):
             await self.end(remote=True, remote_reason=event.get("reason"))
