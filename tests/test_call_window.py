@@ -217,6 +217,16 @@ app.call_changed({"id": "synthetic-invitation", "name": "Тестовый соб
                   "since": time.time() - 65, "muted": True})
 assert app.call_label.get_text() == "Разговор 1:05 · микрофон выключен"
 assert app.call_mute.state_text == "Микрофон выключен" and app.call_mute.get_style_context().has_class("alert")
+assert isinstance(app.call_mute.get_child(), bm.Gtk.Image)  # a picture, no words on it
+assert app.call_mute.get_child().get_icon_name()[0] == "microphone-disabled-symbolic"
+assert "Микрофон выключен" in app.call_mute.get_tooltip_text()
+# full screen for the talk, and back to the window when it ends
+assert app.call_full.get_visible() and not app.call_full_on
+app.call_full.clicked()
+assert app.call_full_on and app.call_full.state_text == "Во весь экран"
+app.call_full.clicked()
+assert not app.call_full_on
+app.call_full.clicked()
 requests.clear()
 with patch.object(app.backend, "call", side_effect=dial):
     app.call_mute.clicked()
@@ -225,6 +235,7 @@ assert requests[0] == ("mute", {"conversation": "synthetic-invitation"})
 shot("talk.png")
 requests.clear()
 app.call_changed({"id": "synthetic-invitation", "name": "Тестовый собеседник", "state": "ended"})
+assert not app.call_full_on  # the talk over: the window as it was
 assert app.call_logind.fd is None
 wait(lambda: logind.released())
 # Straight back to the messages, nothing to close; said under the title.
@@ -322,7 +333,11 @@ assert "Видеозвонок" in app.call_label.get_text()
 # camera is switched in the talk (no third «Ответить без видео»).
 assert app.call_answer.get_visible() and app.call_end.get_visible()
 assert app.call_end.get_parent() is app.call_answer.get_parent()
-assert app.call_end.get_parent().get_children() == [app.call_end, app.call_answer]
+row = app.call_end.get_parent().get_children()
+assert row.index(app.call_end) + 1 == row.index(app.call_answer)
+# one row with «Завершить»: the round switches before it, pictures only
+assert app.call_mute in row and app.call_camera in row and app.call_full in row
+assert row.index(app.call_full) < row.index(app.call_end)
 assert app.call_answer.get_style_context().has_class("call-answer")
 assert not app.call_mute.get_visible()
 shot("video-ringing.png")

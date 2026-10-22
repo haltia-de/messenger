@@ -461,9 +461,9 @@ button.call-switch { background-image: none; background-color: #f2f2f0; border: 
                      transition: none; }  /* the new state at once, not fading over 200 ms */
 button.call-switch.on { background-color: #c4dcf7; border-color: #3584e4; }
 button.call-switch.alert { background-color: #f6d5d1; border-color: #e01b24; }
-button.call-switch.alert label.switch-state { color: #a51d2d; }
-label.switch-state { font-size: 28px; font-weight: bold; color: #2e3436; }
-label.switch-action { font-size: 20px; color: #5e5c64; }
+button.call-switch { min-width: 104px; min-height: 104px; border-radius: 52px; padding: 0; }
+button.call-switch image { color: #2e3436; }
+button.call-switch.alert image { color: #a51d2d; }
 label.peer-note { font-size: 26px; color: #a51d2d; background-color: #f6d5d1;
                   border-radius: 14px; padding: 10px 16px; }
 label.peer-off { font-size: 28px; color: #ffffff; background-color: rgba(0, 0, 0, 0.6);
@@ -734,24 +734,25 @@ SWITCHES = {  # what a call's switch says: (icon, state, what a tap does), on an
     "mic": (("audio-input-microphone-symbolic", "Микрофон включён", "нажмите — выключить"),
             ("microphone-disabled-symbolic", "Микрофон выключен", "нажмите — включить")),
     "camera": (("camera-video-symbolic", "Камера включена", "нажмите — выключить"),
-               ("camera-disabled-symbolic", "Камера выключена", "нажмите — включить"))}
+               ("camera-disabled-symbolic", "Камера выключена", "нажмите — включить")),
+    "full": (("view-restore-symbolic", "Во весь экран", "нажмите — обычный вид"),
+             ("view-fullscreen-symbolic", "Обычный вид", "нажмите — во весь экран"))}
 
 
 def set_switch(button, what, on):
-    """A call's microphone or camera button as a switch that shows its state:
-    an icon (crossed when off), the state in large letters, what a tap does,
-    and its colour (blue on; the microphone off red, as it matters)."""
+    """A call's microphone, camera or full-screen button as a round switch
+    showing its state by its picture alone, as on a phone: the icon crossed
+    when off, blue when on, the microphone off red, as it matters. Its state
+    in words is its tooltip and its accessible name."""
     icon, state, action = SWITCHES[what][0 if on else 1]
     if button.get_child() is not None:
         button.remove(button.get_child())
-    row = Gtk.Box(spacing=16, halign=Gtk.Align.CENTER)
-    row.pack_start(Gtk.Image.new_from_icon_name(icon, Gtk.IconSize.DND), False, False, 0)
-    words = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-    words.pack_start(label(state, "switch-state"), False, False, 0)
-    words.pack_start(label(action, "switch-action"), False, False, 0)
-    row.pack_start(words, False, False, 0)
-    button.add(row)
-    row.show_all()
+    image = Gtk.Image.new_from_icon_name(icon, Gtk.IconSize.DIALOG)
+    image.set_pixel_size(48)
+    button.add(image)
+    image.show()
+    button.set_tooltip_text("%s — %s" % (state, action))
+    button.get_accessible().set_name(state)
     style = button.get_style_context()
     (style.add_class if on else style.remove_class)("on")
     (style.add_class if not on and what == "mic" else style.remove_class)("alert")
@@ -6605,18 +6606,27 @@ class Max(Gtk.Application):
         self.call_box.pack_start(identity_scroll, True, True, 0)
         # As on a phone: in the talk the microphone and the camera side by side,
         # under them «Отклонить» (red) beside «Ответить» (green), or «Завершить» alone.
-        switches = Gtk.Box(spacing=16, homogeneous=True)
-        for child in (self.call_mute, self.call_camera):
-            switches.pack_start(child, True, True, 0)
+        # The talk full screen: the window without its header, the picture as
+        # large as the screen (the shell's panel and ✕ hidden meanwhile).
+        self.call_full = Gtk.Button()
+        self.call_full.get_style_context().add_class("call-control")
+        self.call_full.get_style_context().add_class("call-switch")
+        self.call_full.connect("clicked", lambda _b: self.set_call_full(not self.call_full_on))
+        self.call_full_on = False
+        set_switch(self.call_full, "full", False)
+        # One row, as on a phone: in the talk the round switches (microphone,
+        # camera, full screen) then «Завершить»; ringing, «Отклонить» (red)
+        # and «Ответить» (green) share it.
+        controls = Gtk.Box(spacing=24)
+        for child in (self.call_mute, self.call_camera, self.call_full):
+            controls.pack_start(child, False, False, 0)
             child.set_no_show_all(True)
-        switches.show()
-        answers = Gtk.Box(spacing=16, homogeneous=True)
         for child in (self.call_end, self.call_answer):
-            answers.pack_start(child, True, True, 0)
+            controls.pack_start(child, True, True, 0)
+            child.set_valign(Gtk.Align.CENTER)
             child.show()
-        answers.show()
-        self.call_box.pack_start(switches, False, False, 0)
-        self.call_box.pack_start(answers, False, False, 0)
+        controls.show()
+        self.call_box.pack_start(controls, False, False, 0)
         column.pack_start(self.stack, True, True, 0)
         # A separate page uses all available room, without losing the chat
         # underneath. Navigation cannot hide the hang-up button.
@@ -8439,6 +8449,14 @@ class Max(Gtk.Application):
             self.call_pages.set_visible_child_name("messages")
             self.sub.set_text("Не удалось соединиться. Позвоните ещё раз, когда будете готовы.")
 
+    def set_call_full(self, on):
+        """The talk full screen, or back to the window as it was."""
+        if on == self.call_full_on:
+            return
+        self.call_full_on = on
+        (self.win.fullscreen if on else self.win.unfullscreen)()
+        set_switch(self.call_full, "full", on)
+
     def call_tick(self):
         """The talk's time and the microphone, once a second while it lasts."""
         if self.call_id is None or self.call_since is None:
@@ -8509,6 +8527,9 @@ class Max(Gtk.Application):
         self.call_muted = bool(call.get("muted"))
         self.call_note = call.get("video_error")  # said instead of the talk's time
         self.call_mute.set_visible(state == "active")
+        self.call_full.set_visible(state in ("connecting", "active"))
+        if state not in ("connecting", "active"):
+            self.set_call_full(False)  # the talk over (or not begun): the window as it was
         set_switch(self.call_mute, "mic", not self.call_muted)
         self.call_since = call.get("since") if state == "active" else None
         if state == "active" and self.call_clock is None:
