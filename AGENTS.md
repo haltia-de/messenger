@@ -316,8 +316,12 @@ chats of the message's messenger (between messengers: step 4). At the
   the running one; `--background` is a main option now that `run(sys.argv)` parses them).
   `do_open` → `show_share(paths)`: the `forward` page as «Кому отправить?» (the files named
   above the search, «Отмена» drops them; chats of every messenger, no channels); a chat chosen
-  opens with the files as a draft (`attached`), sent by the usual «Отправить». The files are
-  not copied: they are sent from where the sender left them.
+  opens with the files as a draft (`attached`), sent by the usual «Отправить». A file is taken
+  as the real file it is (`share_ok`: `realpath`, a regular file, never under `DATA`, `CONFIG`,
+  the cache, `/proc`, `/sys`, `/dev`) and copied when the chat is chosen into `SHARED` (a
+  folder per share, gone after a day), so what is sent is what was chosen. Documents in
+  messages are opened only when `openable` (`OPENABLE`: PDF, office, pictures, text — never a
+  `.desktop` file or a script; others are saved), and `DOCS` keeps the last `DOCS_KEPT`.
 - **Reactions.** Message dicts carry `reactions` ([[emoji, count]]) and `yours`; a long press on a
   bubble (`ChatView`'s `on_hold`) opens `Max.pick_reaction`, a popover of `REACTIONS`.
   `Backend.react` uses `messages.add_reaction`/`remove_reaction`; when MAX answers without counts

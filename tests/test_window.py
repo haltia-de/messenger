@@ -410,14 +410,29 @@ app.do_open([bm.Gio.File.new_for_path(shared)], 1, "")
 spin(0.1)
 row = [r for r in app.fwd_list.get_children() if r.chat_id == mama][0]
 app.fwd_list.emit("row-activated", row)
-spin(0.2)
+wait(lambda: app.attachbar.get_children(), what="the copy attached")
 assert app.open_chat == mama and app.stack.get_visible_child_name() == "chat"
-assert [c.attachment["path"] for c in app.attachbar.get_children()] == [shared]
+[copy] = [c.attachment["path"] for c in app.attachbar.get_children()]  # a copy of its own
+assert copy.startswith(bm.SHARED + os.sep) and os.path.basename(copy) == "Открытка.png"
+assert open(copy, "rb").read() == open(shared, "rb").read()
 assert not app.share_bar.get_visible()
 for c in list(app.attachbar.get_children()):  # not sent here: the draft taken off again
     [b for b in c.get_children() if isinstance(b, Gtk.Button)][0].clicked()
 spin(0.1)
 assert not app.attached
+# never the messenger's own files, /proc or /sys, nor a link to them
+os.makedirs(bm.DATA, exist_ok=True)
+own = os.path.join(bm.DATA, "known.json")
+open(own, "a").close()
+sneaky = os.path.join(os.environ["HOME"], "fun.png")
+os.symlink(own, sneaky)
+for path in (own, sneaky, "/proc/self/environ", "/sys/kernel/mm/transparent_hugepage/enabled"):
+    app.show_list()
+    app.do_open([bm.Gio.File.new_for_path(path)], 1, "")
+    spin(0.1)
+    assert app.stack.get_visible_child_name() == "chats" and app.sharing is None, path
+app.open(mama)
+spin(0.2)
 ok("a file from another program")
 
 # --- a message deleted for everyone by its sender: gone here too --------------------------------

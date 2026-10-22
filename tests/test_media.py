@@ -201,6 +201,18 @@ assert docs.file("https://fd.oneme.ru/g.pdf", "g.pdf", opened.append)
 drain()
 assert opened == [True, False]
 hands.browser = True
+# only documents, pictures and text are opened; never a .desktop file or a script
+for name in ("ярлык.desktop", "скрипт.sh", "программа.exe", "без расширения"):
+    assert not docs.file("https://fd.oneme.ru/x", name, opened.append), name
+assert bm.openable("Отчёт.DOCX") and bm.openable("фото.jpg")
+# DOCS bounded: the documents opened longest ago go
+for k in range(bm.DOCS_KEPT + 5):
+    os.makedirs(os.path.join(bm.DOCS, "old%02d" % k), exist_ok=True)
+    os.utime(os.path.join(bm.DOCS, "old%02d" % k), (k, k))
+assert docs.file("https://fd.oneme.ru/new.pdf", "Новый.pdf", opened.append)
+drain()
+left = os.listdir(bm.DOCS)
+assert len(left) <= bm.DOCS_KEPT and "old00" not in left and opened[-1] is True
 hands.downloaded.clear()
 ok("files")
 

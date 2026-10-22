@@ -157,6 +157,12 @@ DATA = os.path.join(GLib.get_user_data_dir(), "haltia-messenger")
 PHOTOS = os.path.join(GLib.get_user_cache_dir(), "haltia-messenger")
 DOCS = os.path.join(PHOTOS, "documents")  # files opened from messages, under their names
 CONFIG = os.path.join(GLib.get_user_config_dir(), "haltia")  # messenger.conf, [messenger]
+SHARED = os.path.join(PHOTOS, "shared")  # files from other programs, copied when a chat is chosen
+# What a message's file may be opened with by the desktop's program: documents,
+# pictures, text. Never .desktop files, scripts or programs: those are saved only.
+OPENABLE = (".pdf", ".doc", ".docx", ".odt", ".rtf", ".xls", ".xlsx", ".ods", ".csv", ".ppt",
+            ".pptx", ".odp", ".txt", ".jpg", ".jpeg", ".png", ".gif", ".webp", ".heic", ".bmp")
+DOCS_KEPT = 30  # documents opened lately kept in DOCS; older ones go
 # Where b8k-max (before 2.0) kept them: its folders by that name under these.
 BASES = [GLib.get_user_config_dir(), GLib.get_user_data_dir(), GLib.get_user_cache_dir()]
 OLD_NAME = "b8k-max"
@@ -4666,7 +4672,11 @@ class Media:
         if not how:
             log_line("file refused: %s" % where(url))
             return False
+        if not openable(name):
+            log_line("file not opened: %s" % (os.path.splitext(safe_name(name))[1] or "no type"))
+            return False
         log_line("file %s" % where(url))
+        prune_docs()
 
         def fetched(path):
             opened = bool(path) and bool(self.open_uri(GLib.filename_to_uri(path)))
@@ -4679,6 +4689,34 @@ class Media:
         folder = os.path.join(DOCS, hashlib.sha256(url.encode()).hexdigest()[:16])
         self.save(url, folder, name, fetched, replace=True)
         return True
+
+
+def openable(name):
+    """May a file of this name be given to the desktop's program for it?"""
+    return os.path.splitext(safe_name(name or ""))[1].lower() in OPENABLE
+
+
+def prune_docs(keep=DOCS_KEPT):
+    """DOCS bounded: the folders of documents opened longest ago go."""
+    try:
+        folders = sorted((e for e in os.scandir(DOCS) if e.is_dir(follow_symlinks=False)),
+                         key=lambda e: e.stat(follow_symlinks=False).st_mtime)
+    except OSError:
+        return
+    for e in folders[:max(0, len(folders) - keep + 1)]:
+        shutil.rmtree(e.path, ignore_errors=True)
+
+
+def share_ok(path):
+    """A file another program sent, as the real file it is: a regular one,
+    not the messenger's own data, settings or cache, nor /proc, /sys, /dev
+    (a link there is followed first). None if it is not to be sent."""
+    real = os.path.realpath(path)
+    for inside in (DATA, CONFIG, PHOTOS, "/proc", "/sys", "/dev"):
+        root = os.path.realpath(inside)
+        if real == root or real.startswith(root + os.sep):
+            return None
+    return real if os.path.isfile(real) else None
 
 
 # --- the chat list ---------------------------------------------------------------
@@ -7074,7 +7112,9 @@ class Max(Gtk.Application):
     def do_open(self, files, _n, _hint):
         """Files another program sent (haltia_kit.share launches the program
         with them; a second launch hands them over): «Кому отправить?»."""
-        paths = [f.get_path() for f in files if f.get_path() and os.path.isfile(f.get_path())]
+        paths = [p for p in (share_ok(f.get_path()) for f in files if f.get_path()) if p]
+        if len(paths) < len([f for f in files if f.get_path()]):
+            log_line("share: a file refused")
         self.activate()
         if paths:
             self.show_share(paths)
@@ -7122,11 +7162,36 @@ class Max(Gtk.Application):
             paths, self.sharing = self.sharing, None
             self.share_bar.hide()
             self.open(target)
-            # A draft, as if attached here: seen above the entry, sent by «Отправить».
-            for path in paths:
-                if not any(f["path"] == path for f in self.attached):
-                    self.attached.append(attachment(path))
-            self.show_attached()
+            # Copied into a folder of the messenger's own first, by a thread (a
+            # video is big): what is sent is what was chosen, whatever the sender
+            # does with its file meanwhile. Then a draft, sent by «Отправить».
+            def copy():
+                folder = os.path.join(SHARED, "%d" % int(time.time() * 1000))
+                copies = []
+                try:
+                    old = [e.path for e in os.scandir(SHARED)] if os.path.isdir(SHARED) else []
+                    for gone in old:  # what was shared before is sent or dropped by now
+                        if time.time() - os.stat(gone).st_mtime > 86400:
+                            shutil.rmtree(gone, ignore_errors=True)
+                    os.makedirs(folder, mode=0o700, exist_ok=True)
+                    for path in paths:
+                        copy = os.path.join(folder, safe_name(os.path.basename(path)))
+                        shutil.copyfile(path, copy)
+                        copies.append(copy)
+                except OSError as exc:
+                    log_line("share copy: %r" % exc)
+                GLib.idle_add(lambda: attach(copies) and False)
+
+            def attach(copies):
+                if self.open_chat != target:
+                    return  # left meanwhile
+                for path in copies:
+                    if not any(f["path"] == path for f in self.attached):
+                        self.attached.append(attachment(path))
+                self.show_attached()
+                if len(copies) < len(paths):
+                    self.sub.set_text("не все файлы удалось взять")
+            threading.Thread(target=copy, daemon=True).start()
             return
         if not self.forwarding:
             return
@@ -7975,6 +8040,8 @@ class Max(Gtk.Application):
                 self.sound_end()  # the voice playing stops for it
                 if not self.media.video(url, self.title.get_text()):
                     self.sub.set_text("не удалось открыть видео")
+            elif not openable(item.get("name")):
+                self.sub.set_text("такой файл здесь не открывается — сохраните его")
             else:
                 # Fetched, then opened by the desktop's program for its type.
                 button.set_sensitive(False)
