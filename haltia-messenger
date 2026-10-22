@@ -8717,7 +8717,7 @@ class Max(Gtk.Application):
         live = state in ("connecting", "active")
         notes = []
         if live and call.get("remote_audio") is False:
-            notes.append("🔇 Собеседник выключил микрофон")
+            notes.append("🔇 Микрофон собеседника выключен")
         if live and call.get("remote_video") is False and (self.call_video or call.get("video_invitation")):
             notes.append("📷 Камера собеседника выключена")
         self.call_peer.set_text("\n".join(notes))
