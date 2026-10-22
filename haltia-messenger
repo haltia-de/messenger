@@ -2138,6 +2138,20 @@ class CallAudio:
         state = rtc.get_property("connection-state").value_nick
         self.loop.call_soon_threadsafe(self._deliver, self.status, state)
 
+    def _branch_failed(self, state, branch):
+        """A video branch's error, on the loop: told once per branch still in use."""
+        if branch is self.video_bin and state == "send-video-failed" or \
+                branch is self.remote_bin and state == "remote-video-failed":
+            if state == "remote-video-failed":
+                self.remote_bin = None  # its later errors count no more
+                pad = getattr(self, "remote_pad", None)
+                if pad is not None:
+                    # Nothing more into it: a failed branch must not stop the
+                    # bundle's flow, which carries the voice too.
+                    pad.add_probe(self.Gst.PadProbeType.BUFFER,
+                                  lambda *_a: self.Gst.PadProbeReturn.DROP)
+            self._deliver(self.status, state)
+
     def _sender_bin(self, payload):
         """What sends the camera's picture: appsrc, VP8, RTP with payload."""
         sender = self.Gst.parse_bin_from_description(
@@ -2160,8 +2174,8 @@ class CallAudio:
         if self.closed or old is None or pad is None or self.pipeline is None:
             return False
         payload = old.get_by_name("video_pay").get_property("pt")
+        old.set_state(self.Gst.State.NULL)  # stopped before it is let go of
         old.get_static_pad("src").unlink(pad)
-        old.set_state(self.Gst.State.NULL)
         self.pipeline.remove(old)
         sender = self._sender_bin(payload)
         self.pipeline.add(sender)
@@ -2181,13 +2195,18 @@ class CallAudio:
             err, _debug = message.parse_error()
             src = message.src
             inside = lambda part: part is not None and (src is part or src.has_as_ancestor(part))  # noqa: E731
-            # The peer's picture failing never stops the own camera.
-            video = ("send-video-failed" if inside(self.video_bin) else
-                     "remote-video-failed" if inside(self.remote_bin) else None)
             factory = src.get_factory() if hasattr(src, "get_factory") else None
             self.loop.call_soon_threadsafe(log_line, "voice call: gst error %s %s:%d" % (
                 factory.get_name() if factory else "bin", err.domain, err.code))
-            self.loop.call_soon_threadsafe(self._deliver, self.status, video or "failed")
+            # The peer's picture failing never stops the own camera; one failure
+            # posts several errors, and those of a branch already replaced count
+            # no more (the bin goes with them, checked on the loop).
+            if inside(self.video_bin):
+                self.loop.call_soon_threadsafe(self._branch_failed, "send-video-failed", self.video_bin)
+            elif inside(self.remote_bin):
+                self.loop.call_soon_threadsafe(self._branch_failed, "remote-video-failed", self.remote_bin)
+            else:
+                self.loop.call_soon_threadsafe(self._deliver, self.status, "failed")
         return self.Gst.BusSyncReply.DROP
 
     def _received(self, _rtc, pad):
@@ -2224,7 +2243,7 @@ class CallAudio:
         if media == "audio":
             self._phone_streams(received)
         else:
-            self.remote_bin = received
+            self.remote_bin, self.remote_pad = received, pad
             received.get_by_name("remote_video").connect("new-sample", self._frame_sample, False, 0)
         pipeline.add(received)
         pad.link(received.get_static_pad("sink"))

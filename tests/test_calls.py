@@ -149,6 +149,25 @@ def bus_errors():
                                              parse_error=lambda: (error, "turn:secret@host")), None)
     assert statuses == ["send-video-failed", "remote-video-failed", "failed"], statuses
     assert "identity" in lines[0] and "fakesink" in lines[2] and not any("secret" in l for l in lines)
+    # One failure posts several errors, all classified while the branch is in
+    # use; on the loop, those of a branch replaced meanwhile (or of the peer's,
+    # given up) count no more.
+    statuses.clear()
+    queued = []
+    audio.loop = SimpleNamespace(call_soon_threadsafe=lambda cb, *a: queued.append((cb, a)))
+    audio.video_bin, audio.remote_bin = Gst.Bin.new("send"), Gst.Bin.new("receive")
+    encoder, decoder = Gst.ElementFactory.make("identity", None), Gst.ElementFactory.make("queue", None)
+    audio.video_bin.add(encoder)
+    audio.remote_bin.add(decoder)
+    with patch.object(bm, "log_line"):
+        for src in (encoder, encoder, decoder, decoder):
+            audio._bus(None, SimpleNamespace(type=Gst.MessageType.ERROR, src=src,
+                                             parse_error=lambda: (error, "")), None)
+        for k, (cb, args) in enumerate(queued):
+            cb(*args)
+            if statuses == ["send-video-failed"] and k < 3:
+                audio.video_bin = Gst.Bin.new("rebuilt")  # as rebuild_sender does
+    assert statuses == ["send-video-failed", "remote-video-failed"], statuses
     ok("video branch errors stop video only; logged by element and code without the debug text")
 
 
