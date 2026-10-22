@@ -2119,11 +2119,24 @@ VIDEO_CAPS = ("application/x-rtp,media=video,encoding-name=VP8,payload=%d,clock-
               "max-fs=(string)1200,max-fr=(string)15")  # RFC 7741: what we can take, ~480x640 at 15/s
 # What the camera sends, best first; a tablet that cannot keep up steps down
 # (adapt_video), the last step off. 320×240 looked much worse than «Камера».
-VIDEO_SIZES = ((640, 480, 15), (320, 240, 15), (160, 120, 10))
-VIDEO_BITRATE = {640: 900000, 320: 350000, 160: 150000}  # bit/s for each width
-VIDEO_START = [VIDEO_SIZES[0]]  # a call starts at the size that last kept up, this run
+VIDEO_SIZES = ((640, 480, 15), (480, 360, 15), (320, 240, 15), (160, 120, 10))
+VIDEO_BITRATE = {640: 900000, 480: 600000, 320: 350000, 160: 150000}  # bit/s for each width
+# 640×480 kept two of the B8000-H's four cores busy (10:40, a live call): a
+# call starts at 480×360, and at the size that last kept up after a step down.
+VIDEO_START = [VIDEO_SIZES[1]]
+ADAPT_IDLE = .15  # the whole system idle less than this over a look: overloaded too
 ADAPT_EVERY = 5  # s between looks at whether the encoder keeps up
 ADAPT_KEPT = .7  # the share of the camera's frames the encoder keeps up with
+
+
+def system_cpu():
+    """(idle, total) jiffies of all processors since boot, or None."""
+    try:
+        with open("/proc/stat") as fh:
+            fields = [int(x) for x in fh.readline().split()[1:]]
+        return fields[3] + (fields[4] if len(fields) > 4 else 0), sum(fields)
+    except (OSError, ValueError, IndexError):
+        return None
 
 
 class CameraWorker:
@@ -2543,7 +2556,7 @@ class CallAudio:
             # The own picture is small: scaled and slowed here, not in Python.
             "t. ! queue max-size-buffers=1 leaky=downstream ! videorate drop-only=true "
             "! video/x-raw,framerate=10/1 ! videoscale ! videoconvert "
-            "! video/x-raw,format=BGRA,width=160,height=120 ! appsink name=preview emit-signals=true "
+            "! video/x-raw,format=BGRA,width=240,height=180 ! appsink name=preview emit-signals=true "
             "sync=false max-buffers=1 drop=true" % (fps, width, height))
         self.camera = camera
         try:
@@ -3037,14 +3050,21 @@ class VoiceCall:
             # to a camera switch never ends the call.
             log_line("voice call: media settings not acknowledged")
 
-    async def adapt_video(self, encoded, delivered):
-        """The encoder keeps up with the camera, or the tablet is overloaded.
-        A camera slow in dim light delivers fewer frames: that is no load."""
-        if not self.video_wanted or not self.video or delivered <= 0 or encoded >= delivered * ADAPT_KEPT:
+    async def adapt_video(self, encoded, delivered, idle=None):
+        """The encoder keeps up with the camera and the processors have room
+        (idle: the system's idle share over the look), or the tablet is
+        overloaded. A camera slow in dim light delivers fewer frames: that is
+        no load."""
+        if not self.video_wanted or not self.video or delivered <= 0:
+            return
+        busy = idle is not None and idle < ADAPT_IDLE
+        if encoded >= delivered * ADAPT_KEPT and not busy:
             return
         smaller = [v for v in VIDEO_SIZES if v[0] < self.audio.video_size[0]]
         if smaller:
             self.audio.video_size = VIDEO_START[0] = smaller[0]  # the next call starts there
+            log_line("voice call: video %dx%d (%s)" % (smaller[0][0], smaller[0][1],
+                                                         "processors busy" if busy else "encoder behind"))
             await self.camera(True)
         else:
             self.video_wanted = False
@@ -3064,9 +3084,12 @@ class VoiceCall:
             try:
                 if self.video and hasattr(self.audio, "video_frames"):
                     current = (self.audio.video_frames, self.audio.video_pushed,
-                               self.audio.video_generation)
+                               self.audio.video_generation, system_cpu())
                     if previous is not None and previous[2] == current[2]:
-                        await self.adapt_video(current[0] - previous[0], current[1] - previous[1])
+                        idle = None
+                        if current[3] and previous[3] and current[3][1] > previous[3][1]:
+                            idle = (current[3][0] - previous[3][0]) / (current[3][1] - previous[3][1])
+                        await self.adapt_video(current[0] - previous[0], current[1] - previous[1], idle)
                     previous = current
                 else:
                     previous = None
@@ -6514,7 +6537,7 @@ class Max(Gtk.Application):
         self.call_own_box.set_margin_end(12)
         self.call_own_box.set_margin_bottom(12)
         self.call_own = CallPicture(mirror=True)
-        self.call_own.set_size_request(128, 96)
+        self.call_own.set_size_request(240, 180)  # larger: the author found 128 too small
         self.call_own_box.pack_start(self.call_own, False, False, 0)
         own_label = Gtk.Label(label="Камера включена")
         own_label.get_style_context().add_class("call-video-caption")
