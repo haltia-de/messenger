@@ -87,7 +87,8 @@ def camera_refresh():
             index = len(pipelines)
             def state(value):
                 if value == "playing" and (failure == "state-twice" or (index == 0 and failure == "state")):
-                    audio._camera_bus(pipe.get_bus(), SimpleNamespace(type="error"), None)
+                    audio._camera_bus(pipe.get_bus(), SimpleNamespace(
+                        type="error", src=None, parse_error=lambda: (SimpleNamespace(domain="x", code=1), "")), None)
                     return "failure"
                 return "success"
             pipe.set_state.side_effect = state
