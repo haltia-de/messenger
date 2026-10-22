@@ -290,7 +290,11 @@ with patch.object(app.backend, "call", side_effect=dial):
     app.call_audio_answer.clicked()
     wait(lambda: len(requests) == 1)
 assert requests[0] == ("answer", {"conversation": "video-ui"})
+# A tap: the button says what was asked at once, and waits for the camera.
+app.call_changed(dict(video_call, state="active", video=False, video_wanted=True))
+assert app.call_camera.get_label() == "Выключить камеру" and not app.call_camera.get_sensitive()
 app.call_changed(dict(video_call, state="active", video=True))
+assert app.call_camera.get_sensitive()
 # Feed the mailbox from a worker just like Gst: GTK drawing happens later.
 import threading
 frame = (32, 24, bytes([80, 130, 180, 255]) * (32 * 24))
@@ -299,7 +303,7 @@ worker = threading.Thread(target=lambda: [app.call_frame("video-ui", own, frame)
 worker.start()
 worker.join()
 assert len(app.call_frames) == 2 and app.call_frame_pending
-wait(lambda: app.call_remote.pixbuf is not None and app.call_own.pixbuf is not None)
+wait(lambda: app.call_remote.surface is not None and app.call_own.surface is not None)
 assert app.call_own_box.get_visible() and app.call_video_area.get_visible()
 assert app.call_end.get_visible() and app.call_camera.get_visible()
 for width, height in ((1280, 800), (800, 1280)):
@@ -312,19 +316,19 @@ for width, height in ((1280, 800), (800, 1280)):
     shot("video-call-%dx%d.png" % (width, height))
 shot("video-call.png")
 app.call_changed(dict(video_call, state="active", video=False, remote_video=False))
-assert app.call_own.pixbuf is None and not app.call_video_area.get_visible()
+assert app.call_own.surface is None and not app.call_video_area.get_visible()
 app.call_frame("old-video", True, frame)
 wait(lambda: not app.call_frame_pending)
-assert app.call_own.pixbuf is None
+assert app.call_own.surface is None
 # The peer's picture goes when its frames stop, though it never said so.
 with patch.object(bm, "REMOTE_STALE", .3):
     app.call_changed(dict(video_call, state="active", video=False))
     app.call_frame("video-ui", False, (24, 32, bytes(4 * 24 * 32)))
-    wait(lambda: app.call_remote.pixbuf is not None)
+    wait(lambda: app.call_remote.surface is not None)
     assert app.call_video_area.get_visible() and not app.call_identity.get_visible()
     # Upright, as sent: no bands of its own (CallPicture fits it).
-    assert (app.call_remote.pixbuf.get_width(), app.call_remote.pixbuf.get_height()) == (24, 32)
-    wait(lambda: app.call_remote.pixbuf is None)
+    assert (app.call_remote.surface.get_width(), app.call_remote.surface.get_height()) == (24, 32)
+    wait(lambda: app.call_remote.surface is None)
     assert not app.call_video_area.get_visible() and app.call_identity.get_visible()
 app.call_changed(dict(video_call, state="ended"))
 assert not app.call_audio_answer.get_visible() and not app.call_camera.get_visible()

@@ -78,7 +78,6 @@ def camera_refresh():
         scheduled, statuses = [], []
         audio = bm.CallAudio.__new__(bm.CallAudio)
         audio.camera, audio.closed, audio.video_generation = None, False, 0
-        audio.camera_lock = threading.Lock()
         audio.video_bin, audio.video_size = object(), (320, 240, 15)
         audio.loop = SimpleNamespace(call_soon_threadsafe=lambda cb, *a: scheduled.append((cb,a)))
         audio.status = statuses.append
@@ -124,6 +123,36 @@ def camera_refresh():
 
 
 camera_refresh()
+
+
+def bus_errors():
+    # An error inside the video branches stops video only; any other ends the
+    # call. The log names the element and the code, never the debug text.
+    import gi
+    gi.require_version("Gst", "1.0")
+    from gi.repository import Gst
+    Gst.init(None)
+    audio = bm.CallAudio.__new__(bm.CallAudio)
+    audio.Gst, audio.closed = Gst, False
+    audio.video_bin, audio.remote_bin = Gst.Bin.new("send"), Gst.Bin.new("receive")
+    encoder, decoder = Gst.ElementFactory.make("identity", None), Gst.ElementFactory.make("queue", None)
+    audio.video_bin.add(encoder)
+    audio.remote_bin.add(decoder)
+    other = Gst.ElementFactory.make("fakesink", None)
+    statuses, lines = [], []
+    audio.status = statuses.append
+    audio.loop = SimpleNamespace(call_soon_threadsafe=lambda cb, *a: cb(*a))
+    error = bm.GLib.Error.new_literal(Gst.StreamError.quark(), "turn:secret@host", 1)
+    with patch.object(bm, "log_line", side_effect=lines.append):
+        for src in (encoder, decoder, other):
+            audio._bus(None, SimpleNamespace(type=Gst.MessageType.ERROR, src=src,
+                                             parse_error=lambda: (error, "turn:secret@host")), None)
+    assert statuses == ["video-failed", "video-failed", "failed"], statuses
+    assert "identity" in lines[0] and "fakesink" in lines[2] and not any("secret" in l for l in lines)
+    ok("video branch errors stop video only; logged by element and code without the debug text")
+
+
+bus_errors()
 
 
 def literal(value):
@@ -604,14 +633,21 @@ async def video_consent():
             self.fail = False
             self.hold = None
             self.threads = set()
+            self.asked = []  # set_video's calls, in order
+            self.sdp_first = None  # was the SDP out when the camera was asked to open
         def set_video(self, enabled):
             self.threads.add(threading.current_thread().name)
+            self.asked.append(bool(enabled))
+            if enabled and self.sdp_first is None:
+                self.sdp_first = "transmit-data" in self.sent()
             if enabled and self.hold:
                 opened, release = self.hold
                 self.hold = None
                 opened.set()
                 release.wait(5)
             self.camera = False
+            if self.closed:
+                return False  # hung up while it opened: never left on
             if enabled and self.fail:
                 raise RuntimeError("synthetic busy camera")
             self.camera = bool(enabled)
@@ -624,6 +660,7 @@ async def video_consent():
         socket = Socket()
         call = bm.VoiceCall("video-consent", "test-person", True, lambda c, _s: shown.append(c.video),
                             audio=VideoAudio, connect=lambda *_a, **_k: socket, video=True)
+        VideoAudio.sent = lambda _self, socket=socket: socket.commands()
         task = asyncio.create_task(call.run(dict(params)))
         await until(lambda: "change-participant-state" in socket.commands())
         assert call.audio is None and not call.video
@@ -632,46 +669,87 @@ async def video_consent():
         await socket.notify("transmitted-data", participantId="remote", data={
             "sdp": {"type": "offer", "sdp": "synthetic"}})
         call.job(call.answer(video=answer_video))
-        await until(lambda: call.audio is not None and "transmit-data" in socket.commands())
-        assert call.video == answer_video and call.audio.camera == answer_video
+        await until(lambda: call.audio is not None and "transmit-data" in socket.commands()
+                    and call.audio.camera == answer_video)
+        assert call.video == answer_video and call.video_wanted == answer_video
+        # The SDP goes first: ICE does not wait for the camera to open.
+        assert call.audio.sdp_first in ((True,) if answer_video else (None,))
         accepted = next(v for v in socket.sent if isinstance(v, dict) and v["command"] == "accept-call")
         assert accepted["mediaSettings"]["isVideoEnabled"] == answer_video
         call.audio_state("connected")
-        await call.camera(False)
+
+        async def switch(on):
+            if call.video_wanted != on:
+                call.toggle_camera()
+            await until(lambda: call.video == on and call.audio.camera == on)
+        await switch(False)
         gate = asyncio.Event()
         async def slow_ack(*_args, **_kwargs):
             await gate.wait()
         with patch.object(call, "command", side_effect=slow_ack):
-            enabling = asyncio.create_task(call.camera(True))
+            call.toggle_camera()
             await until(lambda: call.audio.camera)
-            assert shown[-1] is True and not enabling.done()
+            assert shown[-1] is True  # the own picture before the slow acknowledgement
             gate.set()
-            await enabling
-        await call.adapt_video(3)
+            await asyncio.sleep(0)
+        # A refused acknowledgement of a camera switch never ends the call.
+        async def refused(*_args, **_kwargs):
+            raise RuntimeError("synthetic refusal")
+        with patch.object(call, "command", side_effect=refused):
+            await switch(False)
+            await switch(True)
+        assert not call.closed and call.state == "active"
+        # A dim room slows the camera: no overload while the encoder keeps up.
+        await call.adapt_video(8, 9)
+        assert call.audio.video_size == (320, 240, 15) and call.video
+        await call.adapt_video(3, 15)
         assert call.audio.video_size == (160,120,10) and call.video
-        await call.adapt_video(3)
+        await call.adapt_video(3, 15)
         assert not call.video and not call.audio.camera and call.state == "active"
+        assert not call.video_wanted  # turned off: adaptation never turns it on again
+        await call.adapt_video(0, 15)
+        assert not call.video
         call.audio.fail = True
-        await call.camera(True)
-        assert not call.video and not call.audio.camera and not call.closed and call.video_error
+        call.toggle_camera()
+        await until(lambda: call.video_error and not call.video_wanted)
+        assert not call.video and not call.audio.camera and not call.closed
+        # The video branch's own error stops video, never the call.
+        call.audio.fail = False
+        await switch(True)
+        call.audio_state("video-failed")
+        await until(lambda: not call.video)
+        assert not call.closed and call.state == "active" and call.video_error
         await socket.notify("media-settings-changed", participantId="remote", mediaSettings={"isVideoEnabled": True})
         await until(lambda: call.remote_video is True)
         assert not call.video  # A peer cannot turn our camera on.
-        # Opening the camera blocks its own thread, never the loop.
-        call.audio.fail = False
+        # Opening the camera blocks its own thread, never the loop; two quick
+        # taps are folded: on, then off, and it ends off.
         opened, release = threading.Event(), threading.Event()
         call.audio.hold = (opened, release)
-        enabling = asyncio.create_task(call.camera(True))
+        call.audio.asked.clear()
+        call.toggle_camera()
         await until(opened.is_set)
+        call.toggle_camera()
         await asyncio.sleep(.05)
-        assert not enabling.done()
+        assert not call.video and not call.video_wanted
         release.set()
-        await enabling
-        assert call.video and call.audio.threads == {"camera_0"}
-        await call.end("HUNGUP")
+        await until(lambda: call.audio.asked == [True, False] and not call.audio.camera)
+        assert not call.video and call.audio.threads == {"camera"}
+        # Hanging up while a camera opens: the loop answers at once, and the
+        # camera is not left on when it finishes opening.
+        opened, release = threading.Event(), threading.Event()
+        call.audio.hold = (opened, release)
+        call.toggle_camera()
+        await until(opened.is_set)
+        loop = asyncio.get_running_loop()
+        began = loop.time()
+        await asyncio.wait_for(call.end("HUNGUP"), 1)
+        assert loop.time() - began < .5 and opened.is_set() and not release.is_set()
+        release.set()
         await asyncio.gather(task, return_exceptions=True)
+        await asyncio.sleep(.1)
         assert call.audio.closed and not call.audio.camera
-    ok("video consent, audio-only answer, camera failure, overload downgrade and peer isolation")
+    ok("video consent, SDP before the camera, folded taps, hang-up while a camera opens, non-fatal acks and video errors, dim light, overload downgrade and peer isolation")
 
 
 async def end_logging():

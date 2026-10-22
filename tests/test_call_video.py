@@ -3,7 +3,6 @@
 Run inside the Messenger Flatpak when the host has no GstWebRTC/libnice.
 """
 import asyncio
-import threading
 from common import load, ok
 
 bm = load()
@@ -112,7 +111,6 @@ async def h264_receive():
     phone.closed, phone.remote_set, phone.pending = False, False, []
     phone.camera = phone.video_bin = phone.video_pad = phone.frame = None
     phone.video_generation = 0
-    phone.camera_lock = threading.Lock()
     phone.sink = "fakesink name=heard sync=false"
     phone.pipeline = Gst.parse_launch(
         "webrtcbin name=rtc bundle-policy=max-bundle "

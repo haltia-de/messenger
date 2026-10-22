@@ -142,6 +142,7 @@ gi.require_version("Gdk", "3.0")
 gi.require_version("GdkPixbuf", "2.0")
 gi.require_version("Pango", "1.0")
 from gi.repository import Gdk, GdkPixbuf, Gio, Gtk, Pango  # noqa: E402
+import cairo  # noqa: E402  (pycairo, PyGObject's own dependency)
 
 from haltia_kit import dialogs, paths, photos  # noqa: E402
 from haltia_kit.awake import Awake  # noqa: E402
@@ -1916,7 +1917,39 @@ def call_notice_id(conversation):
 
 REMOTE_STALE = 3.0  # s without the peer's frames: their video is gone
 REMOTE_MAX = 480  # px, the longer side of the peer's frames handed to GTK
-CAMERA_THREAD = concurrent.futures.ThreadPoolExecutor(1, thread_name_prefix="camera")
+VIDEO_CAPS = ("application/x-rtp,media=video,encoding-name=VP8,payload=%d,clock-rate=90000,"
+              "max-fs=(string)1200,max-fr=(string)15")  # RFC 7741: what we can take, ~480x640 at 15/s
+ADAPT_KEPT = .7  # the share of the camera's frames the encoder keeps up with
+
+
+class CameraWorker:
+    """One daemon thread for camera work (finding and opening a camera takes
+    a second or more with libcamera): taps stay in order, the asyncio loop
+    never waits for it, and a wedged driver cannot keep the program alive."""
+
+    def __init__(self):
+        self.jobs = None
+
+    def submit(self, fn, *args):
+        if self.jobs is None:
+            import queue
+            self.jobs = queue.SimpleQueue()
+            threading.Thread(target=self._run, name="camera", daemon=True).start()
+        future = concurrent.futures.Future()
+        self.jobs.put((future, fn, args))
+        return future
+
+    def _run(self):
+        while True:
+            future, fn, args = self.jobs.get()
+            if future.set_running_or_notify_cancel():
+                try:
+                    future.set_result(fn(*args))
+                except BaseException as exc:
+                    future.set_exception(exc)
+
+
+CAMERA_WORKER = CameraWorker()
 
 
 class CallPicture(Gtk.DrawingArea):
@@ -1924,32 +1957,42 @@ class CallPicture(Gtk.DrawingArea):
 
     def __init__(self, mirror=False):
         super().__init__()
-        self.pixbuf = None
+        self.surface = None
         self.mirror = mirror
         self.connect("draw", self._draw)
 
     def picture(self, frame):
-        self.pixbuf = None
+        """A frame as (width, height, BGRA bytes): cairo's own layout, so it is
+        copied once here and drawn as it is, never converted on each draw."""
+        self.surface = None
         if frame is not None:
             width, height, data = frame
-            self.pixbuf = GdkPixbuf.Pixbuf.new_from_bytes(
-                GLib.Bytes.new(data), GdkPixbuf.Colorspace.RGB, True, 8, width, height, width * 4)
+            self.surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, width, height)
+            stride = self.surface.get_stride()
+            pixels = self.surface.get_data()
+            if stride == width * 4:
+                pixels[:len(data)] = data
+            else:
+                for row in range(height):
+                    pixels[row * stride:row * stride + width * 4] = data[row * width * 4:(row + 1) * width * 4]
+            self.surface.mark_dirty()
         self.queue_draw()
 
     def _draw(self, widget, cr):
         cr.set_source_rgb(0, 0, 0)
         cr.paint()
-        if self.pixbuf is None:
+        if self.surface is None:
             return
         width, height = widget.get_allocated_width(), widget.get_allocated_height()
-        pw, ph = self.pixbuf.get_width(), self.pixbuf.get_height()
+        pw, ph = self.surface.get_width(), self.surface.get_height()
         scale = min(width / pw, height / ph)
         if self.mirror:
             cr.translate(width, 0)
             cr.scale(-1, 1)
         cr.translate((width - pw * scale) / 2, (height - ph * scale) / 2)
         cr.scale(scale, scale)
-        Gdk.cairo_set_source_pixbuf(cr, self.pixbuf, 0, 0)
+        cr.set_source_surface(self.surface, 0, 0)
+        cr.get_source().set_filter(cairo.FILTER_FAST)  # 2-3x cheaper than GOOD in software
         cr.paint()
 
 
@@ -1976,12 +2019,13 @@ class CallAudio:
         self.bus = None
         self.signals = []
         self.camera = None
-        self.camera_lock = threading.Lock()  # set_video runs on CAMERA_THREAD and at close()
         self.video_bin = None
         self.video_pad = None
         self.frame = None
         self.video_generation = 0
-        self.video_frames = 0
+        self.video_frames = 0  # pictures encoded
+        self.video_pushed = 0  # the camera's frames handed to the encoder
+        self.remote_bin = None  # the peer's video decoding, once it comes
         self.video_size = (320, 240, 15)
         try:
             # RFC 7587 section 7 requires /2 in Opus SDP even for mono.
@@ -1989,7 +2033,8 @@ class CallAudio:
             self.pipeline = Gst.parse_launch(
                 "webrtcbin name=rtc bundle-policy=max-bundle " + source +
                 " ! audioconvert ! audioresample ! audio/x-raw,rate=48000,channels=1 "
-                "! opusenc bitrate=32000 inband-fec=true ! rtpopuspay pt=111 "
+                "! opusenc bitrate=32000 audio-type=voice inband-fec=true packet-loss-percentage=10 "
+                "complexity=5 ! rtpopuspay pt=111 "
                 "! application/x-rtp,media=audio,encoding-name=OPUS,payload=111,clock-rate=48000,"
                 "encoding-params=(string)2 ! rtc.")
             self._phone_streams(self.pipeline)
@@ -2010,7 +2055,7 @@ class CallAudio:
                     "! vp8enc name=video_encoder deadline=1 cpu-used=16 threads=2 token-partitions=2 "
                     "end-usage=cbr target-bitrate=300000 keyframe-max-dist=30 "
                     "! rtpvp8pay name=video_pay pt=%d picture-id-mode=15-bit " % video_payload +
-                    '! capsfilter name=video_caps caps="application/x-rtp,media=video,encoding-name=VP8,payload=%d,clock-rate=90000"' % video_payload, True)
+                    '! capsfilter name=video_caps caps="%s"' % (VIDEO_CAPS % video_payload), True)
                 self.pipeline.add(self.video_bin)
                 self.video_bin.get_static_pad("src").add_probe(
                     Gst.PadProbeType.BUFFER, self._encoded_video)
@@ -2081,8 +2126,18 @@ class CallAudio:
 
     def _bus(self, _bus, message, _data):
         if message.type == self.Gst.MessageType.ERROR:
-            # Never log Gst errors: debug details can contain TURN credentials.
-            self.loop.call_soon_threadsafe(self._deliver, self.status, "failed")
+            # Video is optional: its encoder's or decoder's error stops video,
+            # never the call. Logged by element and code only: the debug
+            # details can contain TURN credentials.
+            err, _debug = message.parse_error()
+            src = message.src
+            video = any(part is not None and (src is part or src.has_as_ancestor(part))
+                        for part in (self.video_bin, self.remote_bin))
+            factory = src.get_factory() if hasattr(src, "get_factory") else None
+            self.loop.call_soon_threadsafe(log_line, "voice call: gst error %s %s:%d" % (
+                factory.get_name() if factory else "bin", err.domain, err.code))
+            self.loop.call_soon_threadsafe(self._deliver, self.status,
+                                           "video-failed" if video else "failed")
         return self.Gst.BusSyncReply.DROP
 
     def _received(self, _rtc, pad):
@@ -2093,7 +2148,9 @@ class CallAudio:
         caps = pad.get_current_caps() or pad.query_caps(None)
         media = caps.get_structure(0).get_string("media")
         if media == "audio":
-            description = "queue ! rtpopusdepay ! opusdec ! audioconvert ! audioresample ! " + self.sink
+            # Concealment and the peer's in-band FEC: a lost packet is not a gap.
+            description = ("queue ! rtpopusdepay ! opusdec plc=true use-inband-fec=true "
+                           "! audioconvert ! audioresample ! " + self.sink)
         elif media == "video":
             codec = caps.get_structure(0).get_string("encoding-name")
             decoder = "rtpvp8depay request-keyframe=true wait-for-keyframe=true ! vp8dec threads=2" if codec == "VP8" else None
@@ -2108,7 +2165,7 @@ class CallAudio:
                            " ! videorate drop-only=true ! videoconvert ! videoscale "
                            # Within REMOTE_MAX, in the peer's own proportions (a phone
                            # held upright stays upright); CallPicture fits it.
-                           "! video/x-raw,format=RGBA,width=[16,%d],height=[16,%d],"
+                           "! video/x-raw,format=BGRA,width=[16,%d],height=[16,%d],"
                            "pixel-aspect-ratio=1/1,framerate=15/1 " % (REMOTE_MAX, REMOTE_MAX) +
                            "! appsink name=remote_video emit-signals=true sync=false max-buffers=1 drop=true")
         else:
@@ -2117,6 +2174,7 @@ class CallAudio:
         if media == "audio":
             self._phone_streams(received)
         else:
+            self.remote_bin = received
             received.get_by_name("remote_video").connect("new-sample", self._frame_sample, False, 0)
         pipeline.add(received)
         pad.link(received.get_static_pad("sink"))
@@ -2129,7 +2187,13 @@ class CallAudio:
         caps = sample.get_caps().get_structure(0)
         width, height = caps.get_value("width"), caps.get_value("height")
         buffer = sample.get_buffer()
-        data = buffer.extract_dup(0, buffer.get_size())
+        mapped, info = buffer.map(self.Gst.MapFlags.READ)
+        if not mapped:
+            return self.Gst.FlowReturn.OK
+        try:
+            data = info.data  # one copy, as bytes; CallPicture copies it once more
+        finally:
+            buffer.unmap(info)
         # The UI mailbox coalesces frames; never queue unbounded idle callbacks.
         if self.frame:
             self.frame(own, (width, height, data))
@@ -2146,8 +2210,11 @@ class CallAudio:
 
     def _send_video(self, sink, generation):
         sample = sink.emit("pull-sample")
-        if sample is not None and not self.closed and generation == self.video_generation:
-            source = self.video_bin.get_by_name("outgoing_video")
+        video_bin = self.video_bin
+        if (sample is not None and not self.closed and video_bin is not None
+                and generation == self.video_generation):
+            self.video_pushed += 1
+            source = video_bin.get_by_name("outgoing_video")
             source.set_property("caps", sample.get_caps())
             buffer = sample.get_buffer().copy()
             # Separate camera and WebRTC clocks: timestamp at the RTP pipeline.
@@ -2158,9 +2225,9 @@ class CallAudio:
     def set_video(self, enabled):
         """Open only on a tap; stopping releases the device immediately.
         It blocks (finding the camera takes a second or more with libcamera):
-        VoiceCall runs it on CAMERA_THREAD, never on the asyncio loop."""
-        with self.camera_lock:
-            return self._set_video(enabled)
+        it runs on CAMERA_WORKER, never on the asyncio loop, and gives up
+        between its steps once the call is closed."""
+        return self._set_video(enabled)
 
     def _set_video(self, enabled):
         self.video_generation += 1
@@ -2177,7 +2244,7 @@ class CallAudio:
             try:
                 return self._start_camera(self.camera_kind)
             except (RuntimeError, GLib.Error):
-                if attempt or os.environ.get("HALTIA_CAMERA_SOURCE"):
+                if attempt or self.closed or os.environ.get("HALTIA_CAMERA_SOURCE"):
                     raise
                 # Device re-enumeration can invalidate both discovery and source.
                 # This retries capture once, never the call or a failed RTP link.
@@ -2191,7 +2258,9 @@ class CallAudio:
             raise ValueError("unsupported camera source")
         else:
             from haltia_kit import camera
-            found = camera.cameras()  # libcamera first, V4L2 fallback; on CAMERA_THREAD
+            found = camera.cameras()  # libcamera first, V4L2 fallback; on CAMERA_WORKER
+            if self.closed:
+                raise RuntimeError("call closed")  # hung up meanwhile: never open the device
             if not found:
                 raise RuntimeError("no camera")
             chosen = next((c for c in found if c.front), found[0])
@@ -2208,8 +2277,10 @@ class CallAudio:
             "! videoconvert ! videoscale ! video/x-raw,format=I420,width=%d,height=%d ! tee name=t "
             "t. ! queue max-size-buffers=2 leaky=downstream "
             "! appsink name=send emit-signals=true sync=false max-buffers=1 drop=true "
-            "t. ! queue max-size-buffers=1 leaky=downstream ! videoconvert "
-            "! video/x-raw,format=RGBA ! appsink name=preview emit-signals=true "
+            # The own picture is small: scaled and slowed here, not in Python.
+            "t. ! queue max-size-buffers=1 leaky=downstream ! videorate drop-only=true "
+            "! video/x-raw,framerate=10/1 ! videoscale ! videoconvert "
+            "! video/x-raw,format=BGRA,width=160,height=120 ! appsink name=preview emit-signals=true "
             "sync=false max-buffers=1 drop=true" % (fps, width, height))
         self.camera = camera
         try:
@@ -2231,6 +2302,9 @@ class CallAudio:
         except BaseException:
             self._set_video(False)
             raise
+        if self.closed:  # hung up while it started
+            self._set_video(False)
+            return False
         return True
 
     def _camera_bus(self, _bus, message, _data):
@@ -2270,8 +2344,8 @@ class CallAudio:
                     payload = int(match.group(1))
                     self.video_bin.set_state(self.Gst.State.NULL)
                     self.video_bin.get_by_name("video_pay").set_property("pt", payload)
-                    self.video_bin.get_by_name("video_caps").set_property("caps", self.Gst.Caps.from_string(
-                        "application/x-rtp,media=video,encoding-name=VP8,payload=%d,clock-rate=90000" % payload))
+                    self.video_bin.get_by_name("video_caps").set_property(
+                        "caps", self.Gst.Caps.from_string(VIDEO_CAPS % payload))
                     self.video_bin.sync_state_with_parent()
                 else:
                     h264 = re.search(r"a=rtpmap:(\d+) H264/90000", video[1], re.IGNORECASE)
@@ -2335,9 +2409,11 @@ class CallAudio:
         return result
 
     def close(self):
-        with self.camera_lock:  # a camera opening on CAMERA_THREAD finishes first
-            self.closed = True
-            self._set_video(False)
+        # Never waits for the camera: an opening one sees closed between its
+        # steps, and the worker releases it after whatever it is doing.
+        self.closed = True
+        self.video_generation += 1  # late frames of any camera are dropped
+        CAMERA_WORKER.submit(self._set_video, False)
         self.frame = None
         self.video_bin = None
         self.video_pad = None
@@ -2380,6 +2456,7 @@ class VoiceCall:
         self.end_reason = None
         self.video_invitation = bool(video)
         self.video = bool(video) if not incoming else False
+        self.video_wanted = self.video  # what the person asked for; video follows it
         self.video_error = None
         self.remote_video = None
         self.frame = None
@@ -2553,6 +2630,7 @@ class VoiceCall:
         if self.closed or not self.incoming or self.accepted:
             return
         self.video = self.video_invitation if video is None else bool(video)
+        self.video_wanted = self.video
         self.accepted = True
         self.show("connecting")
         await asyncio.wait_for(self.ready.wait(), 10)
@@ -2576,6 +2654,9 @@ class VoiceCall:
             return
         if state == "camera-failed":
             self.job(self.camera(False, failed=True))
+        elif state == "video-failed":
+            if self.video_wanted:
+                self.job(self.camera(False, failed=True))
         elif state == "connected":
             if self.disconnect_timer is not None:
                 self.disconnect_timer.cancel()
@@ -2604,8 +2685,8 @@ class VoiceCall:
         self.candidates.clear()
         if self.incoming:
             await self.audio.remote(self.offer)
-        if self.video:
-            await self.camera(True)
+        # The SDP does not wait for the camera: ICE starts at once, and the
+        # picture comes when the camera is open.
         description = await self.audio.description("answer" if self.incoming else "offer")
         if self.incoming and self.offer.get("p2pRelay"):
             description["p2pRelay"] = True
@@ -2615,50 +2696,73 @@ class VoiceCall:
             self.job(self.transmit({"candidate": candidate}))
         self.local_candidates.clear()
         await self.command("change-media-settings", mediaSettings=self.media_settings())
+        if self.video:
+            self.job(self.camera(True))
         self.job(self.deadline())
         self.job(self.quality())
+
+    def toggle_camera(self):
+        """A tap on «Включить/Выключить камеру»: the wish changes at once (the
+        button says so), the camera follows; taps meanwhile are folded."""
+        if self.closed or self.audio is None:
+            return
+        self.video_wanted = not self.video_wanted
+        self.show(self.state)
+        self.job(self.camera(self.video_wanted))
 
     async def camera(self, enabled, failed=False):
         if self.closed or self.audio is None:
             return
+        if failed:
+            self.video_wanted = False
+        elif enabled != self.video_wanted:
+            return  # a later tap asked otherwise: its own job follows
         audio = self.audio
-        loop = asyncio.get_running_loop()
         try:
             # Finding and opening the camera blocks: signalling, ICE and
             # hang-up go on meanwhile. One thread keeps taps in their order.
-            video = await loop.run_in_executor(CAMERA_THREAD, audio.set_video, enabled)
+            video = await asyncio.wrap_future(CAMERA_WORKER.submit(audio.set_video, enabled))
             error = "Камера не включилась. Разговор продолжается без видео." if failed else None
         except Exception:
-            await loop.run_in_executor(CAMERA_THREAD, audio.set_video, False)
+            await asyncio.wrap_future(CAMERA_WORKER.submit(audio.set_video, False))
             video, error = False, "Камера не включилась. Разговор продолжается без видео."
+            self.video_wanted = False
         if self.closed or audio is not self.audio:
             return  # hung up meanwhile: close() released the camera
         self.video, self.video_error = video, error
         # Show the own preview immediately, even if the signalling ACK is slow.
         self.show(self.state)
-        await self.command("change-media-settings", mediaSettings=self.media_settings())
+        try:
+            await self.command("change-media-settings", mediaSettings=self.media_settings())
+        except Exception:
+            # The media flow over ICE without it: a slow or refused answer
+            # to a camera switch never ends the call.
+            log_line("voice call: media settings not acknowledged")
 
-    async def adapt_video(self, fps):
-        if not self.video or fps >= self.audio.video_size[2] * .6:
+    async def adapt_video(self, encoded, delivered):
+        """The encoder keeps up with the camera, or the tablet is overloaded.
+        A camera slow in dim light delivers fewer frames: that is no load."""
+        if not self.video_wanted or not self.video or delivered <= 0 or encoded >= delivered * ADAPT_KEPT:
             return
         if self.audio.video_size != (160, 120, 10):
             self.audio.video_size = (160, 120, 10)
             await self.camera(True)
         else:
+            self.video_wanted = False
             await self.camera(False)
             self.video_error = "Видео выключено: устройству тяжело. Разговор продолжается."
             self.show(self.state)
 
     async def quality(self):
         previous = None
-        loop = asyncio.get_running_loop()
         while not self.closed:
             await asyncio.sleep(15)
             try:
                 if self.video and hasattr(self.audio, "video_frames"):
-                    current = (self.audio.video_frames, loop.time(), self.audio.video_generation)
+                    current = (self.audio.video_frames, self.audio.video_pushed,
+                               self.audio.video_generation)
                     if previous is not None and previous[2] == current[2]:
-                        await self.adapt_video((current[0] - previous[0]) / (current[1] - previous[1]))
+                        await self.adapt_video(current[0] - previous[0], current[1] - previous[1])
                     previous = current
                 else:
                     previous = None
@@ -2881,7 +2985,7 @@ class Backend:
             if action == "answer":
                 call.job(call.answer(video=video))
             elif action == "camera":
-                call.job(call.camera(not call.video))
+                call.toggle_camera()
             elif action == "end":
                 await call.end(call.hangup_reason())
 
@@ -3148,7 +3252,8 @@ class Account:
                     "id": call.id, "name": self.name(call.peer, "Собеседник"),
                     "photo": self.portraits.get(call.peer), "state": state,
                     "video_invitation": call.video_invitation, "video": call.video,
-                    "video_error": call.video_error, "remote_video": call.remote_video})
+                    "video_error": call.video_error, "remote_video": call.remote_video,
+                    "video_wanted": call.video_wanted})
                 if call.closed:
                     self.call = None
                     if (call.incoming and not call.accepted
@@ -7353,7 +7458,7 @@ class Max(Gtk.Application):
 
     def show_call_video(self):
         """The video area while there is a picture to show, else the portrait."""
-        shown = self.call_remote.pixbuf is not None or self.call_own.pixbuf is not None
+        shown = self.call_remote.surface is not None or self.call_own.surface is not None
         self.call_video_area.set_visible(shown)
         self.call_identity.set_visible(not shown)
 
@@ -7374,7 +7479,10 @@ class Max(Gtk.Application):
         self.call_audio_answer.set_visible(state == "ringing" and self.call_video_invitation)
         self.call_audio_answer.set_sensitive(state == "ringing")
         self.call_camera.set_visible(state == "active" and video_supported())
-        self.call_camera.set_label("Выключить камеру" if self.call_video else "Включить камеру")
+        wanted = call.get("video_wanted", self.call_video)
+        self.call_camera.set_label("Выключить камеру" if wanted else "Включить камеру")
+        # While the camera follows a tap, a second tap is not taken for another.
+        self.call_camera.set_sensitive(wanted == self.call_video)
         self.call_own_box.set_visible(self.call_video)
         if call.get("remote_video") is False:
             self.call_remote.picture(None)  # said so: no need to wait for frames to stop
