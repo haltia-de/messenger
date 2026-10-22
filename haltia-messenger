@@ -5484,7 +5484,7 @@ class ChatView:
         self.msgs[m["id"]] = (m, reacts)
         self._fill_reactions(m["id"])
         at = label(when(m["time"], full=True), "when", xalign=1.0)
-        if m["mine"]:
+        if m["mine"] and not m.get("call"):  # a call's record is no message to read
             # ✓ sent, ✓✓ read, as in MAX and Telegram: «дошло ли?»
             foot = Gtk.Box(spacing=6, halign=Gtk.Align.END)
             foot.pack_start(at, False, False, 0)
