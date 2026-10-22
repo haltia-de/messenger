@@ -4282,6 +4282,7 @@ RECORDERS = (
 )
 SHORTEST = 1000  # ms: a press shorter than this was not a message
 TAP_RECORD = 0.6  # s: the microphone let go sooner was tapped: it records on
+VOICE_LONGEST = 600  # s: a voice this long goes by itself, the microphone stops
 
 
 class Recorder:
@@ -6125,6 +6126,7 @@ class Max(Gtk.Application):
         self.win.set_titlebar(bar)
         self.win.connect("map", lambda _w: self.moved())
         self.win.connect("unmap", lambda _w: (self.keep_sound or self.stop_sound(),
+                                               self.record_stop(False),  # no microphone unseen
                                                self.telemetry.go(SCREEN_BACKGROUND)))
 
         self.stack = Gtk.Stack()
@@ -6427,6 +6429,7 @@ class Max(Gtk.Application):
         self.record_label.set_no_show_all(True)
         self.record_timer = None
         self.record_locked = False  # recording without the finger on the button
+        self.record_chat = None  # the chat a voice is being said in
         self.record_began = 0.0
         self.record_cancel = Gtk.Button(label="Отмена")
         self.record_cancel.get_style_context().add_class("plain")
@@ -7803,6 +7806,8 @@ class Max(Gtk.Application):
                                      and summary.get("peer") is not None
                                      and self.backend.can("calls", self.open_chat))
         self.video_button.set_visible(self.call_button.get_visible() and video_supported())
+        if page != "chat":
+            self.record_stop(False)  # a voice is said in its chat, or not at all
         if page not in ("chat", "photo", "forward") and not self.keep_sound:
             self.stop_sound()  # the chat is left: its sound stops
         self.show_nowplay()
@@ -8104,6 +8109,8 @@ class Max(Gtk.Application):
 
     def open(self, chat_id):
         start = time.monotonic()
+        if self.record_chat is not None and self.record_chat != chat_id:
+            self.record_stop(False)  # another chat: the voice said for this one does not go there
         if self.call_id is None:
             self.call_box.hide()
             self.call_pages.set_visible_child_name("messages")
@@ -8675,6 +8682,7 @@ class Max(Gtk.Application):
         self.mic.get_style_context().add_class("recording")
         self.entry.hide()
         self.record_label.show()
+        self.record_chat = self.open_chat
         self.record_began = time.monotonic()
         self.show_recording()
         self.record_timer = GLib.timeout_add(250, self.show_recording)
@@ -8691,6 +8699,9 @@ class Max(Gtk.Application):
             self.record_stop(True)
 
     def show_recording(self):
+        if self.recorder.recording() and self.recorder.seconds() >= VOICE_LONGEST:
+            self.record_stop(True)  # never on without end: what was said goes
+            return False
         self.record_label.set_text(
             ("● %s — говорите, затем «Отправить»" if self.record_locked else
              "● %s — отпустите, чтобы отправить") % mmss(self.recorder.seconds()))
@@ -8707,7 +8718,7 @@ class Max(Gtk.Application):
         self.record_cancel.hide()
         self.record_locked = False
         self.entry.show()
-        chat_id = self.open_chat
+        chat_id, self.record_chat = self.record_chat, None
 
         def done(got):
             if got is None:

@@ -1213,6 +1213,31 @@ app.record_released()
 app.recorder.began -= 3
 app.record_start()
 wait(lambda: len(fake.asked("send")) == n + 3, what="the voice sent by the microphone")
+# tapped, then the chat left (back, another chat, the window hidden): it
+# stops, nothing goes anywhere, the microphone is off
+for leave in (lambda: app.go_back(), lambda: app.open(dacha), lambda: app.win.hide()):
+    app.open(mama)
+    spin(0.1)
+    app.record_start()
+    app.record_released()
+    app.recorder.began -= 3
+    leave()
+    spin(0.3)
+    assert not app.recorder.recording() and not app.record_locked
+    assert len(fake.asked("send")) == n + 3
+    app.win.show()
+    app.sendb.clicked()  # «Отправить» later sends nothing recorded
+    spin(0.2)
+    assert len(fake.asked("send")) == n + 3
+app.open(mama)
+spin(0.1)
+# a voice left recording goes by itself at its longest: the microphone stops
+app.record_start()
+app.record_released()
+app.recorder.began -= bm.VOICE_LONGEST
+wait(lambda: len(fake.asked("send")) == n + 4, what="the longest voice sent")
+assert not app.recorder.recording()
+n += 1
 # tapped, then «Отмена»: nothing goes
 app.record_start()
 app.record_released()
