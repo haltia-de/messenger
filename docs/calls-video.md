@@ -55,9 +55,12 @@ token-partitions=2 end-usage=cbr target-bitrate=300000 keyframe-max-dist=30`
 и подпись кнопки; кнопка не нажимается, пока камера не догнала его, а
 лишние нажатия сворачиваются. Неподтверждённое или отклонённое
 `change-media-settings` после переключения не рвёт звонок. Ошибка
-GStreamer в кодировщике или декодере видео выключает только видео; в
-журнал идут имя элемента и код, но не отладочный текст (там бывают
-учётные данные TURN).
+GStreamer в видео никогда не рвёт звонок. Упал декодер собеседника — его
+изображение убирается, своя камера работает дальше. Упала отправка
+(кодировщик) — она один раз пересобирается на том же трансивере
+(`rebuild_sender`) и камера продолжает; при повторной ошибке видео
+выключается. В журнал идут имя элемента и код, но не отладочный текст
+(там бывают учётные данные TURN).
 
 Opus: `audio-type=voice inband-fec=true packet-loss-percentage=10
 complexity=5` (без ожидаемых потерь libopus FEC не включает); `opusdec
@@ -107,7 +110,7 @@ flatpak run --command=python3 --filesystem="$PWD:ro" \
   io.github.haltia_de.Messenger "$PWD/tests/test_call_audio.py"
 flatpak run --command=python3 --filesystem="$PWD:ro" \
   io.github.haltia_de.Messenger "$PWD/tests/test_call_video.py"
-DCONF_BACKEND=memory dbus-run-session -- sh tests/run.sh
+dbus-run-session -- sh tests/run.sh  # GSettings in memory: run.sh sets it (#32)
 ```
 
 `test_call_video.py` устанавливает `HALTIA_CAMERA_SOURCE=videotestsrc` и

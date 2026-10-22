@@ -133,7 +133,7 @@ def bus_errors():
     from gi.repository import Gst
     Gst.init(None)
     audio = bm.CallAudio.__new__(bm.CallAudio)
-    audio.Gst, audio.closed = Gst, False
+    audio.Gst, audio.closed, audio.failed_bins = Gst, False, []
     audio.video_bin, audio.remote_bin = Gst.Bin.new("send"), Gst.Bin.new("receive")
     encoder, decoder = Gst.ElementFactory.make("identity", None), Gst.ElementFactory.make("queue", None)
     audio.video_bin.add(encoder)
@@ -147,12 +147,73 @@ def bus_errors():
         for src in (encoder, decoder, other):
             audio._bus(None, SimpleNamespace(type=Gst.MessageType.ERROR, src=src,
                                              parse_error=lambda: (error, "turn:secret@host")), None)
-    assert statuses == ["video-failed", "video-failed", "failed"], statuses
+    assert statuses == ["send-video-failed", "remote-video-failed", "failed"], statuses
     assert "identity" in lines[0] and "fakesink" in lines[2] and not any("secret" in l for l in lines)
+    # One failure posts several errors, all classified while the branch is in
+    # use; on the loop, those of a branch replaced meanwhile (or of the peer's,
+    # given up) count no more.
+    statuses.clear()
+    queued = []
+    audio.loop = SimpleNamespace(call_soon_threadsafe=lambda cb, *a: queued.append((cb, a)))
+    audio.video_bin, audio.remote_bin = Gst.Bin.new("send"), Gst.Bin.new("receive")
+    encoder, decoder = Gst.ElementFactory.make("identity", None), Gst.ElementFactory.make("queue", None)
+    audio.video_bin.add(encoder)
+    audio.remote_bin.add(decoder)
+    with patch.object(bm, "log_line"):
+        for src in (encoder, encoder, decoder, decoder):
+            audio._bus(None, SimpleNamespace(type=Gst.MessageType.ERROR, src=src,
+                                             parse_error=lambda: (error, "")), None)
+        for k, (cb, args) in enumerate(queued):
+            cb(*args)
+            if statuses == ["send-video-failed"] and k < 3:
+                audio.video_bin = Gst.Bin.new("rebuilt")  # as rebuild_sender does
+    assert statuses == ["send-video-failed", "remote-video-failed"], statuses
+    # Errors arriving after the loop gave a branch up: never the call's
+    statuses.clear()
+    queued.clear()
+    with patch.object(bm, "log_line"):
+        for src in (decoder, encoder):  # the peer's failed branch; the sender replaced
+            audio._bus(None, SimpleNamespace(type=Gst.MessageType.ERROR, src=src,
+                                             parse_error=lambda: (error, "")), None)
+        for cb, args in queued:
+            cb(*args)
+    assert statuses == [], statuses
     ok("video branch errors stop video only; logged by element and code without the debug text")
 
 
 bus_errors()
+
+
+def sender_rebuilt():
+    # A failed sending branch is replaced in place: same payload, same pad.
+    import gi
+    gi.require_version("Gst", "1.0")
+    from gi.repository import Gst
+    Gst.init(None)
+    if Gst.ElementFactory.find("vp8enc") is None:
+        ok("video sender rebuild skipped: no vp8enc here")
+        return
+    audio = bm.CallAudio.__new__(bm.CallAudio)
+    audio.Gst, audio.closed, audio.failed_bins = Gst, False, []
+    audio.pipeline = Gst.Pipeline.new("call")
+    sink = Gst.ElementFactory.make("fakesink", None)
+    audio.pipeline.add(sink)
+    audio.video_pad = sink.get_static_pad("sink")
+    audio.video_bin = audio._sender_bin(102)
+    audio.pipeline.add(audio.video_bin)
+    audio.video_bin.get_static_pad("src").link(audio.video_pad)
+    old = audio.video_bin
+    assert audio.rebuild_sender()
+    assert audio.video_bin is not old and old.get_parent() is None
+    assert audio.video_bin.get_by_name("video_pay").get_property("pt") == 102
+    assert audio.video_bin.get_static_pad("src").get_peer() == audio.video_pad
+    audio.closed = True
+    assert not audio.rebuild_sender()
+    audio.pipeline.set_state(Gst.State.NULL)
+    ok("a failed video sender is rebuilt on the same pad with the same payload")
+
+
+sender_rebuilt()
 
 
 def literal(value):
@@ -713,11 +774,21 @@ async def video_consent():
         call.toggle_camera()
         await until(lambda: call.video_error and not call.video_wanted)
         assert not call.video and not call.audio.camera and not call.closed
-        # The video branch's own error stops video, never the call.
+        # The peer's picture failing leaves the own camera on; the sender
+        # failing is built anew once, then video stops; never the call.
         call.audio.fail = False
         await switch(True)
-        call.audio_state("video-failed")
+        call.audio_state("remote-video-failed")
+        await asyncio.sleep(.05)
+        assert call.video and call.audio.camera and call.remote_video is False
+        call.audio.rebuilt = 0
+        call.audio.rebuild_sender = lambda: setattr(call.audio, "rebuilt", call.audio.rebuilt + 1) or True
+        call.audio_state("send-video-failed")
+        await asyncio.sleep(.05)
+        assert call.audio.rebuilt == 1 and call.video and call.audio.camera
+        call.audio_state("send-video-failed")
         await until(lambda: not call.video)
+        assert call.audio.rebuilt == 1
         assert not call.closed and call.state == "active" and call.video_error
         await socket.notify("media-settings-changed", participantId="remote", mediaSettings={"isVideoEnabled": True})
         await until(lambda: call.remote_video is True)
