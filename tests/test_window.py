@@ -331,6 +331,7 @@ app.menu.popdown()
 spin(0.1)
 ok("reactions, rename, chat menu")
 
+
 # --- ✓ sent, ✓✓ read: the own messages say whether they were read ---------------------------
 def ticks_of(v):
     return [w for w in walk(v.widget) if isinstance(w, Gtk.Label) and w.get_style_context().has_class("ticks")]
@@ -361,6 +362,31 @@ assert app.chatlist.get(mama)["last"] == "📞 Входящий видеозво
 shot("calls-history.png")
 ok("calls in the history")
 
+# --- answering a message: «Ответить» in its menu, the bar above the entry, the quote ------------
+app.pick_reaction(mama, first, holds_of(v)[0].get_child())
+spin(0.1)
+menu_items()["↩️ Ответить"].clicked()
+assert app.replybar.get_visible() and "Привет! Как дела?" in app.reply_note.get_text()
+app.entry.set_text("Всё хорошо")
+app.send()
+assert not app.replybar.get_visible()
+wait(lambda: not app.queue, what="the answer sent")
+assert fake.asked("send")[-1] == {"chat_id": mama, "text": "Всё хорошо", "reply_to": first}
+answer_ = [w for w in holds_of(v) if v.message(w.msg_id)["text"] == "Всё хорошо"][-1]
+quote = [w for w in walk(answer_) if isinstance(w, Gtk.Box) and w.get_style_context().has_class("quote")]
+assert quote and "Привет! Как дела?" in [w.get_text() for w in walk(quote[0]) if isinstance(w, Gtk.Label)]
+shot("reply.png")
+# ✕ takes it back; another chat drops it
+app.pick_reaction(mama, first, holds_of(v)[0].get_child())
+menu_items()["↩️ Ответить"].clicked()
+app.open(dacha)
+spin(0.1)
+assert not app.replybar.get_visible() and app.replying is None
+app.open(mama)
+spin(0.2)
+v = app.view
+ok("answering a message")
+
 # --- forwarding a message ---------------------------------------------------------------------
 # a tap on a bubble, not only a long press: the reactions and the message's menu
 app.menu = None
@@ -368,7 +394,7 @@ holds_of(v)[0].tap.emit("released", 1, 5.0, 5.0)
 spin(0.1)
 assert app.menu is not None
 assert [k for k in menu_items() if k not in bm.REACTIONS] == [
-    "📋 Копировать текст", "↪️ Переслать"], list(menu_items())
+    "↩️ Ответить", "📋 Копировать текст", "↪️ Переслать"], list(menu_items())
 menu_items()["📋 Копировать текст"].clicked()
 spin(0.1)
 assert Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD).wait_for_text() == "Привет! Как дела?"
@@ -497,8 +523,9 @@ app.smile.set_active(True)
 spin(0.1)
 assert [w.get_text() for w in walk(app.emoji_pop) if isinstance(w, Gtk.Label)
         and w.get_style_context().has_class("emoji-group")][0] == "Недавние"
+sends = len(fake.asked("send"))
 app.send()
-wait(lambda: fake.asked("send") and app.sendb.get_sensitive(), what="sent with emoji")
+wait(lambda: len(fake.asked("send")) > sends and not app.queue, what="sent with emoji")
 assert fake.asked("send")[-1] == {"chat_id": mama, "text": "😀Привет 😀❤️"}
 wait(lambda: not app.smile.get_active() and app.emoji_pop is None, what="the panel closed")
 ok("emoji")

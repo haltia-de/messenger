@@ -265,22 +265,24 @@ class FakeLink:
         if chat_id in self.rooms:
             self.rooms[chat_id].unread = 0
 
-    async def send(self, chat_id, text, files=()):
+    async def send(self, chat_id, text, files=(), reply_to=None):
+        more = {"reply_to": reply_to} if reply_to else {}
         if self.split and files:
             sent = []
             for n, f in enumerate(files):
                 self.split = False
                 try:
-                    sent.append(await self.send(chat_id, text if n == 0 else "", [f]))
+                    sent.append(await self.send(chat_id, text if n == 0 else "", [f],
+                                                reply_to if n == 0 else None))
                 finally:
                     self.split = True
             return sent
         if files:  # as MAX would show them back: a photo by a link of its own
             self._call("send", chat_id=chat_id, text=text,
                        files=[(f["kind"], os.path.basename(f["path"]), f.get("duration"))
-                              for f in files])
+                              for f in files], **more)
         else:
-            self._call("send", chat_id=chat_id, text=text)
+            self._call("send", chat_id=chat_id, text=text, **more)
         if chat_id not in self.rooms:  # a dialog's first message starts it
             peer = self.dialog_of(self.me.id, chat_id)
             self._chat(chat_id, "DIALOG", None, {self.me.id: 0, peer: 0}, 0)
@@ -293,7 +295,12 @@ class FakeLink:
                 attaches.append(audio("https://vd.okcdn.ru/sent/" + name, f["duration"] // 1000))
             else:
                 attaches.append(file(next(self.ids), f.get("name") or name, os.path.getsize(f["path"])))
-        return self.say(chat_id, text, self.me.id, attaches=attaches)
+        msg = self.say(chat_id, text, self.me.id, attaches=attaches)
+        if reply_to:  # as MAX shows an answer back: what it answers carried along
+            quoted = next((m for m in self.msgs.get(chat_id, []) if m.id == reply_to), None)
+            msg.reply = {"id": reply_to, "sender": quoted.sender if quoted else None,
+                         "text": quoted.text if quoted else ""}
+        return msg
 
     async def forward(self, chat_id, msg_id, from_chat_id):
         self._call("forward", chat_id=chat_id, msg_id=msg_id, from_chat_id=from_chat_id)

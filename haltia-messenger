@@ -461,6 +461,10 @@ label.call-icon { font-size: 34px; }
 label.call-status { font-size: 22px; color: #5e5c64; }
 label.call-status.taken { color: #26a269; }
 label.call-status.missed { color: #c01c28; }
+.quote { border-left: 4px solid #3584e4; background-color: rgba(53, 132, 228, 0.08);
+         border-radius: 6px; padding: 4px 10px; }
+label.quote-text { font-size: 21px; color: #5e5c64; }
+label.reply-note { font-size: 23px; color: #1c71d8; }
 label.forwarded { font-size: 19px; font-style: italic; color: #1c71d8; }
 .tabs { background-color: #dcdcda; padding: 8px 12px; }
 .tabs radiobutton, .tabs button {
@@ -838,6 +842,11 @@ def max_message(msg):
         shown = link.message
         fwd = {"chat": link.chat_name, "sender": shown.sender}
     out = Message(msg.id, msg.chat_id, msg.sender, msg.time, shown_text(shown.text), fwd=fwd)
+    if link is not None and kind(getattr(link, "type", "")) == "REPLY" and getattr(link, "message", None):
+        quoted = link.message
+        words = shown_text(quoted.text) or ", ".join(
+            attach_summary(a)[0] or "фото" for a in quoted.attaches or []).capitalize()
+        out.reply = {"id": quoted.id, "sender": quoted.sender, "text": words}
     for a in shown.attaches or []:
         if kind(getattr(a, "type", "")) == "CALL":
             out.call = {"video": kind(getattr(a, "call_type", "")) == "VIDEO",
@@ -902,6 +911,7 @@ class Message:
     reactions: list = dataclasses.field(default_factory=list)  # [[emoji, count]]
     yours: str = None  # the account's own reaction
     fwd: dict = None
+    reply: dict = None  # the message it answers: {"id", "sender", "text"} (text may be "")
     call: dict = None  # a call's record: {"video", "end" (HUNGUP, MISSED, REJECTED, CANCELED), "duration" ms}
 
 
@@ -1316,9 +1326,9 @@ class PyMaxLink:
     async def read(self, chat_id, msg_id):
         await self._api.messages.read_message(msg_id, chat_id)
 
-    async def send(self, chat_id, text, files=()):
+    async def send(self, chat_id, text, files=(), reply_to=None):
         """A message, with files (attachment(): photos, files; voice with
-        its duration in ms) if any. A voice MAX has not made ready yet
+        its duration in ms) if any, answering reply_to if given. A voice MAX has not made ready yet
         (…attachment….not.ready) goes again, uploaded anew, a few times."""
         from pymax.exceptions import ApiError
         from pymax.files import File, Photo, Voice
@@ -1334,8 +1344,9 @@ class PyMaxLink:
                 else:
                     sent.append(File(path=f["path"], name=f.get("name")))
             try:
+                answering = {"reply_to": int(reply_to)} if reply_to else {}
                 msg = await self._api.messages.send_message(chat_id, text or None,
-                                                            attachments=sent or None)
+                                                            attachments=sent or None, **answering)
                 break
             except ApiError as exc:
                 if not (exc.error or "").endswith("not.ready") or attempt == VOICE_TRIES - 1:
@@ -1518,6 +1529,9 @@ def tg_message(msg, me=None):
     sender = me if msg.out and me else tg_id(msg.sender_id) if msg.sender_id else chat
     out = Message(msg.id, chat, sender, int(msg.date.timestamp() * 1000),
                   getattr(msg, "message", None) or "")
+    answered = getattr(getattr(msg, "reply_to", None), "reply_to_msg_id", None)
+    if answered:  # Telegram tells only which: its words come from the chat, if known
+        out.reply = {"id": answered, "sender": None, "text": ""}
     if isinstance(msg, types.MessageService) and isinstance(msg.action, types.MessageActionPhoneCall):
         reason = type(msg.action.reason).__name__ if msg.action.reason else ""
         out.call = {"video": bool(msg.action.video),
@@ -1837,30 +1851,31 @@ class TelethonLink:
     async def read(self, chat_id, msg_id):
         await self.client.send_read_acknowledge(await self._peer(chat_id), max_id=msg_id)
 
-    async def send(self, chat_id, text, files=()):
+    async def send(self, chat_id, text, files=(), reply_to=None):
         """The text, or each file a message of its own (the text under the
-        first): the messages, in order."""
+        first, answering reply_to): the messages, in order."""
         from telethon.tl import types
 
         peer = await self._peer(chat_id)
+        answering = {"reply_to": reply_to} if reply_to else {}
         if not files:
-            return tg_message(await self.client.send_message(peer, text), self.me)
+            return tg_message(await self.client.send_message(peer, text, **answering), self.me)
         sent, caption = [], text
         for f in files:
             if f["kind"] == "voice":
                 msg = await self.client.send_file(
-                    peer, f["path"], caption=caption, voice_note=True,
+                    peer, f["path"], caption=caption, voice_note=True, **answering,
                     attributes=[types.DocumentAttributeAudio(duration=f["duration"] // 1000,
                                                              voice=True)])
             elif f["kind"] == "photo":
-                msg = await self.client.send_file(peer, f["path"], caption=caption)
+                msg = await self.client.send_file(peer, f["path"], caption=caption, **answering)
             else:
                 msg = await self.client.send_file(
-                    peer, f["path"], caption=caption, force_document=True,
+                    peer, f["path"], caption=caption, force_document=True, **answering,
                     attributes=[types.DocumentAttributeFilename(f.get("name") or
                                                                 os.path.basename(f["path"]))])
             sent.append(tg_message(msg, self.me))
-            caption = ""
+            caption, answering = "", {}
         return sent
 
     async def forward(self, chat_id, msg_id, from_chat_id):
@@ -3310,8 +3325,8 @@ class Backend:
     async def forward(self, chat_id, msg_id, from_chat_id):
         return await self.of(chat_id).forward(chat_id, msg_id, from_chat_id)
 
-    async def send(self, chat_id, text, files=()):
-        return await self.of(chat_id).send(chat_id, text, files)
+    async def send(self, chat_id, text, files=(), reply_to=None):
+        return await self.of(chat_id).send(chat_id, text, files, reply_to)
 
     async def add_contact(self, user_id):
         return await self.of(user_id).add_contact(user_id)
@@ -3781,7 +3796,9 @@ class Account:
                 "time": msg.time, "mine": bool(self.me) and msg.sender == self.me,
                 "reactions": [list(r) for r in msg.reactions], "yours": msg.yours,
                 "media": [dict(i) for i in msg.media], "forwarded": forwarded,
-                "call": dict(msg.call) if msg.call else None}
+                "call": dict(msg.call) if msg.call else None,
+                "reply": dict(msg.reply, who=self.name(msg.reply.get("sender")) or "")
+                if msg.reply else None}
 
     async def chat(self, chat_id):
         """The chat, from the list or asked for (one just joined, a new
@@ -3868,14 +3885,15 @@ class Account:
             chat.last = msg
         return out, self.summary(chat) if chat is not None else None
 
-    async def send(self, chat_id, text, files=()):
+    async def send(self, chat_id, text, files=(), reply_to=None):
         self.ask()
         chat = self.chats.get(chat_id)
         # A dialog not started yet is numbered own id XOR theirs.
         self.remember(self.peer(chat) if chat else self.link.dialog_of(self.me, chat_id)
                       if self.me else None)
-        msg = await self.link.send(chat_id, text, list(files)) if files else \
-            await self.link.send(chat_id, text)
+        more = {"reply_to": reply_to} if reply_to else {}
+        msg = await self.link.send(chat_id, text, list(files), **more) if files else \
+            await self.link.send(chat_id, text, **more)
         if isinstance(msg, list):  # each file a message of its own (Telegram)
             out = [self.message(m) for m in msg]
             self.cache.add(chat_id, out)
@@ -5597,6 +5615,20 @@ class ChatView:
             bubble.pack_start(label(m["who"], "who"), False, False, 0)
         if m.get("forwarded"):
             bubble.pack_start(label("↪ Переслано от %s" % m["forwarded"], "forwarded"), False, False, 0)
+        if m.get("reply"):
+            # What it answers, as MAX and Telegram show it: whose, a line of it.
+            quoted = m["reply"]
+            known = self.msgs.get(quoted.get("id"))
+            words = quoted.get("text") or (known[0]["text"] if known else "") or "Сообщение"
+            who = quoted.get("who") or (known[0].get("who") if known else "") or ""
+            quote = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+            quote.get_style_context().add_class("quote")
+            if who:
+                quote.pack_start(label(who, "who"), False, False, 0)
+            line = label(words.replace("\n", " "), "quote-text", ellipsize=True)
+            line.set_max_width_chars(32)
+            quote.pack_start(line, False, False, 0)
+            bubble.pack_start(quote, False, False, 0)
         for url in m["photos"]:
             img = Gtk.Image.new_from_icon_name("image-x-generic", Gtk.IconSize.DIALOG)
             img.set_size_request(460, 200)
@@ -6624,6 +6656,22 @@ class Max(Gtk.Application):
         self.inputbar.pack_start(self.record_cancel, False, False, 0)
         self.inputbar.pack_start(self.mic, False, False, 0)
         self.inputbar.pack_start(self.sendb, False, False, 0)
+        # Answering a message: which, above the entry, with its ✕.
+        self.replying = None  # (chat id, the message answered)
+        self.replybar = Gtk.Box(spacing=12)
+        self.replybar.get_style_context().add_class("inputbar")
+        self.reply_note = label("", "reply-note", ellipsize=True)
+        self.replybar.pack_start(self.reply_note, True, True, 0)
+        unreply = Gtk.Button(label="✕")
+        unreply.get_style_context().add_class("plain")
+        unreply.set_can_focus(False)
+        unreply.set_tooltip_text("Не отвечать")
+        unreply.connect("clicked", lambda _b: self.reply_to(None))
+        self.replybar.pack_end(unreply, False, False, 0)
+        self.replybar.set_no_show_all(True)
+        self.reply_note.show()
+        unreply.show()
+        chat.pack_start(self.replybar, False, False, 0)
         chat.pack_start(self.attachbar, False, False, 0)
         chat.pack_start(self.inputbar, False, False, 0)
         self.stack.add_named(chat, "chat")
@@ -8367,6 +8415,8 @@ class Max(Gtk.Application):
 
     def open(self, chat_id):
         start = time.monotonic()
+        if self.replying and self.replying[0] != chat_id:
+            self.reply_to(None)  # an answer belongs to its chat
         if self.record_chat is not None and self.record_chat != chat_id:
             self.record_stop(False)  # another chat: the voice said for this one does not go there
         if self.call_id is None:
@@ -8598,6 +8648,8 @@ class Max(Gtk.Application):
         acts = []  # saving is each item's own button
         if m.get("text"):
             acts.append(("📋 Копировать текст", lambda: self.copy_text(chat_id, m["text"])))
+        if self.inputbar.get_visible() and self.open_chat == chat_id:  # not in a channel
+            acts.insert(0, ("↩️ Ответить", lambda: self.reply_to(m)))
         if view.on_forward is not None:
             acts.append(("↪️ Переслать", lambda: self.show_forward(chat_id, msg_id)))
         for text, act in acts:
@@ -8612,6 +8664,15 @@ class Max(Gtk.Application):
         column.show_all()
         pop.popup()
         self.menu = pop  # the one open, for the tests
+
+    def reply_to(self, m):
+        """Answer this message with the next one sent (None: not)."""
+        self.replying = (self.open_chat, m) if m else None
+        if m:
+            words = (m.get("text") or "Сообщение").replace("\n", " ")
+            who = "вам" if m.get("mine") else m.get("who") or ""
+            self.reply_note.set_text("↩ Ответ %s: %s" % (who, words) if who else "↩ Ответ: " + words)
+        self.replybar.set_visible(bool(m))
 
     def copy_text(self, chat_id, text):
         """A message's text to the clipboard, said so under the title a while."""
@@ -8766,13 +8827,18 @@ class Max(Gtk.Application):
         self.attached = []
         self.show_attached()
         self.smile.set_active(False)
+        answered = self.replying[1] if self.replying and self.replying[0] == chat_id else None
+        self.reply_to(None)
         self.queued += 1
         shown = "\n".join(t for t in (text, "📎 " + ", ".join(f["name"] for f in files)
                                          if files else "") if t)
         m = {"id": "out-%d" % self.queued, "chat": chat_id, "sender": None, "who": "",
              "text": shown, "photos": [], "media": [], "time": int(time.time() * 1000),
-             "mine": True, "reactions": [], "yours": None, "forwarded": None, "state": "sending"}
-        self.queue[m["id"]] = {"chat": chat_id, "text": text, "files": files, "m": m}
+             "mine": True, "reactions": [], "yours": None, "forwarded": None, "state": "sending",
+             "reply": {"id": answered["id"], "who": answered.get("who") or "",
+                       "text": answered.get("text") or ""} if answered else None}
+        self.queue[m["id"]] = {"chat": chat_id, "text": text, "files": files, "m": m,
+                               "reply_to": answered["id"] if answered else None}
         view = self.views.get(chat_id)
         if view:
             view.add(m)
@@ -8814,8 +8880,9 @@ class Max(Gtk.Application):
             self.chatlist.wrote(chat_id, text or attachment_words(files))
             self.edit.set_visible(self.open_chat == chat_id and self.chatlist.listed(chat_id))
 
-        if files:
-            self.backend.run(self.backend.send(chat_id, text, files), done)
+        reply_to = q.get("reply_to")
+        if files or reply_to:
+            self.backend.run(self.backend.send(chat_id, text, files, reply_to), done)
         else:
             self.backend.run(self.backend.send(chat_id, text), done)
 
