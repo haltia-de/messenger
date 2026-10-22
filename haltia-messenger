@@ -944,6 +944,9 @@ VOICE_TRIES = 4  # a voice sent again while MAX says it is not ready yet
 VOICE_PAUSE = 3  # s between those
 
 
+WAVE_STRIDE = 8  # of 8000 samples a second, a voice's waveform reads every 8th
+
+
 def voice_wave(path, bars=80):
     """A voice message's waveform as MAX's apps send it: bars levels
     0…127 (web.max.ru: a bar's mean level × 800, at most 127), as bytes —
@@ -958,9 +961,12 @@ def voice_wave(path, bars=80):
         samples = memoryview(pcm[:len(pcm) // 2 * 2]).cast("h")
         n = len(samples)
         if n >= bars:
-            levels = bytes(min(127, int(sum(abs(x) for x in samples[i * n // bars:(i + 1) * n // bars])
-                                        / max(1, (i + 1) * n // bars - i * n // bars) / 32768 * 800))
-                           for i in range(bars))
+            # Every WAVE_STRIDE-th sample (1 kHz is plenty for a level), abs
+            # and sum in C: a long voice no longer holds the GIL for seconds.
+            def level(i):
+                part = samples[i * n // bars:(i + 1) * n // bars:WAVE_STRIDE]
+                return min(127, int(sum(map(abs, part)) / max(1, len(part)) / 32768 * 800))
+            levels = bytes(level(i) for i in range(bars))
     except (OSError, subprocess.SubprocessError, TypeError, ValueError):
         pass
     return levels
@@ -3924,6 +3930,8 @@ class MessageCache:
         self.chats = {}  # chat id -> its messages, oldest first
         self.dirty = set()  # chat ids changed and not written yet
         self.lock = threading.Lock()
+        self.write_lock = threading.Lock()  # flushes one at a time, readers never wait for disks
+        self.gen = {}  # chat id -> how many times it was dropped: a write made before goes
         self.timer = None
 
     def _path(self, chat_id):
@@ -3994,26 +4002,47 @@ class MessageCache:
         with self.lock:
             self.chats[chat_id] = []
             self.dirty.discard(chat_id)
+            self.gen[chat_id] = self.gen.get(chat_id, 0) + 1
             try:
                 os.remove(self._path(chat_id))
             except OSError:
                 pass
 
     def flush(self):
-        """Every change not yet on disk, written now."""
-        with self.lock:
-            self.timer = None
-            dirty, self.dirty = self.dirty, set()
-            for chat_id in dirty:
+        """Every change not yet on disk, written now. The lock is held only
+        to take the chats as they are (as text); the disk is written without
+        it, so opening a chat never waits for a slow eMMC. A chat dropped
+        meanwhile wins: its old text is not put back."""
+        # The write lock first: two flushes (the timer's, the shutdown's) take
+        # their snapshots in the order they write, never an older one last.
+        with self.write_lock:
+            with self.lock:
+                self.timer = None
+                dirty, self.dirty = self.dirty, set()
+                out = []
+                for chat_id in dirty:
+                    try:
+                        out.append((chat_id, self.gen.get(chat_id, 0),
+                                    json.dumps(self.chats.get(chat_id, []), ensure_ascii=False)))
+                    except (TypeError, ValueError) as exc:  # one chat's, the others still go
+                        log_line("cache %s: %r" % (chat_id, exc))
+            for chat_id, gen, text in out:
                 try:
                     path = self._path(chat_id)
                     os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
                     fd = os.open(path + ".new", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
                     with os.fdopen(fd, "w") as fh:
-                        json.dump(self.chats.get(chat_id, []), fh, ensure_ascii=False)
-                    os.replace(path + ".new", path)
+                        fh.write(text)
+                    with self.lock:
+                        if self.gen.get(chat_id, 0) == gen:
+                            os.replace(path + ".new", path)
+                        else:
+                            os.remove(path + ".new")
                 except OSError as exc:
                     log_line("cache %s: %r" % (chat_id, exc))
+                    with self.lock:
+                        if self.gen.get(chat_id, 0) == gen:  # not if dropped meanwhile
+                            self.dirty.add(chat_id)  # tried again by the next flush
 
 
 def load_json(path, default):
@@ -7113,7 +7142,19 @@ class Max(Gtk.Application):
         self.back.hide()
         self.title.set_text(NAME)
         self.stack.set_visible_child_name("chats")
-        self.fill_list()
+        # Back to the list, the most common tap: only the rows that changed
+        # meanwhile are placed anew, not all of them sorted and filtered again.
+        self.fill_list(only=self.stale_rows())
+
+    def stale_rows(self):
+        """The chats whose row differs from what it shows, is missing or
+        is left over."""
+        stale = set(self.rows) - set(self.chatlist.chats)
+        for chat_id in self.chatlist.chats:
+            row, entry = self.rows.get(chat_id), self.chatlist.entry(chat_id)
+            if row is None or entry is not None and row.look != self.look(entry):
+                stale.add(chat_id)
+        return stale
 
     # the search: a person by phone, a channel or group by link, own chats by name
     def show_find(self):
