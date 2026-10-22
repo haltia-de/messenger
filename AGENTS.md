@@ -281,7 +281,7 @@ chats of the message's messenger (between messengers: step 4). At the
   `PHOTO_DAYS` unshown), plays voice through libmpv (`voice`/`toggle`/`stop`, `on_time`/`on_end`;
   an `end-file` with reason ABORTED is a stop or a switch, not an end), starts a video in
   `haltia-vplay` (`b8k-vplay` before 2.0; on `PATH`, Видео's package) or `mpv --fs` with `ytdl=no` and `load-unsafe-playlists=no` (`video(url, title)`), and
-  opens a file by the desktop's program for its type (`file(url, name, done)`: fetched under its name into `DOCS`, the cache's `documents/`, then a `file://` URI — a PDF opens in «Документы» on the tablet). What fails goes to `~/.cache/haltia-messenger/haltia-messenger.log` (`LOG`; the link's
+  opens a file by the desktop's program for its type (`file(url, name, done)`: fetched under its name into a folder of its link's own (a hash) in `DOCS`, the cache's `documents/` — two messages' files of one name never write over each other — then a `file://` URI — a PDF opens in «Документы» on the tablet). What fails goes to `~/.cache/haltia-messenger/haltia-messenger.log` (`LOG`; the link's
   losses and restarts too; `player.log` before 2.4, removed by `prune`)
   (600, host and path only; the players' own output too). Its hands come in at creation —
   `spawn`, `open_uri`, `fetch`, `player` — real by default, `tests/fake_hands.py` in tests.

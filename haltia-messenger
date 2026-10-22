@@ -4659,8 +4659,8 @@ class Media:
 
     def file(self, url, name="файл", done=None):
         """A file of a message opened by the desktop's own program for it (a
-        PDF in «Документы» on the tablet): fetched under its name into DOCS
-        first, so its type is known; done(opened) on the GTK side. False if
+        PDF in «Документы» on the tablet): fetched under its name into a
+        folder of its link's own in DOCS first, so its type is known; done(opened) on the GTK side. False if
         it is not to be fetched at all."""
         how = self.how(url)
         if not how:
@@ -4674,7 +4674,10 @@ class Media:
                 log_line("file: nothing opens %s" % os.path.splitext(path)[1])
             if done:
                 done(opened)
-        self.save(url, DOCS, name, fetched, replace=True)
+        # A folder of its own per link: two messages' «Договор.pdf» never
+        # write over each other, nor over one a program has open.
+        folder = os.path.join(DOCS, hashlib.sha256(url.encode()).hexdigest()[:16])
+        self.save(url, folder, name, fetched, replace=True)
         return True
 
 
