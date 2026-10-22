@@ -2577,29 +2577,45 @@ class CallAudio:
             if not found:
                 raise RuntimeError("no camera")
             chosen = next((c for c in found if c.front), found[0])
-            source = chosen.make()
+            width, height, _fps = self.video_size
+            try:
+                # haltia-kit 2.3.1: the size asked of the camera before kit
+                # turns the picture with the screen (a bin: source, size, flip).
+                source = chosen.make(caps="video/x-raw,width=%d,height=%d" % (width, height))
+                self.sized = True
+            except TypeError:  # haltia-kit 2.3.0: the source alone, sized below
+                source = chosen.make()
+                self.sized = False
         if source is None:
             raise RuntimeError("no camera source")
-        self.camera_kind = source.get_factory().get_name()
+        # Its kind is the source's, inside kit's bin if it is one (read only).
+        self.camera_kind = self._source_of(source).get_factory().get_name()
         if previous_kind == "libcamerasrc" and self.camera_kind != "libcamerasrc":
             # A raw Bayer V4L2 node is not a replacement for libcamera's ISP.
             raise RuntimeError("libcamera unavailable")
         width, height, fps = self.video_size
+        # Within the size's longer side, in the picture's own proportions: a
+        # tablet held upright sends an upright picture, not a squashed one.
+        most = max(width, height)
         camera = self.Gst.parse_launch(
             "videorate name=rate drop-only=true ! video/x-raw,framerate=%d/1 "
-            "! videoconvert ! videoscale ! video/x-raw,format=I420,width=%d,height=%d ! tee name=t "
+            "! videoconvert ! videoscale ! video/x-raw,format=I420,width=[16,%d],height=[16,%d],"
+            "pixel-aspect-ratio=1/1 ! tee name=t "
             "t. ! queue max-size-buffers=2 leaky=downstream "
             "! appsink name=send emit-signals=true sync=false max-buffers=1 drop=true "
             # The own picture is small: scaled and slowed here, not in Python.
             "t. ! queue max-size-buffers=1 leaky=downstream ! videorate drop-only=true "
             "! video/x-raw,framerate=10/1 ! videoscale ! videoconvert "
-            "! video/x-raw,format=BGRA,width=240,height=180 ! appsink name=preview emit-signals=true "
-            "sync=false max-buffers=1 drop=true" % (fps, width, height))
+            "! video/x-raw,format=BGRA,width=[16,240],height=[16,240],pixel-aspect-ratio=1/1 "
+            "! appsink name=preview emit-signals=true "
+            "sync=false max-buffers=1 drop=true" % (fps, most, most))
         self.camera = camera
         try:
             camera.add(source)
             rate = camera.get_by_name("rate")
-            if source.get_factory().get_name() == "libcamerasrc":
+            if self.camera_kind == "libcamerasrc" and not getattr(self, "sized", False):
+                # kit 2.3.0's plain source: the size asked here, else libcamera
+                # gives its own (960×640, much heavier).
                 linked = source.link_filtered(rate, self.Gst.Caps.from_string(
                     "video/x-raw,width=%d,height=%d" % (width, height)))
             else:
@@ -2622,6 +2638,21 @@ class CallAudio:
             self._set_video(False)
             return False
         return True
+
+    def _source_of(self, element):
+        """The camera's source in what kit's Camera.make() gave: itself, or
+        the libcamerasrc / v4l2src inside its bin (the source, a videoflip)."""
+        if not isinstance(element, getattr(self.Gst, "Bin", ())):
+            return element
+        walker = element.iterate_sources()
+        while True:
+            result, child = walker.next()
+            if result == self.Gst.IteratorResult.OK:
+                return child
+            if result == self.Gst.IteratorResult.RESYNC:
+                walker.resync()
+                continue
+            return element
 
     def _camera_bus(self, _bus, message, _data):
         if message.type == self.Gst.MessageType.ERROR:

@@ -70,7 +70,7 @@ def camera_refresh():
                 "v4l2src" if failure == "raw-fallback" and n else "libcamerasrc")
             source.link_filtered.return_value = not (failure == "link-twice" or
                 (n == 0 and failure in ("link", "raw-fallback")))
-            peers.append(SimpleNamespace(front=True, make=Mock(return_value=source)))
+            peers.append(SimpleNamespace(front=True, make=lambda source=source: source))  # kit 2.3.0: no size
         discoveries = [[], [peers[1]]] if failure == "missing" else [[peers[0]], [peers[1]]]
         if failure == "persistent":
             discoveries = [[], []]
@@ -125,6 +125,66 @@ def camera_refresh():
 
 
 camera_refresh()
+
+
+def turned_camera():
+    import time
+    # haltia-kit 2.4's Camera.make() gives a bin (the source, then a videoflip
+    # turning the picture with the screen): its source is found inside it, and
+    # a tablet held upright sends an upright picture, not a squashed one.
+    import gi
+    gi.require_version("Gst", "1.0")
+    from gi.repository import Gst
+    import haltia_kit
+    Gst.init(None)
+    asked = []
+    def make(caps=None):  # haltia-kit 2.3.1: the size asked before the turn
+        asked.append(caps)
+        box = Gst.Bin.new(None)
+        src = Gst.ElementFactory.make("videotestsrc", None)
+        src.set_property("is-live", True)
+        flip = Gst.ElementFactory.make("videoflip", "turn")
+        Gst.util_set_object_arg(flip, "video-direction", "90r")
+        box.add(src)
+        box.add(flip)
+        src.link_filtered(flip, Gst.Caps.from_string("video/x-raw,width=480,height=360"))
+        box.add_pad(Gst.GhostPad.new("src", flip.get_static_pad("src")))
+        return box
+    audio = bm.CallAudio.__new__(bm.CallAudio)
+    audio.Gst, audio.closed, audio.camera, audio.video_generation = Gst, False, None, 0
+    audio.video_bin, audio.video_size, audio.failed_bins = None, (480, 360, 15), []
+    audio.loop = SimpleNamespace(call_soon_threadsafe=lambda cb, *a: None)
+    sizes = []
+    def sample(sink, own, generation):
+        got = sink.emit("pull-sample")
+        caps = got.get_caps().get_structure(0)
+        sizes.append((caps.get_value("width"), caps.get_value("height")))
+        return Gst.FlowReturn.OK
+    audio._frame_sample = sample
+    audio._send_video = lambda sink, generation: (sample(sink, False, 0), Gst.FlowReturn.OK)[1]
+    cam = SimpleNamespace(front=True, make=make)
+    with patch.dict(bm.os.environ, {"HALTIA_CAMERA_SOURCE": ""}), \
+            patch.object(haltia_kit, "camera", SimpleNamespace(cameras=lambda: [cam]), create=True):
+        assert audio._source_of(make()).get_factory().get_name() == "videotestsrc"
+        audio.video_bin = object()  # no encoder here: the bitrate is not set
+        assert audio._start_camera(None)
+        assert audio.camera_kind == "videotestsrc"
+        deadline = time.monotonic() + 5
+        while len(sizes) < 4 and time.monotonic() < deadline:
+            time.sleep(.05)
+        audio.camera.set_state(Gst.State.NULL)
+    assert sizes and all(h > w for w, h in sizes), sizes  # upright, as turned
+    assert asked[-1] == "video/x-raw,width=480,height=360" and audio.sized
+    # haltia-kit 2.3.0's make() takes no size: the plain source, sized by the call
+    old = SimpleNamespace(front=True, make=lambda: make())
+    with patch.dict(bm.os.environ, {"HALTIA_CAMERA_SOURCE": ""}), \
+            patch.object(haltia_kit, "camera", SimpleNamespace(cameras=lambda: [old]), create=True):
+        assert audio._start_camera(None) and not audio.sized
+        audio.camera.set_state(Gst.State.NULL)
+    ok("a camera turned with the screen: its source found inside, its picture upright")
+
+
+turned_camera()
 
 
 def bus_errors():
