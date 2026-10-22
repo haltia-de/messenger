@@ -2613,6 +2613,10 @@ class CallAudio:
 
     def _camera_bus(self, _bus, message, _data):
         if message.type == self.Gst.MessageType.ERROR:
+            err, _debug = message.parse_error()
+            factory = message.src.get_factory() if hasattr(message.src, "get_factory") else None
+            self.loop.call_soon_threadsafe(log_line, "voice call: camera error %s %s:%d" % (
+                factory.get_name() if factory else "bin", err.domain, err.code))
             self.loop.call_soon_threadsafe(self._camera_error, _bus, self.video_generation)
         return self.Gst.BusSyncReply.DROP
 
@@ -2989,6 +2993,7 @@ class VoiceCall:
         if self.closed:
             return
         if state == "camera-failed":
+            log_line("voice call: camera off after its error")
             self.job(self.camera(False, failed=True))
         elif state == "send-video-failed":
             # Built anew once: the camera stays; failing again, video stops.
@@ -3051,6 +3056,7 @@ class VoiceCall:
         if self.closed or self.audio is None:
             return
         self.video_wanted = not self.video_wanted
+        log_line("voice call: camera %s by a tap" % ("on" if self.video_wanted else "off"))
         self.show(self.state)
         self.job(self.camera(self.video_wanted))
 
@@ -3067,7 +3073,9 @@ class VoiceCall:
             # hang-up go on meanwhile. One thread keeps taps in their order.
             video = await asyncio.wrap_future(CAMERA_WORKER.submit(audio.set_video, enabled))
             error = "Камера не включилась. Разговор продолжается без видео." if failed else None
-        except Exception:
+        except Exception as exc:
+            log_line("voice call: the camera did not start: %s %s" % (
+                type(exc).__name__, exc if isinstance(exc, RuntimeError) else ""))
             await asyncio.wrap_future(CAMERA_WORKER.submit(audio.set_video, False))
             video, error = False, "Камера не включилась. Разговор продолжается без видео."
             self.video_wanted = False
@@ -3101,6 +3109,7 @@ class VoiceCall:
             await self.camera(True)
         else:
             self.video_wanted = False
+            log_line("voice call: camera off, the tablet cannot keep up")
             await self.camera(False)
             self.video_error = "Видео выключено: устройству тяжело. Разговор продолжается."
             self.show(self.state)
@@ -6546,6 +6555,7 @@ class Max(Gtk.Application):
         self.call_since = None  # the talk's start, for its time on the screen
         self.call_clock = None
         self.call_muted = False
+        self.call_tapped = {}  # action -> when its switch was last tapped
         self.call_note = None
         self.call_camera = Gtk.Button()
         self.call_camera.get_style_context().add_class("call-control")
@@ -8425,6 +8435,14 @@ class Max(Gtk.Application):
             self.call_box.hide()
             self.call_pages.set_visible_child_name("messages")
             return
+        if action in ("camera", "mute"):
+            # One touch is one switch: a second within a second (a touch the
+            # screen gives twice) would switch it back, «as if pressed».
+            now = time.monotonic()
+            if now - self.call_tapped.get(action, 0) < 1.0:
+                log_line("voice call: a second %s tap within a second, not taken" % action)
+                return
+            self.call_tapped[action] = now
         self.call_answer.set_sensitive(False)
         self.call_ringer.stop()
         if action == "answer":

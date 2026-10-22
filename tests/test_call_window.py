@@ -230,8 +230,11 @@ app.call_full.clicked()
 requests.clear()
 with patch.object(app.backend, "call", side_effect=dial):
     app.call_mute.clicked()
+    app.call_mute.clicked()  # the same touch given twice: not switched back
     wait(lambda: len(requests) == 1)
-assert requests[0] == ("mute", {"conversation": "synthetic-invitation"})
+    until = time.monotonic() + .3
+    wait(lambda: time.monotonic() > until)
+assert requests == [("mute", {"conversation": "synthetic-invitation"})]
 shot("talk.png")
 requests.clear()
 app.call_changed({"id": "synthetic-invitation", "name": "Тестовый собеседник", "state": "ended"})
