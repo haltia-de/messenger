@@ -298,6 +298,13 @@ menu_items()["📌 Открепить"].clicked()
 app.edit.clicked()
 menu_items()["🔔 Включить оповещения"].clicked()
 assert not app.chatlist.is_pinned(mama) and not app.chatlist.quiet(mama)
+# «⋮», not a pencil; a tap on the chat's name opens the same menu
+assert app.edit.get_image().get_icon_name()[0] == "view-more-symbolic"
+app.menu = None
+app.titled.tap.emit("released", 1, 10.0, 10.0)
+assert app.menu is not None and "🗑 Удалить переписку" in menu_items()
+app.menu.popdown()
+spin(0.1)
 ok("reactions, rename, chat menu")
 
 # --- forwarding a message ---------------------------------------------------------------------

@@ -5742,7 +5742,13 @@ class Max(Gtk.Application):
         self.sub = label("", "sub", xalign=0.5)
         heading.pack_start(self.title, False, False, 0)
         heading.pack_start(self.sub, False, False, 0)
-        bar.set_custom_title(heading)
+        # A tap on the chat's name opens its menu, as a tap on the header
+        # does in MAX and Telegram.
+        self.titled = Gtk.EventBox()
+        self.titled.add(heading)
+        self.titled.tap = Gtk.GestureMultiPress.new(self.titled)
+        self.titled.tap.connect("released", lambda *_a: self.edit.get_visible() and self.chat_menu())
+        bar.set_custom_title(self.titled)
         self.back = Gtk.Button(label="←")
         self.back.get_style_context().add_class("back")
         self.back.connect("clicked", lambda _b: self.go_back())
@@ -5758,8 +5764,10 @@ class Max(Gtk.Application):
         self.findb.connect("clicked", lambda _b: self.show_find())
         self.findb.set_no_show_all(True)
         bar.pack_end(self.findb)
-        # A chat's own menu: rename, pin, notifications, delete.
-        self.edit = Gtk.Button.new_from_icon_name("document-edit-symbolic", Gtk.IconSize.DIALOG)
+        # A chat's own menu: rename, pin, notifications, delete. «⋮», as in
+        # MAX and Telegram: a pencil reads as «write» or «edit a message».
+        self.edit = Gtk.Button.new_from_icon_name("view-more-symbolic", Gtk.IconSize.DIALOG)
+        self.edit.set_tooltip_text("Меню чата")
         self.edit.get_style_context().add_class("gear")
         self.edit.connect("clicked", lambda _b: self.chat_menu())
         self.edit.set_no_show_all(True)
