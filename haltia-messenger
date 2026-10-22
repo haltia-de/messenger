@@ -4836,6 +4836,7 @@ class ChatView:
                  photo, on_photo=lambda url: None, on_forward=None, on_save=None, missed=None):
         self.chat_id = chat_id
         self.group = kind in ("CHAT", "CHANNEL")  # senders' names over their bubbles
+        self.channel = kind == "CHANNEL"  # its posts keep the ↪ beside them
         self.fetch_older, self.on_hold = fetch_older, on_hold
         self.on_media, self.on_react = on_media, on_react
         self.photo = photo  # photo(url, done(pixbuf)): Media.photo
@@ -4843,6 +4844,7 @@ class ChatView:
         self.on_forward = on_forward  # the ↪ beside a bubble: on_forward(msg_id)
         self.on_save = on_save  # a photo's or a file's save button: on_save(msg, item, button)
         self.held_at = 0.0  # a long press just now: its release is no tap
+        self.photo_at = 0.0  # a photo tapped just now: the bubble's own tap is not
         self.shown = set()  # ids of the messages built
         self.msgs = {}  # message id -> (its dict, the box of its reactions)
         self.photos = []  # (image, url) not loaded yet: only when near the screen
@@ -5131,12 +5133,14 @@ class ChatView:
         bubble = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
         bubble.get_style_context().add_class("bubble")
         bubble.get_style_context().add_class("mine" if m["mine"] else "theirs")
-        # A long press offers the reactions. Beside the bubble, at its foot
-        # and on the side with room (as Telegram has it), the ↪ to forward it.
+        # A tap or a long press offers the reactions and the message's menu.
+        # Beside a channel's post or a message with photos or files, at its
+        # foot and on the side with room (as Telegram has it), the ↪ to
+        # forward it; other messages are forwarded from the menu.
         hold = Gtk.EventBox()
         hold.set_halign(Gtk.Align.END if m["mine"] else Gtk.Align.START)
         side = Gtk.Box(spacing=8)
-        if self.on_forward is not None:
+        if self.on_forward is not None and (self.channel or m["photos"] or m.get("media")):
             share = Gtk.Button.new_from_icon_name("mail-forward-symbolic", Gtk.IconSize.LARGE_TOOLBAR)
             share.set_valign(Gtk.Align.END)
             share.get_style_context().add_class("share")
@@ -5155,6 +5159,12 @@ class ChatView:
         hold.press = Gtk.GestureLongPress.new(hold)
         hold.press.connect("pressed", lambda _g, _x, _y: (
             setattr(self, "held_at", time.monotonic()), self.on_hold(m["id"], bubble)))
+        # Not only a long press: a tap is a way one sees. A scroll cancels it;
+        # the release of a long press or of a tap on a photo is not one.
+        hold.tap = Gtk.GestureMultiPress.new(hold)
+        hold.tap.connect("released", lambda *_a: (
+            time.monotonic() - self.held_at > 1.0 and time.monotonic() - self.photo_at > 0.5
+            and self.on_hold(m["id"], bubble)))
         if self.group and not m["mine"] and m["who"]:
             bubble.pack_start(label(m["who"], "who"), False, False, 0)
         if m.get("forwarded"):
@@ -5169,6 +5179,7 @@ class ChatView:
             frame.photo_url = url
             frame.tap = Gtk.GestureMultiPress.new(frame)
             frame.tap.connect("released", lambda _g, _n, _x, _y, url=url: (
+                setattr(self, "photo_at", time.monotonic()),
                 time.monotonic() - self.held_at > 1.0 and self.on_photo(url)))
             over = Gtk.Overlay()
             over.add(frame)
@@ -7797,7 +7808,11 @@ class Max(Gtk.Application):
             row.pack_start(b, False, False, 0)
         column = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         column.pack_start(row, False, False, 0)
-        acts = []  # forwarding is the ↪ beside the bubble; saving, each item's own button
+        acts = []  # saving is each item's own button
+        if m.get("text"):
+            acts.append(("📋 Копировать текст", lambda: self.copy_text(chat_id, m["text"])))
+        if view.on_forward is not None:
+            acts.append(("↪️ Переслать", lambda: self.show_forward(chat_id, msg_id)))
         for text, act in acts:
             b = Gtk.Button(label=text)
             b.get_style_context().add_class("menu")
@@ -7810,6 +7825,15 @@ class Max(Gtk.Application):
         column.show_all()
         pop.popup()
         self.menu = pop  # the one open, for the tests
+
+    def copy_text(self, chat_id, text):
+        """A message's text to the clipboard, said so under the title a while."""
+        Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD).set_text(text, -1)
+        said = "Текст скопирован"
+        self.sub.set_text(said)
+        GLib.timeout_add_seconds(3, lambda: (
+            self.open_chat == chat_id and self.sub.get_text() == said and self.sub.set_text(""))
+            and False)
 
     def react(self, chat_id, msg_id, emoji):
         """Put the account's reaction (None: take it off), then show what

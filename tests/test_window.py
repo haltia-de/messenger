@@ -301,17 +301,29 @@ assert not app.chatlist.is_pinned(mama) and not app.chatlist.quiet(mama)
 ok("reactions, rename, chat menu")
 
 # --- forwarding a message ---------------------------------------------------------------------
+# a tap on a bubble, not only a long press: the reactions and the message's menu
+app.menu = None
+holds_of(v)[0].tap.emit("released", 1, 5.0, 5.0)
+spin(0.1)
+assert app.menu is not None
+assert [k for k in menu_items() if k not in bm.REACTIONS] == [
+    "📋 Копировать текст", "↪️ Переслать"], list(menu_items())
+menu_items()["📋 Копировать текст"].clicked()
+spin(0.1)
+assert Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD).wait_for_text() == "Привет! Как дела?"
+assert app.sub.get_text() == "Текст скопирован"
+v.held_at = time.monotonic()  # the release of a long press opens nothing more
+app.menu = None
+holds_of(v)[0].tap.emit("released", 1, 5.0, 5.0)
+assert app.menu is None
+v.held_at = 0
+# a text message has no ↪ beside it (its menu forwards it)
+assert not [b for b in walk(holds_of(v)[0]) if isinstance(b, Gtk.Button)
+            and b.get_style_context().has_class("share")]
+shot("share.png")
 app.pick_reaction(mama, first, holds_of(v)[0].get_child())
 spin(0.1)
-assert not [k for k in menu_items() if "Переслать" in k or "Сохранить" in k]  # reactions only
-app.menu.popdown()
-share, left = share_of(holds_of(v)[0])  # Мама's message: the ↪ right of it
-assert not left and share.get_valign() == Gtk.Align.END
-assert share.get_image().get_icon_name()[0] == "mail-forward-symbolic"
-mine = [h for h in holds_of(v) if v.message(h.msg_id)["mine"]][0]
-assert share_of(mine)[1]  # an own message: the ↪ left of it
-shot("share.png")
-share.clicked()
+menu_items()["↪️ Переслать"].clicked()
 spin(0.1)
 assert app.stack.get_visible_child_name() == "forward" and app.title.get_text() == "Переслать"
 targets = [r.chat_id for r in app.fwd_list.get_children()]
@@ -616,6 +628,9 @@ hold = [w for w in holds_of(app.view) if w.msg_id == m.id][0]
 play, vid, doc = [b for b in buttons(hold) if not b.get_style_context().has_class("share")
                   and not b.get_style_context().has_class("save")]
 assert len(saves_of(hold)) == 3  # the voice, the video and the file each have one
+share, left = share_of(hold)  # with files: the ↪ beside it, right of another's
+assert not left and share.get_valign() == Gtk.Align.END
+assert share.get_image().get_icon_name()[0] == "mail-forward-symbolic"
 assert play.state == "play" and vid.get_label() == "▶  Видео 0:42" and doc.get_label().startswith("📄")
 assert app.media.agent == fake.agent  # set at login
 shot("media.png")
