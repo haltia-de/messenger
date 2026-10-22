@@ -4520,6 +4520,16 @@ def ask_background(bus):
              -1, None, None)
 
 
+def release_memory():
+    """Freed photo memory back to the system (glibc keeps big frees on its
+    heap; musl, Alpine's, has no malloc_trim and needs none)."""
+    try:
+        import ctypes
+        ctypes.CDLL("libc.so.6").malloc_trim(0)
+    except (OSError, AttributeError):
+        pass
+
+
 def watched(widget):
     """The widget, its `gone` set once destroyed: an owner for Media's queue,
     which reads it from its workers (GTK is not asked from there)."""
@@ -5132,6 +5142,8 @@ class ChatView:
         self.shown = set()  # ids of the messages built
         self.msgs = {}  # message id -> (its dict, the box of its reactions)
         self.photos = []  # (image, url) not loaded yet: only when near the screen
+        self.loaded = []  # (image, url) loaded: back to placeholders when the chat is left
+        self.epoch = 0  # bumped by a cut: an older page asked before it is not continuous
         self.last_day = None  # of the newest message built
         self.first_day = self.top_sep = None  # of the oldest, and its day label
         self.oldest = None  # time of the oldest message known (built or queued)
@@ -5254,8 +5266,20 @@ class ChatView:
         there; another's only if the reader is already there."""
         if msg["id"] in self.shown:
             return
-        if self.pending_new:
-            self.pending_new.append(msg)
+        if self.pending_new or not self.active:
+            # Out of sight: built when shown, and only the newest BUBBLES (the
+            # older ones come by paging), so a busy chat in the background
+            # neither grows nor costs a bubble per message.
+            if not any(m["id"] == msg["id"] for m in self.pending_new):
+                self.pending_new.append(msg)
+            if len(self.pending_new) > BUBBLES:
+                # Too many to keep: the view starts again from the newest
+                # BUBBLES, and paging fills in above them, so none is skipped
+                # (what was built would not be continuous with them).
+                keep = self.pending_new[-BUBBLES:]
+                self._clear()
+                self.pending_new = keep
+                self.oldest = keep[0]["time"]
             self._start()
         else:
             self._append(msg)
@@ -5391,19 +5415,39 @@ class ChatView:
         self._start()
         self._soon()
 
+    def pause(self):
+        """Out of sight for a moment (a photo large, forwarding): nothing
+        built or fetched, but the place and what is built stay."""
+        if self.active:
+            self.active = False
+            self._show_busy()
+
     def leave(self):
-        """No longer shown: nothing more is built or fetched, and only the
-        newest BUBBLES stay."""
+        """No longer shown: nothing more is built or fetched, only the newest
+        BUBBLES stay, and the photos loaded go back to their placeholders
+        (fetched again from the disk cache when shown)."""
         if not self.active:
             return
         self.active = False
         self._show_busy()
         self._trim()
+        self._unload_photos()
+
+    def _unload_photos(self):
+        loaded, self.loaded = self.loaded, []
+        for img, url in loaded:
+            if not getattr(img, "gone", False) and img.get_parent() is not None:
+                img.set_from_icon_name("image-x-generic", Gtk.IconSize.DIALOG)
+                img.set_size_request(460, 200)
+                self.photos.append((img, url))
+        if loaded:
+            GLib.idle_add(lambda: release_memory() and False)
 
     def destroy(self):
         self.active = False
         self.gone = True  # answers still on their way are not given to it
         self.widget.destroy()
+        GLib.idle_add(lambda: release_memory() and False)
 
     # --- building ---------------------------------------------------------------
     def _day_label(self, ms):
@@ -5745,8 +5789,11 @@ class ChatView:
         if background:
             self.prefetch -= 1
         self._show_busy()
+        epoch = self.epoch
 
         def done(msgs, err):
+            if epoch != self.epoch:
+                return  # asked before a cut: no longer next to what is built
             self.loading = False
             if not err:
                 if msgs:
@@ -5843,8 +5890,9 @@ class ChatView:
         for img, url in self.photos:
             pos = img.translate_coordinates(self.box, 0, 0)
             if img.get_realized() and pos and top - page <= pos[1] <= top + 2 * page:
-                self.photo(url, lambda pix, img=img: pix and (
-                    img.set_from_pixbuf(pix), img.set_size_request(-1, -1)), owner=img)
+                self.photo(url, lambda pix, img=img, url=url: pix and (
+                    img.set_from_pixbuf(pix), img.set_size_request(-1, -1),
+                    self.loaded.append((img, url))), owner=img)
             else:
                 keep.append((img, url))
         self.photos = keep
@@ -5865,6 +5913,8 @@ class ChatView:
             w.destroy()
         self.shown -= gone
         self.pending_new, self.pending_old = [], []  # no longer continuous
+        self.epoch += 1
+        self.loading = False
         for i in gone:
             self.msgs.pop(i, None)
         self.photos = [(img, url) for img, url in self.photos if img.get_parent()]
@@ -5878,10 +5928,12 @@ class ChatView:
     def _clear(self):
         for w in self.box.get_children():
             w.destroy()
-        self.shown, self.msgs, self.photos = set(), {}, []
+        self.shown, self.msgs, self.photos, self.loaded = set(), {}, [], []
         self.pending_new, self.pending_old = [], []
         self.last_day = self.first_day = self.top_sep = self.oldest = None
         self.done = False
+        self.epoch += 1
+        self.loading = False
 
 
 # --- what plays, told to the desktop ---------------------------------------------
@@ -6038,6 +6090,7 @@ class Max(Gtk.Application):
         self.queued = 0
         self.win = None
         self.call_id = None
+        self.chooser = None  # the file chooser open, closed if a call rings
         self.dial_confirming = False
         # GTK/portal only: the independent logind attempt below owns its fd.
         self.call_awake = Awake(NAME, "voice call", inhibit=lambda *_args: None)
@@ -7335,7 +7388,10 @@ class Max(Gtk.Application):
         self.stack.set_visible_child_name("photo")
 
         def loaded(pix):
-            if self.stack.get_visible_child_name() == "photo" and pix is not None:
+            # Only the photo asked last: an earlier one coming late is not shown
+            # (and «Сохранить» would save another than seen).
+            if self.viewer_url == url and self.stack.get_visible_child_name() == "photo" \
+                    and pix is not None:
                 self.viewer_pix = pix
                 self.fit_photo()
 
@@ -7566,7 +7622,7 @@ class Max(Gtk.Application):
         # taken), so Сохранить has the focus, and the keyboard comes when the
         # name is tapped. A portal's dialog is the desktop's own: left alone.
         GLib.idle_add(focus_accept, self.win)
-        path = dialog.get_filename() if dialog.run() == Gtk.ResponseType.ACCEPT else None
+        path = dialog.get_filename() if self.run_chooser(dialog) == Gtk.ResponseType.ACCEPT else None
         dialog.destroy()
         return path
 
@@ -7668,7 +7724,7 @@ class Max(Gtk.Application):
         current = load_text("folder", default_folder())
         os.makedirs(current, exist_ok=True)
         dialog.set_current_folder(current)
-        if dialog.run() == Gtk.ResponseType.ACCEPT and dialog.get_filename():
+        if self.run_chooser(dialog) == Gtk.ResponseType.ACCEPT and dialog.get_filename():
             self.set_folder(dialog.get_filename())
         dialog.destroy()
 
@@ -7889,10 +7945,30 @@ class Max(Gtk.Application):
             self.confirm.hide()
             self.naming.hide()
             if self.view is not None:
-                self.view.leave()
+                # A photo or forwarding is part of the chat: the place stays.
+                (self.view.pause if page in ("photo", "forward") else self.view.leave)()
         elif self.view is not None:
             self.view.enter()  # back in it (from forwarding): building goes on
         self.moved()
+
+    def run_chooser(self, dialog):
+        """A file chooser's answer; a call ringing meanwhile closes it (as a
+        cancel), so it never covers «Ответить»."""
+        self.chooser = dialog
+        try:
+            return dialog.run()
+        finally:
+            self.chooser = None
+
+    def clear_for_call(self):
+        """Every question and chooser over the window answered «Отмена»: the
+        incoming call's controls must be in front, not a «Сохранить …?»."""
+        for dialog in Gtk.Window.list_toplevels():
+            if (isinstance(dialog, Gtk.Dialog) and dialog.get_modal()
+                    and dialog.get_transient_for() is self.win):
+                dialog.response(Gtk.ResponseType.CANCEL)
+        if self.chooser is not None:
+            self.chooser.hide()
 
     def moved(self):
         """Tell telemetry which screen is in front."""
@@ -8122,13 +8198,9 @@ class Max(Gtk.Application):
             self.call_awake.release()
             self.call_inhibited = None
         if state == "ringing":
-            if self.dial_confirming:
-                # The kit's question runs a nested GTK loop. Dismiss its
-                # modal window so it cannot cover the incoming controls.
-                for dialog in Gtk.Window.list_toplevels():
-                    if (isinstance(dialog, Gtk.Dialog) and dialog.get_modal()
-                            and dialog.get_transient_for() is self.win):
-                        dialog.response(Gtk.ResponseType.CANCEL)
+            # The kit's questions and the file choosers run nested loops over
+            # the window: answered «Отмена», they cannot cover the controls.
+            self.clear_for_call()
             if self.call_notice != call["id"]:
                 self.call_notice = call["id"]
                 self.stop_sound()
@@ -8704,7 +8776,7 @@ class Max(Gtk.Application):
         everything.add_pattern("*")
         dialog.add_filter(photos)  # the first one is chosen: photos, with their previews
         dialog.add_filter(everything)
-        chosen = dialog.run() == Gtk.ResponseType.ACCEPT
+        chosen = self.run_chooser(dialog) == Gtk.ResponseType.ACCEPT
         paths = [p for p in dialog.get_filenames() if os.path.isfile(p)] if chosen else []
         dialog.destroy()
         return paths

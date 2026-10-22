@@ -1264,3 +1264,71 @@ assert not app.mic.get_visible() and bm.SETTINGS.get_bool("voice", True) is Fals
 voice_switch.set_active(True)
 assert app.mic.get_visible()
 ok("sending photos, files and voice")
+
+# --- a chat view out of sight: a cut forgets late pages, hidden messages wait bounded,
+# --- a photo large keeps the place, photos are unloaded when the chat is left ---------------
+from unittest.mock import patch as _patch  # noqa: E402
+
+held = []  # the older page's answer, held back till after a cut
+befores = []  # what each older page was asked before
+def mk(i, t):
+    return {"id": i, "chat": 999, "sender": MAMA, "who": "Мама", "text": "№%d" % i, "photos": [],
+            "media": [], "time": t, "mine": False, "reactions": [], "yours": None, "forwarded": None}
+base = now_ms() - 3600000
+with _patch.object(bm, "BUBBLES", 10):
+    cv = bm.ChatView(999, "DIALOG", [mk(i, base + i * 1000) for i in range(100, 130)],
+                     fetch_older=lambda before, done: (befores.append(before), held.append(done)),
+                     on_hold=lambda *a: None, on_media=lambda *a: None, on_react=lambda *a: None,
+                     photo=lambda *a, **k: None)
+    box = Gtk.Window()
+    box.add(cv.widget)
+    box.show_all()
+    cv.enter()
+    wait(lambda: len(holds_of(cv)) == 30, what="the view built")
+    cv.fresh = True
+    cv._load_older()
+    assert held, "an older page asked"
+    cv.pause()  # a photo large: nothing cut
+    assert len(holds_of(cv)) == 30
+    cv.active = True
+    cv.leave()  # left: cut to BUBBLES
+    assert len(holds_of(cv)) == 10
+    oldest = cv.oldest
+    held[-1]([mk(i, base - (100 - i) * 1000) for i in range(70, 100)], None)  # the late page
+    spin(0.1)
+    assert not cv.pending_old and cv.oldest == oldest  # not put above the cut: no gap
+    # out of sight, messages wait unbuilt, at most BUBBLES of them; more, and
+    # the view starts again from the newest, paging filling in above: no gap
+    for i in range(130, 160):
+        cv.add(mk(i, base + i * 1000))
+    assert [m["id"] for m in cv.pending_new] == list(range(150, 160))
+    assert not holds_of(cv) and cv.oldest == base + 150 * 1000 and not cv.done
+    held.clear()
+    cv.enter()
+    wait(lambda: [w.msg_id for w in holds_of(cv)] == list(range(150, 160)), what="the newest built")
+    cv._load_older()
+    assert held and befores[-1] == base + 150 * 1000  # 130…149 come back by paging
+    # photos loaded go back to placeholders when the chat is left
+    img = Gtk.Image.new_from_pixbuf(GdkPixbuf.Pixbuf.new(GdkPixbuf.Colorspace.RGB, False, 8, 40, 30))
+    cv.box.pack_start(img, False, False, 0)
+    cv.loaded.append((bm.watched(img), "https://i.oneme.ru/x.jpg"))
+    cv.active = True
+    cv.leave()
+    assert img.get_storage_type() == Gtk.ImageType.ICON_NAME and (img, "https://i.oneme.ru/x.jpg") in cv.photos
+    cv.destroy()
+    box.destroy()
+
+# the viewer shows only the photo asked last; an earlier one coming late is not shown
+asked = []
+with _patch.object(app.media, "photo", lambda url, done, **k: asked.append((url, done))):
+    app.open(mama)
+    spin(0.1)
+    app.show_photo("https://i.oneme.ru/a.jpg")
+    app.show_photo("https://i.oneme.ru/b.jpg")
+    late = GdkPixbuf.Pixbuf.new(GdkPixbuf.Colorspace.RGB, False, 8, 40, 30)
+    asked[0][1](late)  # A comes after B was asked
+    assert app.viewer_pix is None and app.viewer_url == "https://i.oneme.ru/b.jpg"
+    asked[1][1](late)
+    assert app.viewer_pix is late
+    app.close_photo()
+ok("a view out of sight; the photo asked last")

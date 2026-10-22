@@ -153,6 +153,19 @@ assert responses == [bm.Gtk.ResponseType.CANCEL]
 assert not requests and app.call_answer.is_sensitive()
 app.call_changed({"id": "interrupt-dialog", "name": "Тестовый собеседник", "state": "ended"})
 ok("incoming call dismisses the real dial confirmation without dialling or answering")
+# Any question or file chooser open when a call rings is answered «Отмена»
+# (a «Сохранить …?», a chooser for photos): nothing covers «Ответить».
+answers = []
+question = bm.Gtk.Dialog(transient_for=app.win, modal=True)
+question.connect("response", lambda _d, r: answers.append(r))
+question.show()
+app.chooser = Mock()
+app.call_changed({"id": "over-a-question", "name": "Тестовый собеседник", "state": "ringing"})
+assert answers == [bm.Gtk.ResponseType.CANCEL] and app.chooser.hide.called
+question.destroy()
+app.chooser = None
+app.call_changed({"id": "over-a-question", "name": "Тестовый собеседник", "state": "ended"})
+ok("an incoming call closes the questions and choosers over the window")
 
 app.call_changed({"id": "synthetic-invitation", "name": "Тестовый собеседник", "state": "ringing"})
 wait(lambda: len(notifications) >= 2)
