@@ -229,9 +229,12 @@ TG_HOSTS = ("t.me", "telegram.me")
 # Telegram's reactions for REACTIONS (it has no 😂 or 😮, and ❤ without the
 # emoji's variation selector), and back.
 TG_REACTION = {"❤️": "❤", "😂": "🤣", "😮": "😱"}
-QR_HINT = {"max": "Откройте MAX на телефоне и отсканируйте этот код",
-           "telegram": "В Telegram на телефоне: Настройки → Устройства → "
-                       "Подключить устройство, и отсканируйте этот код"}
+# How to scan the code, in three steps beside it: read aloud to a relative on
+# the phone if need be (MAX's path as the author gave it, 22 October 2026).
+QR_STEPS = {"max": ("Откройте MAX на телефоне", "Настройки → Устройства",
+                    "«Войти по QR-коду» и наведите камеру на этот код"),
+            "telegram": ("Откройте Telegram на телефоне", "Настройки → Устройства",
+                         "«Подключить устройство» и наведите камеру на этот код")}
 _vault = []
 
 
@@ -452,6 +455,7 @@ label.emoji-group { font-size: 18px; color: #77767b; }
 .found .bubble { background-color: #fff3bf; }
 label.play-over { font-size: 44px; color: #ffffff; background-color: rgba(0, 0, 0, 0.55);
                   border-radius: 40px; padding: 4px 22px 4px 28px; }
+label.qr-step { font-size: 28px; color: #2e3436; }
 label.call-icon { font-size: 34px; }
 label.call-status { font-size: 22px; color: #5e5c64; }
 label.call-status.taken { color: #26a269; }
@@ -6783,9 +6787,16 @@ class Max(Gtk.Application):
             button("Выйти", lambda: self.logout(name, title), "danger")
         elif kind_ == "waiting":
             image = Gtk.Image.new_from_pixbuf(GdkPixbuf.Pixbuf.new_from_file(state["qr"]))
-            image.set_halign(Gtk.Align.CENTER)
-            card.pack_start(image, False, False, 0)
-            hint(QR_HINT.get(name, "Откройте %s на телефоне и отсканируйте этот код" % title))
+            image.set_valign(Gtk.Align.CENTER)
+            # The code and, beside it, the way to it on the phone in large steps.
+            beside = Gtk.Box(spacing=32)
+            beside.pack_start(image, False, False, 0)
+            steps = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=20, valign=Gtk.Align.CENTER)
+            for n, step in enumerate(QR_STEPS.get(name, ("Откройте %s на телефоне" % title,
+                                                         "Наведите камеру на этот код")), 1):
+                steps.pack_start(label("%d.  %s" % (n, step), "qr-step", wrap=True), False, False, 0)
+            beside.pack_start(steps, True, True, 0)
+            card.pack_start(beside, False, False, 0)
         elif kind_ == "password":
             hint("Пароль не подошёл, попробуйте ещё раз." if state.get("wrong") else
                  "Вход в %s защищён облачным паролем. Введите его." % title)
