@@ -1,14 +1,22 @@
 # Что нового · What's new
 
-## 2.9.5 (2026-10-22)
+## 2.9.5 (2026-10-23)
 
 ### Русский
 
 Пока идёт исходящий звонок, слышен гудок дозвона.
 
+Исправлено обновление реакций из официального MAX: открытый чат подписывается на изменения, а после восстановления связи реакции загружаются заново. Запоздавший ответ больше не затирает новую реакцию.
+
+На экране звонка уточнена надпись: «Микрофон собеседника выключен».
+
 ### English
 
 While an outgoing call rings, you hear a ringback tone.
+
+Reaction updates from the official MAX client are fixed: the open chat subscribes to changes, and reactions refresh after reconnecting. A late response no longer overwrites a newer reaction.
+
+The call screen now says «Микрофон собеседника выключен» (The other person's microphone is off).
 
 ## 2.9.4 (2026-10-22)
 
