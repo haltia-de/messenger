@@ -1,3 +1,9 @@
+haltia-messenger (2.9.5) unstable; urgency=medium
+
+  * While an outgoing call rings, you hear a ringback tone.
+
+ -- Haltia <rensomail@gmail.com>  Thu, 22 Oct 2026 22:00:00 +0300
+
 haltia-messenger (2.9.4) unstable; urgency=medium
 
   * Reactions from the official MAX apps arrive at once.
