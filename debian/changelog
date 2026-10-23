@@ -1,3 +1,11 @@
+haltia-messenger (2.9.5) unstable; urgency=medium
+
+  * While an outgoing call rings, you hear a ringback tone.
+  * Subscribe to live reaction updates and refresh them after reconnecting.
+  * Clarify the peer microphone status on the call screen.
+
+ -- Haltia <rensomail@gmail.com>  Fri, 23 Oct 2026 13:35:00 +0300
+
 haltia-messenger (2.9.4) unstable; urgency=medium
 
   * Reactions from the official MAX apps arrive at once.
