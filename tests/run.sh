@@ -87,7 +87,7 @@ display() {
 }
 
 [ $# -gt 0 ] || all=1
-[ $# -gt 0 ] || set -- test_release.py test_chatlist.py test_media.py test_backend.py test_window.py test_login.py test_calls.py test_call_window.py test_call_shutdown.py
+[ $# -gt 0 ] || set -- test_release.py test_chatlist.py test_media.py test_backend.py test_reactions.py test_window.py test_login.py test_calls.py test_call_window.py test_call_shutdown.py
 # The real WebRTC media tests need GstWebRTC and libnice (the Flatpak has them).
 if [ -n "${all:-}" ]; then
 	if "$python" -c 'import gi; gi.require_version("GstWebRTC", "1.0"); from gi.repository import GstWebRTC' 2>/dev/null; then
