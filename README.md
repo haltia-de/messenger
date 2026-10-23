@@ -220,11 +220,9 @@ sh install.sh                # в /, под /usr/local (нужен root)
 sh install.sh /mnt/root /usr # в другой корень и префикс (так делает пакет)
 ```
 
-`install.sh` кладёт программу в `PREFIX/bin/haltia-messenger` (и ссылку
-`b8k-max` на неё), PyMax — в `PREFIX/lib/haltia-messenger`, `.desktop`-файл, значок и описание AppStream — в
-`PREFIX/share` (и старый `.desktop`-файл `io.github.trudenboy.Max`, скрытый,
-чтобы прежние закрепления открывали программу), файл автозапуска — в
-`/etc/xdg/autostart`, и убирает файлы `b8k-max` под тем же префиксом. Сборка
+`install.sh` кладёт программу в `PREFIX/bin/haltia-messenger`, PyMax — в
+`PREFIX/lib/haltia-messenger`, `.desktop`-файл, значок и описание AppStream — в
+`PREFIX/share`, файл автозапуска — в `/etc/xdg/autostart`. Сборка
 пакетов: `packaging/alpine/APKBUILD`, `debian/` и `packaging/flatpak/`, выпуск по
 тегу — `haltia-de/ci`.
 
@@ -261,8 +259,7 @@ flatpak run --command=python3 --filesystem="$PWD":ro \
 [device-lenovo-b8000h](https://github.com/haltia-de/device-lenovo-b8000h)
 (Linux на Lenovo YOGA Tablet 10 B8000-H), его сборка ставит программу
 отсюда по тегу. От оболочки планшета она не зависит: id
-`io.github.haltia_de.Messenger`, `.desktop`-файл (ключи `X-B8K-…` оболочка
-читает, другие столы пропускают), значок на панели по стандарту Unity
+`io.github.haltia_de.Messenger`, `.desktop`-файл, значок на панели по стандарту Unity
 LauncherEntry, что играет — по MPRIS, уведомления, автозапуск XDG; вид
 задаёт тема GTK (на планшете — тема оболочки Haltia), вибрацию на касания даёт сама оболочка. Работает на
 любом рабочем столе с GTK 3: вне оболочки у окна обычные кнопки, в том числе
