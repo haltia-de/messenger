@@ -281,6 +281,7 @@ MAIN_TAB = {"source_type": 5, "source_id": 1, "tab_config": 2}  # going to the c
 FLUSH_SEC = 3  # events go out in small batches, as the app sends them
 REACTIONS = ("👍", "❤️", "😂", "😮", "😢", "🔥")  # offered on a long press of a message
 REACTIONS_ASKED = 50  # newest messages of the chat in front whose reactions are asked
+CHAT_LEASE = 50  # renew CHAT_SUBSCRIBE as MAX Desktop does (seconds)
 # The emoji panel of the message entry, by group; the recent ones come first.
 EMOJI = (
     ("Лица", "😀 😃 😄 😁 😆 😅 😂 🤣 😊 😇 🙂 😉 😌 😍 🥰 😘 😗 😋 😛 😜 🤪 🤗 🤔 🤨 "
@@ -1165,8 +1166,8 @@ class PyMaxLink:
         dispatch = dispatcher.dispatch
 
         async def peek_then_dispatch(frame):
-            self._peek(frame)
-            await dispatch(frame)
+            if not self._peek(frame):
+                await dispatch(frame)
         dispatcher.dispatch = peek_then_dispatch
         dispatcher.haltia_peeks = True
 
@@ -1188,19 +1189,23 @@ class PyMaxLink:
                 # string, MAX sends a number) and has no event for the second.
                 # MAX sends REACTIONS_CHANGED to the message's author and
                 # YOU_REACTED, the counts in reactionInfo, to the others in the
-                # chat: its yourReaction is the one who reacted, not the
-                # account (the official app's log, 22 October 2026).
+                # chat. Snapshot/detail replies in MAX Desktop's log confirm
+                # that its yourReaction belongs to the receiving account.
                 chat_id, msg_id = payload.get("chatId"), payload.get("messageId")
-                info = payload.get("reactionInfo") if frame.opcode == Opcode.NOTIF_MSG_YOU_REACTED \
-                    else payload
+                own = frame.opcode == Opcode.NOTIF_MSG_YOU_REACTED
+                info = (payload.get("reactionInfo") or {}) if own else payload
                 if chat_id is not None and msg_id is not None and isinstance(info, dict):
                     reactions = [[c["reaction"], c["count"]] for c in info.get("counters") or []
                                  if c.get("reaction") and c.get("count")]
-                    task = asyncio.ensure_future(
-                        self.events.on_reaction(int(chat_id), int(msg_id), reactions))
+                    args = (int(chat_id), int(msg_id), reactions)
+                    # YOU_REACTED synchronizes this account's other clients;
+                    # a removed reaction is an empty reactionInfo.
+                    if own:
+                        args += (info.get("yourReaction"),)
+                    task = asyncio.ensure_future(self.events.on_reaction(*args))
                     self.tasks.add(task)
                     task.add_done_callback(self.tasks.discard)
-                return
+                return True  # already handled; PyMax's mapper rejects numeric messageId
             if frame.opcode == Opcode.NOTIF_MSG_DELETE:
                 chat_id, ids = payload.get("chatId"), payload.get("messageIds") or []
             elif frame.opcode == Opcode.NOTIF_MESSAGE and \
@@ -1215,7 +1220,7 @@ class PyMaxLink:
                 self.tasks.add(task)  # held till done: the loop keeps only a weak reference
                 task.add_done_callback(self.tasks.discard)
         except Exception as exc:  # a frame of another shape: not for us
-            log_line("delete frame: %r" % exc)
+            log_line("MAX event: malformed frame (%s)" % type(exc).__name__)
 
     def _watch_login(self):
         """Keep the account's own settings from each login answer: PyMax
@@ -1493,11 +1498,15 @@ class PyMaxLink:
         return reactions_of(info) if info else None
 
     async def reactions(self, chat_id, msg_ids):
-        """{msg id: [[emoji, count]]} of messages, as MAX has them now: it
-        tells a reaction only to the message's author, so the others' on
-        others' messages are asked, as the official app does on a chat."""
+        """{message id: (counts, own emoji)} as MAX has them now."""
         got = await self._api.messages.get_reactions(chat_id, [int(i) for i in msg_ids]) or {}
-        return {int(k): reactions_of(v)[0] for k, v in got.items()}
+        return {int(k): reactions_of(v) for k, v in got.items()}
+
+    async def subscribe(self, chat_id, on):
+        """Lease live updates of the open chat, independently of its snapshot."""
+        from pymax.protocol import Opcode
+        await self.client._app.invoke(Opcode.CHAT_SUBSCRIBE,
+                                      {"chatId": chat_id, "subscribe": bool(on)})
 
     async def media_url(self, chat_id, msg_id, item):
         """The short-lived link MAX gives for a video or a file of a message.
@@ -3337,6 +3346,78 @@ class Offline(Exception):
     request was not sent."""
 
 
+class ReactionWatch:
+    """One account's visible chat: a renewable lease and an initial snapshot.
+
+    Only the backend loop owns it. Leaving cancels the old work before a
+    replacement starts; disconnect pauses it without forgetting the view.
+    The window never owns network timers or applies snapshot replies.
+    """
+
+    def __init__(self, account):
+        self.account = account
+        self.chat = None
+        self.ids = ()
+        self.task = None
+        self.lock = asyncio.Lock()
+
+    async def _stop(self):
+        if self.task is not None:
+            self.task.cancel()
+            try:
+                await self.task
+            except asyncio.CancelledError:
+                pass
+            self.task = None
+
+    async def select(self, chat, ids):
+        async with self.lock:
+            ids = tuple(ids)
+            if (chat, ids) == (self.chat, self.ids) and self.task and not self.task.done():
+                return
+            await self._stop()
+            self.chat, self.ids = chat, ids
+            self._start()
+
+    def _start(self):
+        if self.chat is not None and self.account.online:
+            self.task = asyncio.create_task(self._live(self.chat, self.ids))
+
+    async def pause(self):
+        async with self.lock:
+            await self._stop()
+
+    async def resume(self):
+        async with self.lock:
+            await self._stop()
+            self._start()
+
+    async def _live(self, chat, ids):
+        account = self.account
+        subscribe = getattr(account.link, "subscribe", None)
+        snapshot = True
+        try:
+            while True:
+                try:
+                    if subscribe:
+                        await subscribe(chat, True)
+                    if snapshot:
+                        await account.reactions(chat, ids)
+                        snapshot = False
+                except Exception as exc:
+                    # Never include service payloads, personal ids or tokens.
+                    log_line("reactions: refresh failed (%s)" % type(exc).__name__)
+                if subscribe is None:
+                    return  # other links need only their snapshot and events
+                await asyncio.sleep(CHAT_LEASE)
+        finally:
+            if subscribe and account.online:
+                try:
+                    await asyncio.wait_for(subscribe(chat, False), 2)
+                except Exception:
+                    pass  # an unreachable server expires the lease itself
+
+
 class Backend:
     """What the window asks of the messengers, and what they tell it: one
     Account per link (PyMaxLink, or tests/fake_link.py), all in one thread
@@ -3599,6 +3680,15 @@ class Backend:
     async def reactions(self, chat_id, msg_ids):
         return await self.of(chat_id).reactions(chat_id, msg_ids)
 
+    async def watch_reactions(self, chat_id, msg_ids):
+        """The chat visible in the window; every other account stops watching."""
+        if msg_ids is None:
+            msg_ids = [m["id"] for m in self.cache.read(chat_id)
+                       if isinstance(m["id"], int) and not m.get("state")][-REACTIONS_ASKED:]
+        for account in self.accounts.values():
+            owns = chat_id is not None and account.owns(chat_id)
+            await account.reaction_watch.select(chat_id if owns else None, msg_ids if owns else ())
+
     async def rename(self, user_id, name):
         return await self.of(user_id).rename(user_id, name)
 
@@ -3689,6 +3779,8 @@ class Account:
         self.task = None  # live(), while it runs
         self.starting = asyncio.Lock()  # begin() and stop(), one at a time
         self.online = False  # logged in and connected: requests go to the messenger
+        self.reaction_watch = ReactionWatch(self)
+        self.reaction_reads = {}  # request token -> live changes while its snapshot is in flight
         self.tries = 0  # the link's starts in a row that ended without a login
         self.wake = None  # set by retry(): the pause before the next start ends
         self.secret = None  # a future the sign-in waits on for the cloud password
@@ -3732,6 +3824,7 @@ class Account:
         The task is let go of only once it has ended: begin() meanwhile
         starts nothing."""
         async with self.starting:
+            await self.reaction_watch.select(None, ())
             task = self.task
             if self.call is not None:
                 await self.call.end(self.call.hangup_reason())
@@ -3763,6 +3856,7 @@ class Account:
             except Exception as exc:
                 why = repr(exc)
             self.online = False  # a call goes on: its own connection decides
+            await self.reaction_watch.pause()
             pause = RETRY[min(self.tries, len(RETRY) - 1)]
             self.tries += 1
             log_line("%s: link gave up (%s); again in %s s" % (self.id, why, pause))
@@ -3883,6 +3977,7 @@ class Account:
         self.me = me.id if me else None
         self.agent = agent
         self.online = True
+        await self.reaction_watch.resume()
         self.tries = 0
         if me:
             self.names[self.me] = me.name
@@ -3946,6 +4041,7 @@ class Account:
         goes on: its own connection (ws2, ICE) decides about it. Told once,
         not at every attempt to connect again."""
         was, self.online = self.online, False
+        await self.reaction_watch.pause()
         if was:
             log_line("%s: connection lost: %s" % (self.id, why))
             GLib.idle_add(self.ui.connected, self.id, False)
@@ -3975,11 +4071,12 @@ class Account:
             summary = self.summary(chat)
         GLib.idle_add(self.ui.deleted, chat_id, list(msg_ids), summary)
 
-    async def on_reaction(self, chat_id, msg_id, reactions):
-        """Someone's reaction changed; the event does not say whose, so the
-        account's own stays as it was known."""
-        self.cache.react(chat_id, msg_id, reactions)
-        GLib.idle_add(self.ui.reacted, chat_id, msg_id, reactions, ...)
+    async def on_reaction(self, chat_id, msg_id, reactions, yours=...):
+        """Live counts, and the own emoji only when the link actually says it."""
+        for changed in self.reaction_reads.values():
+            changed.add((chat_id, msg_id))
+        self.cache.react(chat_id, msg_id, reactions, yours)
+        GLib.idle_add(self.ui.reacted, chat_id, msg_id, reactions, yours)
 
     async def on_read(self, chat_id, mark):
         """The others read the account's messages in a chat up to mark (a time
@@ -4235,20 +4332,29 @@ class Account:
         if not hasattr(self.link, "reactions") or not msg_ids:
             return {}
         self.ask()
-        got = await self.link.reactions(chat_id, msg_ids)
-        for msg_id, reactions in got.items():
-            self.cache.react(chat_id, msg_id, reactions)
-        return got
+        token, changed = object(), set()
+        self.reaction_reads[token] = changed
+        try:
+            got = await self.link.reactions(chat_id, msg_ids)
+            for msg_id, (reactions, yours) in got.items():
+                if (chat_id, msg_id) not in changed:
+                    self.cache.react(chat_id, msg_id, reactions, yours)
+                    GLib.idle_add(self.ui.reacted, chat_id, msg_id, reactions, yours)
+            return got
+        finally:
+            self.reaction_reads.pop(token, None)
 
     async def react(self, chat_id, msg_id, emoji):
         """Put the account's reaction on a message (None takes it off);
         (reactions, own emoji) as MAX has them afterwards, or None."""
         self.ask()
+        for changed in self.reaction_reads.values():
+            changed.add((chat_id, msg_id))
         info = await self.link.react(chat_id, msg_id, emoji)
         if info is None:
             return None  # taken, but MAX sent no counts: the window counts itself
         reactions, _ = info
-        self.cache.react(chat_id, msg_id, reactions, emoji)
+        await self.on_reaction(chat_id, msg_id, reactions, emoji)
         return reactions, emoji
 
     async def rename(self, user_id, name):
@@ -6630,6 +6736,7 @@ class Max(Gtk.Application):
         self.win.connect("map", lambda _w: self.moved())
         self.win.connect("unmap", lambda _w: (self.keep_sound or self.stop_sound(),
                                                self.record_stop(False),  # no microphone unseen
+                                               self.watch_reactions(),
                                                self.telemetry.go(SCREEN_BACKGROUND)))
 
         self.stack = Gtk.Stack()
@@ -8514,6 +8621,7 @@ class Max(Gtk.Application):
 
     def moved(self):
         """Tell telemetry which screen is in front."""
+        self.watch_reactions()
         if not self.win.is_visible():
             return
         page = self.stack.get_visible_child_name()
@@ -8852,7 +8960,6 @@ class Max(Gtk.Application):
                                        "last": "", "time": 0, "unread": 0, "stranger": True})
         s = self.about(chat_id)
         self.open_chat = chat_id
-        self.watch_reactions(chat_id)
         self.confirm.hide()
         self.naming.hide()
         self.edit.set_visible(self.chatlist.listed(chat_id))
@@ -8895,6 +9002,7 @@ class Max(Gtk.Application):
                     self.telemetry.chat_shown(int((came - start) * 1000),
                                               int((time.monotonic() - came) * 1000))
             view.newest(msgs or [], gap, done=drawn)
+            self.watch_reactions()
             if self.open_chat == chat_id:
                 self.sub.set_text("")
             if self.chatlist.listed(chat_id):
@@ -9137,18 +9245,11 @@ class Max(Gtk.Application):
             self.fill_list(only={chat_id})
         return False
 
-    def watch_reactions(self, chat_id):
-        """The reactions of the newest messages of a chat opened, as the
-        official app asks them: those put while away came in no event (MAX's
-        events come live; the cached messages have the old counts)."""
-        def ask():
-            view = self.views.get(chat_id)
-            if self.open_chat == chat_id and view is not None:
-                self.backend.run(self.backend.reactions(chat_id, view.newest_ids()), lambda got, err: (
-                    None if err or not got else
-                    [self.reacted(chat_id, i, r, ...) for i, r in got.items()]))
-            return False
-        GLib.timeout_add(1500, ask)  # once the history is in
+    def watch_reactions(self):
+        """Tell the backend which chat is visible; it owns the live lease."""
+        chat = self.open_chat if self.win.get_mapped() and \
+            self.stack.get_visible_child_name() == "chat" else None
+        self.backend.run(self.backend.watch_reactions(chat, None if chat is not None else ()))
 
     def reacted(self, chat_id, msg_id, reactions, yours):
         """New reactions of a message (yours: ... when not known to change)."""

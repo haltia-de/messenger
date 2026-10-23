@@ -284,6 +284,14 @@ wait(lambda: app.view and len(holds_of(app.view)) == 3, what="mama's chat")
 v = app.view
 first = fake.msgs[mama][0].id
 assert [b.get_label() for b in chips(v, first)] == ["👍 2"]
+wait(lambda: fake.asked("subscribe") and fake.asked("subscribe")[-1] ==
+     {"chat_id": mama, "on": True}, what="chat subscription")
+app.win.hide()
+wait(lambda: fake.asked("subscribe")[-1] == {"chat_id": mama, "on": False},
+     what="hidden window unsubscribes")
+app.win.show()
+wait(lambda: fake.asked("subscribe")[-1] == {"chat_id": mama, "on": True},
+     what="shown window subscribes again")
 app.pick_reaction(mama, first, holds_of(v)[0].get_child())
 spin(0.1)
 app.react(mama, first, "❤️")
@@ -299,10 +307,12 @@ fake.counts = True
 fake.reaction(mama, first, [("👍", 3), ("😂", 1)])
 wait(lambda: len(chips(v, first)) == 2, what="someone's reaction")
 assert [b.get_label() for b in chips(v, first)] == ["👍 3", "😂 1"]
-# MAX tells a reaction only to the message's author: the chat in front asks
-# its newest messages' reactions, so one put on another's message shows too
+# Reopening asks a snapshot of reactions put while the chat was away.
 next(m for m in fake.msgs[mama] if m.id == first).reactions = [["🔥", 2]]
-app.watch_reactions(mama)
+app.show_list()
+wait(lambda: fake.asked("subscribe")[-1] == {"chat_id": mama, "on": False},
+     what="leaving chat unsubscribes")
+app.open(mama)
 wait(lambda: [b.get_label() for b in chips(v, first)] == ["🔥 2"], what="asked reactions")
 assert first in fake.asked("reactions")[-1]["msg_ids"]
 app.edit.clicked()  # the chat's menu: rename, pin, notifications, delete

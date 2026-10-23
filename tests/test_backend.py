@@ -234,8 +234,8 @@ class Events:
     async def on_delete(self, chat_id, ids):
         got.append((chat_id, ids))
 
-    async def on_reaction(self, chat_id, msg_id, reactions):
-        got.append(("reaction", chat_id, msg_id, reactions))
+    async def on_reaction(self, chat_id, msg_id, reactions, yours=...):
+        got.append(("reaction", chat_id, msg_id, reactions) + ((yours,) if yours is not ... else ()))
 
 
 async def peek_all():
@@ -261,7 +261,7 @@ async def peek_all():
 asyncio.run(peek_all())
 assert got == [(11, [5, 6]), (12, [7]),
                ("reaction", 13, 117484382192958798, [["❤️", 1], ["👍", 1]]),
-               ("reaction", 13, 9, [["👍", 1]])], got
+               ("reaction", 13, 9, [["👍", 1]], "👍")], got
 seen = []
 
 
