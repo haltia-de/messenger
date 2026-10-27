@@ -227,7 +227,8 @@ chats of the message's messenger (between messengers: step 4). At the
   `last_message` is already cached and has no unread opens with no history request at all; else
   the last `PAGE` are fetched (see Paging). The last `VIEWS` chat views stay built in memory. The chat list
   keeps one row per chat (`Max.rows`, sorted and filtered by GTK) and `fill_list` redraws only rows
-  whose look changed — don't go back to rebuilding it (≈30× slower per message). A message, a read
+  whose look changed — don't go back to rebuilding it (≈30× slower per message). A full fill with many new rows (the first login's) builds the
+  shown tab's top `ROWS_FIRST` at once and the rest `ROWS_STEP` per idle (`_more_rows`). A message, a read
   or a delete calls `fill_list(only={chat})`: that row alone is redrawn and re-placed
   (`row.changed()`); `invalidate_sort`/`invalidate_filter` only for a full refresh (a tab, a pin,
   `contacts_only`), and the login's list redraws only the chats that differ (`show_chats`).
@@ -237,7 +238,9 @@ chats of the message's messenger (between messengers: step 4). At the
   in `~/.cache/haltia-messenger/` by URL hash, touched when shown, pruned after `PHOTO_DAYS` unshown (at
   start and daily). Small state files in `DATA` go through `load_json`/`save_json`/`save_text` (600,
   atomic, from any thread). The MAX thread starts after the window's first frame (`after_first_frame`;
-  at once with `--background`), so PyMax's import does not share the GIL with the first drawing.
+  at once with `--background`), so PyMax's import does not share the GIL with the first drawing. `asyncio`, `concurrent.futures` and
+  `urllib.request` are `lazy()` modules for the same reason (loaded at first use, after it); keep
+  them off the path to the first frame, and the photo opener is made by `photo_opener()` at first use.
 - **Chat list** (`ChatList`, CONTEXT.md «Список чатов»; no GTK). Owns the summaries, dialogs from
   the search not written to yet (`start_dialog`/`wrote`), pins and per-chat notifications (`PREFS`,
   `chats.json`; local — PyMax has no pin/mute request, `CHAT_PERSONAL_CONFIG` is bare), the
@@ -274,7 +277,7 @@ chats of the message's messenger (between messengers: step 4). At the
   `photo_ok` is the same) for photos, previews, voice, video and files; one header, the
   `agent` (PyMax's browser user agent, set by `Max.logged_in`), and no `Referer`/`Origin` — the
   video CDN answers 400 to those; photos never follow a redirect off those hosts
-  (`PhotoRedirect`). Photos come through its queue (`PHOTO_WORKERS` at a time, the last asked
+  (`PhotoRedirect`, made by `photo_redirect()` at first use). Photos come through its queue (`PHOTO_WORKERS` at a time, the last asked
   first, one fetch per link, none for an `owner` that is `gone` — ChatView's images are `watched`),
   saves through a worker of their own, one at a time. It caches photos (`photo(url, done, size,
   owner)`, touched when shown, `prune()` after

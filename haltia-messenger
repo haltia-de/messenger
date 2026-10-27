@@ -92,10 +92,9 @@ The person of a dialog can be renamed (the edit menu): here only, kept in
 ~/.local/share/haltia-messenger/names.json, since MAX's web protocol as PyMax has it
 offers no renaming of contacts.
 """
-import asyncio
 import base64
 import collections
-import concurrent.futures
+import concurrent
 import dataclasses
 import functools
 import hashlib
@@ -112,10 +111,34 @@ import threading
 import configparser
 import time
 import urllib.parse
-import urllib.request
 import uuid
 import zlib
 from datetime import date, datetime, timezone
+
+
+def lazy(name):
+    """A module loaded at its first use, not at the start: asyncio (with
+    concurrent.futures, logging, ssl) and urllib.request (http.client,
+    email) are for the messengers' thread and photos, which begin after the
+    window's first frame. On a PC (i5-4570) `haltia-messenger --help`
+    started in 271 ms instead of 310 (median of 15); a Cortex-A7 is several
+    times slower, not measured yet."""
+    if name in sys.modules:
+        return sys.modules[name]
+    spec = importlib.util.find_spec(name)
+    spec.loader = importlib.util.LazyLoader(spec.loader)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    parent, _, child = name.rpartition(".")
+    if parent:
+        setattr(sys.modules[parent], child, module)
+    return module
+
+
+asyncio = lazy("asyncio")
+lazy("concurrent.futures")
+urllib.request = lazy("urllib.request")
 
 # One id everywhere (ADR 0004 of haltia-de/device-lenovo-b8000h): the
 # GApplication, the .desktop file, the window, the icon, AppStream, MPRIS.
@@ -174,6 +197,8 @@ KIT_CONF = os.path.join(CONFIG, "max.conf")
 PAGE = 30  # messages per history request: the newest when a chat opens, then older ones
 PREFETCH = 2  # older pages fetched in the background for the open chat
 FIRST = 12  # messages built at once when a chat opens: a screen of them
+ROWS_FIRST = 30  # chat rows built at once by a full fill (the login's): the top ones
+ROWS_STEP = 20  # then per idle moment, so the first list shows at once
 STEP = 3  # bubbles built per idle moment for the rest
 SETTLE = 1.2  # s after the reader's last scroll before more are put in above
 BUBBLES = 150  # a chat left keeps no more messages built than this
@@ -517,13 +542,15 @@ button.media label, button.media image { color: #ffffff; }
 button.down {
   background-image: none;
   background-color: #3584e4;
-  border: none;
   border-radius: 36px;
   min-width: 72px;
   min-height: 72px;
   padding: 0 12px;
   font-size: 30px;
-  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.35);
+  /* A plain edge, not a blurred shadow: it sits over the scrolling chat,
+     and a blur is drawn again by the processor on every frame. */
+  border: 2px solid #1a5fb4;
+  box-shadow: none;
 }
 button.down label { color: #ffffff; }
 button.share {
@@ -4688,14 +4715,23 @@ def size_text(n):
         n /= 1024
 
 
-class PhotoRedirect(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        if not media_ok(newurl):
-            return None  # urllib then raises: no hop off MAX's hosts
-        return super().redirect_request(req, fp, code, msg, headers, newurl)
+@functools.cache
+def photo_redirect():
+    """PhotoRedirect, the redirect handler that never leaves MAX's hosts
+    (made at its first use: urllib.request is loaded only then)."""
+    class PhotoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, req, fp, code, msg, headers, newurl):
+            if not media_ok(newurl):
+                return None  # urllib then raises: no hop off MAX's hosts
+            return super().redirect_request(req, fp, code, msg, headers, newurl)
+    return PhotoRedirect
 
 
-PHOTO_OPENER = urllib.request.build_opener(PhotoRedirect)
+@functools.cache
+def photo_opener():
+    """The opener of photos and files, made at its first use: its HTTPS
+    context reads the whole CA store, not wanted before the window."""
+    return urllib.request.build_opener(photo_redirect())
 
 
 def log_open():
@@ -4907,7 +4943,7 @@ def open_in_browser(url):
 def download_file(url, headers, path):
     """A file to disk as it comes, never wholly in memory (videos are big)."""
     req = urllib.request.Request(url, headers=headers)
-    with PHOTO_OPENER.open(req, timeout=30) as fh, open(path, "wb") as out:
+    with photo_opener().open(req, timeout=30) as fh, open(path, "wb") as out:
         shutil.copyfileobj(fh, out, 64 * 1024)
 
 
@@ -5016,7 +5052,7 @@ def fitted(path, size):
 
 def fetch_photo(url, headers):
     req = urllib.request.Request(url, headers=headers)
-    with PHOTO_OPENER.open(req, timeout=20) as fh:
+    with photo_opener().open(req, timeout=20) as fh:
         return fh.read(8 * 1024 * 1024)
 
 
@@ -6942,6 +6978,9 @@ class Max(Gtk.Application):
         self.list.set_sort_func(lambda a, b: self.placed(a.chat_id, b.chat_id))
         self.list.set_filter_func(lambda row: self.chatlist.shown(row.chat_id, self.tab))
         self.rows = {}  # chat id -> its row, kept between updates
+        self.rows_later = []  # chat ids whose rows a full fill builds after the first ones
+        self.rows_timer = None
+        self.thumbs = {}  # an attached photo's path -> its small picture (None: none)
         # A long press on a chat: pin it, switch its notifications.
         self.list_press = Gtk.GestureLongPress.new(self.list)
         self.list_press.connect("pressed", self.row_menu)
@@ -7626,7 +7665,20 @@ class Max(Gtk.Application):
         (row.changed()); else all, sorted and filtered anew (a tab, a pin,
         the login)."""
         ids = set(self.chatlist.chats) | set(self.rows) if only is None else set(only)
+        later = set()
+        if only is None:
+            # Many new rows (the first login's list): the top ROWS_FIRST of
+            # the tab shown now, the others a few per idle moment, placed as
+            # they come.
+            new = sorted((c for c in ids if c not in self.rows and self.chatlist.entry(c)),
+                         key=lambda c: (not self.chatlist.shown(c, self.tab), self.chatlist.order(c)))
+            self.rows_later = new[ROWS_FIRST:]
+            later = set(self.rows_later)
+            if self.rows_later and self.rows_timer is None:
+                self.rows_timer = GLib.idle_add(self._more_rows, priority=GLib.PRIORITY_LOW)
         for chat_id in ids:
+            if chat_id in later:
+                continue
             entry = self.chatlist.entry(chat_id)
             row = self.rows.get(chat_id)
             if entry is None:
@@ -7651,6 +7703,20 @@ class Max(Gtk.Application):
             self.list.invalidate_sort()
             self.list.invalidate_filter()
         self.show_counts()
+
+    def _more_rows(self):
+        """The next ROWS_STEP rows a full fill left for later."""
+        step, self.rows_later = self.rows_later[:ROWS_STEP], self.rows_later[ROWS_STEP:]
+        for chat_id in step:
+            entry = self.chatlist.entry(chat_id)
+            if entry is not None and chat_id not in self.rows:
+                row = self.rows[chat_id] = self.chat_row(entry)
+                self.list.add(row)  # sorted and filtered as it goes in
+                row.show_all()
+        if self.rows_later:
+            return True
+        self.rows_timer = None
+        return False
 
     def show_counts(self):
         """The tabs' counts, the subtitle and the panel's button, each only
@@ -8029,8 +8095,25 @@ class Max(Gtk.Application):
         k = min(alloc.width / pix.get_width(), alloc.height / pix.get_height()) * self.viewer_zoom
         w, h = max(1, int(pix.get_width() * k)), max(1, int(pix.get_height() * k))
         current = self.viewer_image.get_pixbuf()
-        if current is None or (current.get_width(), current.get_height()) != (w, h):
-            self.viewer_image.set_from_pixbuf(pix.scale_simple(w, h, GdkPixbuf.InterpType.BILINEAR))
+        if current is not None and (current.get_width(), current.get_height()) == (w, h):
+            return
+        if getattr(self, "viewer_scaling", None) == (pix, w, h):
+            return  # on its way already (size-allocate comes often)
+        self.viewer_scaling = (pix, w, h)
+
+        # Scaled by a thread (a 2048 px photo takes a while on the tablet),
+        # put in only if still the photo and size wanted.
+        def scale():
+            scaled = pix.scale_simple(w, h, GdkPixbuf.InterpType.BILINEAR)
+
+            def put():
+                if self.viewer_scaling == (pix, w, h):
+                    self.viewer_scaling = None
+                    if self.viewer_pix is pix and scaled is not None:
+                        self.viewer_image.set_from_pixbuf(scaled)
+                return False
+            GLib.idle_add(put)
+        threading.Thread(target=scale, daemon=True).start()
 
     def save_viewed(self):
         """The photo shown, kept on the tablet."""
@@ -9506,19 +9589,24 @@ class Max(Gtk.Application):
 
     def show_attached(self):
         """The files waiting to be sent, above the entry."""
+        waiting = {f.get("path") for f in self.attached}
+        self.thumbs = {p: v for p, v in self.thumbs.items() if p in waiting}
         for child in self.attachbar.get_children():
             child.destroy()
         for f in self.attached:
             chip = Gtk.Box(spacing=8)
             chip.get_style_context().add_class("attachment")
             chip.attachment = f
-            if f["kind"] == "photo":
-                try:
-                    pix = GdkPixbuf.Pixbuf.new_from_file_at_scale(f["path"], 96, 96, True)
-                    chip.pack_start(Gtk.Image.new_from_pixbuf(pix), False, False, 0)
-                except GLib.Error:
-                    chip.pack_start(label(f["name"], "attachment-name", ellipsize=True),
-                                    False, False, 0)
+            pix = self.thumbs.get(f["path"]) if f["kind"] == "photo" else None
+            if pix is not None:
+                chip.pack_start(Gtk.Image.new_from_pixbuf(pix), False, False, 0)
+            elif f["kind"] == "photo":
+                # Its name till the small picture is made (by a thread, once).
+                chip.pack_start(label(f["name"], "attachment-name", ellipsize=True),
+                                False, False, 0)
+                if f["path"] not in self.thumbs:
+                    self.thumbs[f["path"]] = None
+                    self.thumb_later(f["path"])
             else:
                 chip.pack_start(label("📄 " + f["name"], "attachment-name", ellipsize=True),
                                 False, False, 0)
@@ -9535,6 +9623,25 @@ class Max(Gtk.Application):
     def unattach(self, f):
         self.attached = [a for a in self.attached if a is not f]
         self.show_attached()
+
+    def thumb_later(self, path):
+        """An attached photo's small picture, decoded at that size by a
+        thread; shown when it is there and the photo still waits."""
+        def make():
+            try:
+                pix = GdkPixbuf.Pixbuf.new_from_file_at_scale(path, 96, 96, True)
+            except GLib.Error:
+                pix = None
+
+            def put():
+                if pix is not None and any(a.get("path") == path for a in self.attached):
+                    self.thumbs[path] = pix
+                    self.show_attached()
+                else:
+                    self.thumbs.pop(path, None)
+                return False
+            GLib.idle_add(put)
+        threading.Thread(target=make, daemon=True).start()
 
     # --- a voice message --------------------------------------------------------
     def record_start(self):

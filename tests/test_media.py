@@ -66,7 +66,7 @@ for bad in ("http://i.oneme.ru/a", "https://192.168.1.1/a", "https://localhost/a
             "https://evil.com/a", "https://okcdn.ru.evil.com/a", "", None):
     assert not bm.media_ok(bad), bad
 req = urllib.request.Request("https://i.oneme.ru/p.jpg")
-redirect = bm.PhotoRedirect()
+redirect = bm.photo_redirect()()
 assert redirect.redirect_request(req, None, 302, "", {}, "https://evil.com/p.jpg") is None
 assert redirect.redirect_request(req, None, 302, "", {}, "https://i2.oneme.ru/p.jpg") is not None
 ok("hosts, redirects")
