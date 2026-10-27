@@ -3797,17 +3797,25 @@ class Account:
         self.names = {}
         self.portraits = {}
         self.chats = {}
-        # Seeded once a list was read, even an empty one (nobody known is a
-        # state, never a reason to take every dialog's peer as known); only
-        # a file missing or unreadable (cut by a power loss) is seeded again,
-        # or every dialog would go quiet for good.
+        # Seeded only on the first run, when there is no file at all: then
+        # everyone already in a dialog counts as known. A file that is there
+        # but cannot be read, or holds no list, fails closed (nobody known,
+        # never seeded again): seeding would let every stranger who ever
+        # wrote through. save_text writes it atomically and synced, so a
+        # broken one is rare.
         try:
             with open(self.known_path) as fh:
                 known = json.load(fh)
-        except (OSError, ValueError):
+        except FileNotFoundError:
             known = None
-        self.seeded = isinstance(known, list)
-        self.known = set(known) if self.seeded else set()
+        except (OSError, ValueError) as exc:
+            log_line("known.json unreadable (%s): nobody known" % type(exc).__name__)
+            known = []
+        if known is not None and not isinstance(known, list):
+            log_line("known.json holds no list: nobody known")
+            known = []
+        self.seeded = known is not None
+        self.known = {k for k in known or () if isinstance(k, (int, str))}
         self.agent = None  # the browser user agent the link presents, once logged in
         self.aliases = {self.key(k): v for k, v in load_json(self.aliases_path, {}).items()}
 

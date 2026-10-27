@@ -936,8 +936,15 @@ with open(d2._path("tg:3"), "w") as fh:
 assert d2.chats_with({303}, ["tg:3"]) == []
 os.makedirs(os.path.dirname(bm.KNOWN), exist_ok=True)
 with open(bm.KNOWN, "w"):
-    pass  # left empty by a power loss
-assert not bm.Backend(UI(), fake).accounts["max"].seeded  # seeded again at the login
+    pass  # left empty by a power loss: fails closed, never seeded again
+be = bm.Backend(UI(), fake)
+assert be.accounts["max"].seeded and be.accounts["max"].known == set()
+run(be.accounts["max"].on_login(fake.me, list(fake.rooms.values()), [], fake.agent, 7))
+assert be.accounts["max"].known == set()  # no stranger let through by a seeding
+os.remove(bm.KNOWN)  # no file at all: the first run, seeded at the login
+assert not bm.Backend(UI(), fake).accounts["max"].seeded
+bm.save_json(bm.KNOWN, [[1], {"a": 1}, ANNA])  # odd entries are dropped, not a crash
+assert bm.Backend(UI(), fake).accounts["max"].known == {ANNA}
 bm.save_json(bm.KNOWN, [ANNA])
 assert bm.Backend(UI(), fake).accounts["max"].seeded
 bm.save_json(bm.KNOWN, [])  # nobody known is a state: strangers stay strangers
@@ -949,7 +956,8 @@ assert bs.accounts["max"].known == set() and bs.accounts["max"].summary(stranger
 for broken in ('{"ids": [1]}', "[1, 2"):
     with open(bm.KNOWN, "w") as fh:
         fh.write(broken)
-    assert not bm.Backend(UI(), fake).accounts["max"].seeded
+    bb = bm.Backend(UI(), fake)
+    assert bb.accounts["max"].seeded and bb.accounts["max"].known == set()
 bz = bm.Backend(UI(), fake)
 zero = bm.Chat(id=999, kind="CHAT", title="без времени", members=[], count=0, unread=0, last=None, time=0)
 pages = []
