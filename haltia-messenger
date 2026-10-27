@@ -3797,11 +3797,17 @@ class Account:
         self.names = {}
         self.portraits = {}
         self.chats = {}
-        self.known = set(load_json(self.known_path, []))
-        # Seeded by what was read, not by the file being there: one left empty
-        # by a power loss is seeded again, or every stranger-filtered dialog
-        # would go quiet for good.
-        self.seeded = bool(self.known)
+        # Seeded once a list was read, even an empty one (nobody known is a
+        # state, never a reason to take every dialog's peer as known); only
+        # a file missing or unreadable (cut by a power loss) is seeded again,
+        # or every dialog would go quiet for good.
+        try:
+            with open(self.known_path) as fh:
+                known = json.load(fh)
+        except (OSError, ValueError):
+            known = None
+        self.seeded = isinstance(known, list)
+        self.known = set(known) if self.seeded else set()
         self.agent = None  # the browser user agent the link presents, once logged in
         self.aliases = {self.key(k): v for k, v in load_json(self.aliases_path, {}).items()}
 

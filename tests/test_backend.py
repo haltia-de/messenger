@@ -940,6 +940,16 @@ with open(bm.KNOWN, "w"):
 assert not bm.Backend(UI(), fake).accounts["max"].seeded  # seeded again at the login
 bm.save_json(bm.KNOWN, [ANNA])
 assert bm.Backend(UI(), fake).accounts["max"].seeded
+bm.save_json(bm.KNOWN, [])  # nobody known is a state: strangers stay strangers
+bs = bm.Backend(UI(), fake)
+assert bs.accounts["max"].seeded
+run(bs.accounts["max"].on_login(fake.me, list(fake.rooms.values()), [], fake.agent, 7))
+stranger = next(r for r in fake.rooms.values() if r.kind == "DIALOG")  # nobody known: any dialog
+assert bs.accounts["max"].known == set() and bs.accounts["max"].summary(stranger)["stranger"]
+for broken in ('{"ids": [1]}', "[1, 2"):
+    with open(bm.KNOWN, "w") as fh:
+        fh.write(broken)
+    assert not bm.Backend(UI(), fake).accounts["max"].seeded
 bz = bm.Backend(UI(), fake)
 zero = bm.Chat(id=999, kind="CHAT", title="без времени", members=[], count=0, unread=0, last=None, time=0)
 pages = []
