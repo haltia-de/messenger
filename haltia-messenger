@@ -1285,7 +1285,9 @@ class PyMaxLink:
         await self.events.on_disconnect(repr(exc))
 
     async def _message(self, msg, _client):
-        await self.events.on_message(max_message(msg))
+        # PyMax cancels its frames' tasks when the connection drops: a
+        # message begun is cached, shown and told all the same.
+        await asyncio.shield(self.events.on_message(max_message(msg)))
 
     async def _read(self, event, _client):
         """NOTIF_MARK: someone read a chat up to a time; another than the
@@ -3747,7 +3749,12 @@ class Backend:
             raise Offline()
         account = self.of(ref)
         account.ask()
-        asyncio.run_coroutine_threadsafe(account.link.download(ref, path), self.loop).result(timeout)
+        future = asyncio.run_coroutine_threadsafe(account.link.download(ref, path), self.loop)
+        try:
+            future.result(timeout)
+        except concurrent.futures.TimeoutError:
+            future.cancel()  # not left fetching for nobody
+            raise
 
     async def log(self, events):
         """Telemetry events to the messengers that take them (MAX's)."""
@@ -3790,8 +3797,11 @@ class Account:
         self.names = {}
         self.portraits = {}
         self.chats = {}
-        self.seeded = os.path.exists(self.known_path)
         self.known = set(load_json(self.known_path, []))
+        # Seeded by what was read, not by the file being there: one left empty
+        # by a power loss is seeded again, or every stranger-filtered dialog
+        # would go quiet for good.
+        self.seeded = bool(self.known)
         self.agent = None  # the browser user agent the link presents, once logged in
         self.aliases = {self.key(k): v for k, v in load_json(self.aliases_path, {}).items()}
 
@@ -3994,9 +4004,10 @@ class Account:
             fresh = [c for c in page if c.id not in found]
             for c in page:
                 found.setdefault(c.id, c)
-            if not page or not fresh:
+            oldest = min((c.time for c in page if c.time), default=None)
+            if not page or not fresh or oldest is None:
                 break
-            marker = min(c.time for c in page if c.time) - 1
+            marker = oldest - 1
         chats = list(found.values())
         self.chats = found
         # The contacts come whole on the first login, then only what changed:
@@ -4053,10 +4064,14 @@ class Account:
         the account's own, and the chats that have them are looked for."""
         if chat_id is None:
             gone = set(msg_ids)
-            for cid, chat in list(self.chats.items()):
-                if (chat.last is not None and chat.last.id in gone) or \
-                        any(m["id"] in gone for m in self.cache.read(cid)):
-                    await self.on_delete(cid, msg_ids)
+            hits = {cid for cid, chat in self.chats.items()
+                    if chat.last is not None and chat.last.id in gone}
+            # Looked up off the loop, the cache's lock held only for the chats
+            # in memory, and no other chat's file kept in memory by it.
+            hits.update(await asyncio.to_thread(
+                self.cache.chats_with, gone, [c for c in self.chats if c not in hits]))
+            for cid in hits:
+                await self.on_delete(cid, msg_ids)
             return
         self.cache.forget(chat_id, msg_ids)
         chat = self.chats.get(chat_id)
@@ -4427,6 +4442,30 @@ class MessageCache:
         with self.lock:
             return [dict(m) for m in self._get(chat_id)]
 
+    def chats_with(self, msg_ids, among):
+        """Which of the chats `among` hold any of msg_ids: those in memory
+        looked at under the lock, the others read from their files without
+        it and not kept (a deletion that names no chat must not load them
+        all, nor hold the window's reads meanwhile)."""
+        found, unread = [], []
+        with self.lock:
+            for chat_id in among:
+                msgs = self.chats.get(chat_id)
+                if msgs is None:
+                    unread.append(chat_id)
+                elif any(m["id"] in msg_ids for m in msgs):
+                    found.append(chat_id)
+        for chat_id in unread:
+            try:
+                with open(self._path(chat_id)) as fh:
+                    msgs = json.load(fh)
+            except (OSError, ValueError):
+                continue
+            if isinstance(msgs, list) and any(isinstance(m, dict) and m.get("id") in msg_ids
+                                              for m in msgs):
+                found.append(chat_id)
+        return found
+
     def add(self, chat_id, msgs):
         """Messages merged in (by id); the newest KEEP stay."""
         if not msgs:
@@ -4533,9 +4572,11 @@ def save_text(path, text):
             fd = os.open(path + ".new", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
             with os.fdopen(fd, "w") as fh:
                 fh.write(text)
+                fh.flush()
+                os.fsync(fh.fileno())  # on disk before it replaces the old one
             os.replace(path + ".new", path)
-        except OSError:
-            pass
+        except OSError as exc:
+            log_line("save %s: %s" % (os.path.basename(path), type(exc).__name__))
 
 
 def load_setting(key):
