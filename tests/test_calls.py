@@ -1071,6 +1071,91 @@ async def end_logging():
     ok("terminal logs contain only allowed reasons and local/remote origin, once, without identifiers")
 
 
+async def signalling_tolerance():
+    # What the media do not need never ends a talk: an error frame no command
+    # waits for (a late reply, a refused candidate), a candidate the service
+    # refuses, a malformed one from the peer. Only a fatal error ends it.
+    class Refusing(Socket):
+        async def send(self, raw):
+            value = json.loads(raw) if raw != "pong" else raw
+            if isinstance(value, dict) and "candidate" in (value.get("data") or {}):
+                self.sent.append(value)
+                await self.queue.put(json.dumps({"type": "error", "sequence": value["sequence"],
+                                                 "error": "participant-not-found"}))
+                return
+            await super().send(raw)
+    socket = Refusing()
+    states = []
+    call = bm.VoiceCall("tolerant", "test-person", False,
+                        lambda call, state: states.append(state), audio=Audio,
+                        connect=lambda *args, **kwargs: socket)
+    call.start(dict(params))
+    await until(lambda: "change-participant-state" in socket.commands())
+    await socket.notify("accepted-call", participantId="remote")
+    await until(lambda: call.local_sent)
+    Audio.made[-1].state("connected")
+    with patch.object(bm, "log_line") as log:
+        call.candidate({"candidate": "refused", "sdpMLineIndex": 0})
+        await socket.queue.put(json.dumps({"type": "error", "sequence": 999, "error": "private-text"}))
+        await socket.queue.put(json.dumps({"type": "error", "error": "illegal-participant-state"}))
+        for bad in (None, {"sdpMLineIndex": 0}, "text"):
+            await socket.notify("transmitted-data", participantId="remote", data={"candidate": bad})
+        await asyncio.sleep(.1)
+        assert not call.closed and states[-1] == "active", states
+        logged = [c.args[0] for c in log.call_args_list]
+        assert "voice call: candidate not acknowledged" in logged
+        assert "voice call: service error other" in logged  # the untrusted text is not logged
+        assert "voice call: service error illegal-participant-state" in logged
+        assert logged.count("voice call: invalid candidate skipped") == 3
+        assert not any("private" in line for line in logged)
+    await socket.queue.put(json.dumps({"type": "error", "error": "conversation-ended"}))
+    await until(lambda: call.closed)
+    await asyncio.gather(call.task, return_exceptions=True)
+    assert states[-1] == "failed" and Audio.made[-1].closed
+
+    # The end is told at once, before the hang-up is through (a slow network),
+    # and a local hang-up closing the socket under recv() is no failure.
+    gate = asyncio.Event()
+    class Slow(Socket):
+        async def send(self, raw):
+            if raw != "pong" and json.loads(raw).get("command") == "hangup":
+                await gate.wait()
+            await super().send(raw)
+        async def recv(self):
+            if self.closed:
+                raise ConnectionError("closed")
+            closing = asyncio.create_task(self.closing.wait())
+            got = asyncio.create_task(self.queue.get())
+            await asyncio.wait({closing, got}, return_when=asyncio.FIRST_COMPLETED)
+            closing.cancel()
+            if got.done():
+                return got.result()
+            got.cancel()
+            raise ConnectionError("closed")
+        async def close(self):
+            self.closed = True
+            self.closing.set()
+    socket = Slow()
+    socket.closing = asyncio.Event()
+    states = []
+    call = bm.VoiceCall("slow-hangup", "test-person", False,
+                        lambda call, state: states.append(state), audio=Audio,
+                        connect=lambda *args, **kwargs: socket)
+    with patch.object(bm, "log_line") as log:
+        call.start(dict(params))
+        await until(lambda: "change-participant-state" in socket.commands())
+        ending = asyncio.create_task(call.end("CANCELED"))
+        await until(lambda: states and states[-1] == "ended")
+        assert not ending.done() and "hangup" not in socket.commands()  # told first
+        gate.set()
+        await ending
+        await asyncio.gather(call.task, return_exceptions=True)
+        assert socket.commands()[-1] == "hangup" and socket.closed
+        assert states.count("ended") == 1
+        assert not any("signalling failed" in c.args[0] for c in log.call_args_list)
+    ok("refused candidates, stray and malformed frames keep a call; the end is told before the hang-up goes")
+
+
 async def main():
     await end_logging()
     await video_dial_flag()
@@ -1092,6 +1177,7 @@ async def main():
     await quit_during_dial()
     await quit_during_dial(fails=True)
     await missed_calls()
+    await signalling_tolerance()
 
 
 asyncio.run(main())

@@ -57,7 +57,9 @@ async def video_pair():
         for peer in peers:
             peer.video_size = (160, 120, 10)
             peer.set_video(True)
-        await wait(lambda: all(p.get(True) == (160, 120) for p in pictures))
+        # Within the step's longer side (sizes are ranges since #60: a camera
+        # keeps its proportions; the test source has none and gives a square).
+        await wait(lambda: all(max(p.get(own, (0, 0))) == 160 for p in pictures for own in (True, False)))
         await asyncio.sleep(.5)
         for peer in peers:
             counters = await peer.stats()
