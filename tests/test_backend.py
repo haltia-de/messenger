@@ -159,7 +159,11 @@ assert back(B.react(anna, m.id, None)) is None  # no counts from MAX: the window
 fake.media[(anna, m.id, "video")] = "https://vd.okcdn.ru/v.mp4"
 assert back(B.media_url(anna, m.id, {"kind": "video", "id": 5})) == "https://vd.okcdn.ru/v.mp4"
 fake.reaction(anna, m.id, [("😂", 1)])
-while not said(ui, "reacted"):
+# an earlier "reacted" may be told first: wait for this one (it raced)
+for _ in range(500):
+    if said(ui, "reacted") and said(ui, "reacted")[-1] == (anna, m.id, [["😂", 1]], ...):
+        break
+    threading.Event().wait(.01)
     drain()
 assert said(ui, "reacted")[-1] == (anna, m.id, [["😂", 1]], ...)
 ok("messages, reactions")

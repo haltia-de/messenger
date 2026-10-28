@@ -209,6 +209,16 @@ with patch.object(app.list, "invalidate_sort") as resort:
     app.show_list()
     spin(0.1)
 assert not resort.called and rows() == [dacha, mama]
+# a full fill of many new rows (the first login's): the top ones at once, the rest by idle
+for row in list(app.rows.values()):
+    row.destroy()
+app.rows.clear()
+with patch.object(bm, "ROWS_FIRST", 1), patch.object(bm, "ROWS_STEP", 1):
+    app.fill_list()
+    assert len(app.rows) == 1 and rows() == [dacha]  # the top chat first
+    wait(lambda: set(app.rows) == set(app.chatlist.chats), what="the other rows")
+spin(0.1)
+assert rows() == [dacha, mama] and app.rows_timer is None
 ok("list")
 
 # --- the settings: what is changed often first, the rest under «Дополнительно» -------------
@@ -1175,7 +1185,10 @@ app.choose_files = lambda: [pic, doc]
 app.clip.clicked()
 chips = app.attachbar.get_children()
 assert app.attachbar.get_visible() and [c.attachment["kind"] for c in chips] == ["photo", "file"]
-assert any(isinstance(w, Gtk.Image) for w in chips[0].get_children())  # the photo, small
+# the photo, small: decoded by a thread, its name meanwhile
+wait(lambda: any(isinstance(w, Gtk.Image) for w in app.attachbar.get_children()[0].get_children()),
+     what="the photo's small picture")
+chips = app.attachbar.get_children()
 spin(0.1)
 assert all(c.get_visible() for c in chips) and app.attachbar.get_allocated_height() > 50
 [b for b in chips[1].get_children() if isinstance(b, Gtk.Button)][0].clicked()  # its ✕
