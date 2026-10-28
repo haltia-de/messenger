@@ -1,3 +1,10 @@
+haltia-messenger (2.9.7) unstable; urgency=medium
+
+  * Run the program's code from a module, so that Python loads it
+    compiled.
+
+ -- Haltia <rensomail@gmail.com>  Wed, 28 Oct 2026 14:00:00 +0300
+
 haltia-messenger (2.9.6) unstable; urgency=medium
 
   * Start faster: network modules load on first use.
