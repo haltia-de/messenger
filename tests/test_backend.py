@@ -8,6 +8,7 @@ import json
 import os
 import shutil
 import subprocess
+import tempfile
 import threading
 
 from common import load, ok
@@ -919,3 +920,51 @@ with patch.object(bm.os, "fdopen", dropping):
     c.flush()
 assert not os.path.exists(c._path(10)) and not os.path.exists(c._path(10) + ".new")
 ok("the message cache")
+
+# --- a deletion naming no chat, an emptied known.json, a page of no times ----
+d = bm.MessageCache(tempfile.mkdtemp())
+d.add("tg:1", [{"id": 101, "time": 1}])
+d.add("tg:2", [{"id": 202, "time": 1}])
+d.add("tg:3", [{"id": 303, "time": 1}])
+d.flush()
+d2 = bm.MessageCache(d.folder)
+d2.read("tg:1")  # in memory; tg:2 and tg:3 only on disk
+assert sorted(d2.chats_with({101, 202}, ["tg:1", "tg:2", "tg:3", "tg:4"])) == ["tg:1", "tg:2"]
+assert set(d2.chats) == {"tg:1"}  # the others' files read, not kept
+with open(d2._path("tg:3"), "w") as fh:
+    fh.write("not json")
+assert d2.chats_with({303}, ["tg:3"]) == []
+os.makedirs(os.path.dirname(bm.KNOWN), exist_ok=True)
+with open(bm.KNOWN, "w"):
+    pass  # left empty by a power loss: fails closed, never seeded again
+be = bm.Backend(UI(), fake)
+assert be.accounts["max"].seeded and be.accounts["max"].known == set()
+run(be.accounts["max"].on_login(fake.me, list(fake.rooms.values()), [], fake.agent, 7))
+assert be.accounts["max"].known == set()  # no stranger let through by a seeding
+os.remove(bm.KNOWN)  # no file at all: the first run, seeded at the login
+assert not bm.Backend(UI(), fake).accounts["max"].seeded
+bm.save_json(bm.KNOWN, [[1], {"a": 1}, ANNA])  # odd entries are dropped, not a crash
+assert bm.Backend(UI(), fake).accounts["max"].known == {ANNA}
+bm.save_json(bm.KNOWN, [ANNA])
+assert bm.Backend(UI(), fake).accounts["max"].seeded
+bm.save_json(bm.KNOWN, [])  # nobody known is a state: strangers stay strangers
+bs = bm.Backend(UI(), fake)
+assert bs.accounts["max"].seeded
+run(bs.accounts["max"].on_login(fake.me, list(fake.rooms.values()), [], fake.agent, 7))
+stranger = next(r for r in fake.rooms.values() if r.kind == "DIALOG")  # nobody known: any dialog
+assert bs.accounts["max"].known == set() and bs.accounts["max"].summary(stranger)["stranger"]
+for broken in ('{"ids": [1]}', "[1, 2"):
+    with open(bm.KNOWN, "w") as fh:
+        fh.write(broken)
+    bb = bm.Backend(UI(), fake)
+    assert bb.accounts["max"].seeded and bb.accounts["max"].known == set()
+bz = bm.Backend(UI(), fake)
+zero = bm.Chat(id=999, kind="CHAT", title="без времени", members=[], count=0, unread=0, last=None, time=0)
+pages = []
+async def no_times(marker):
+    pages.append(marker)
+    return [zero]
+bz.accounts["max"].link.chats_page = no_times
+run(bz.accounts["max"].on_login(fake.me, list(fake.rooms.values()), [], fake.agent, 7))
+assert pages == [None] and 999 in bz.accounts["max"].chats  # no ValueError, the list is told
+ok("a deletion without its chat reads no file into memory; an empty known.json seeds again; a page without times")
