@@ -46,15 +46,22 @@ Runtime deps: Python 3, PyGObject/GTK 3, `haltia-kit` 2 (github.com/haltia-de/ki
 Telethon 1.43.2 for Telegram (Alpine `py3-telethon`; trixie's 1.40 is enough, noble's 1.25 is not:
 `debian/vendor.list` puts the wheel there; the Flatpak builds pyaes from its sources, PyPI has no wheel),
 optionally `py3-mpv mpv-libs` (voice) and `font-noto-emoji`; `wget`/`unzip`/`sha256sum` for
-`install.sh`. `install.sh [ROOT] [PREFIX]` installs the script to `PREFIX/bin` (and the `b8k-max`
-link), `data/` (the
+`install.sh`. `install.sh [ROOT] [PREFIX]` installs the script as the module
+`PREFIX/lib/haltia-messenger/haltia_messenger_main.py` and writes `PREFIX/bin/haltia-messenger` (and the
+`b8k-max` link) as a stub that runs it with `runpy.run_module(..., run_name="__main__",
+alter_sys=False)`: Python keeps no bytecode of the script it is started with, so the 450 KB script was
+compiled at every start, while a module loads from its `__pycache__` (the package compiles it).
+`sys.argv` and the command line (`python3 PREFIX/bin/haltia-messenger`, which the shell matches; the
+stub keeps the script's `#!/usr/bin/env python3`) stay
+as they were; `__file__` is the module's, so paths from it go up two levels to `PREFIX` (`ringtone_file`).
+It installs `data/` (the
 `.desktop` file with `X-B8K-Home`/`X-B8K-Replaces=max`, the hicolor SVG icon, AppStream metainfo)
 to `PREFIX/share` (and the old id's hidden `.desktop`), the XDG autostart file (`--background`, `X-B8K-Autostart`) to
 `ROOT/etc/xdg/autostart`, downloads the pinned PyMax wheel (`maxapi_python-2.4.1`, sha256 checked;
 cached in `$HALTIA_CACHE`, default `.cache/`) into `PREFIX/lib/haltia-messenger`, and removes
-what `b8k-max` put under that prefix and the shell's old `apps.d/max.conf`. The script looks for
+what `b8k-max` put under that prefix and the shell's old `apps.d/max.conf`. The program looks for
 PyMax in `/usr/local/lib/haltia-messenger`, `/usr/lib/haltia-messenger` and
-`../lib/haltia-messenger` from itself. Bumping PyMax: the wheel name and sha256 in `install.sh` (and the
+`../lib/haltia-messenger` from its command (`sys.argv[0]`). Bumping PyMax: the wheel name and sha256 in `install.sh` (and the
 APKBUILD's `_whl`).
 
 Other packages (haltia-de/haltia's `docs/plans/desktop-packages.md`), published only in Haltia's own
@@ -63,7 +70,9 @@ repositories, never on Flathub (an unofficial client):
   `haltia-kit.yml` (a copy of the kit's module), libass, libplacebo and mpv (libmpv for voice and
   the `mpv` that opens videos; flathub/shared-modules has no libmpv), then PyMax and its packages
   as PyPI wheels by sha256: pure ones where PyPI has them, cp314 for x86_64 and aarch64
-  (`only-arches`) otherwise; their versions are `requirements.txt`'s. Build from the checkout
+  (`only-arches`) otherwise; their versions are `requirements.txt`'s. The program's module writes
+  the same stub as `install.sh` and compiles `/app/lib/haltia-messenger` (checked-hash: `/app` is
+  read-only and OSTree drops mtimes). Build from the checkout
   (Flatpak's builder cannot see `/tmp`): `flatpak run org.flatpak.Builder --user --install
   --force-clean build packaging/flatpak/io.github.haltia_de.Messenger.yml`. A `flatpak run` left
   over keeps the single instance: `flatpak kill io.github.haltia_de.Messenger` before another.

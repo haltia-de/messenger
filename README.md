@@ -220,8 +220,9 @@ sh install.sh                # в /, под /usr/local (нужен root)
 sh install.sh /mnt/root /usr # в другой корень и префикс (так делает пакет)
 ```
 
-`install.sh` кладёт программу в `PREFIX/bin/haltia-messenger`, PyMax — в
-`PREFIX/lib/haltia-messenger`, `.desktop`-файл, значок и описание AppStream — в
+`install.sh` кладёт программу в `PREFIX/lib/haltia-messenger/haltia_messenger_main.py`
+(`PREFIX/bin/haltia-messenger` — короткая заглушка, которая её запускает: так Python
+берёт уже скомпилированный код), PyMax — в `PREFIX/lib/haltia-messenger`, `.desktop`-файл, значок и описание AppStream — в
 `PREFIX/share`, файл автозапуска — в `/etc/xdg/autostart`. Сборка
 пакетов: `packaging/alpine/APKBUILD`, `debian/` и `packaging/flatpak/`, выпуск по
 тегу — `haltia-de/ci`.

@@ -2101,10 +2101,13 @@ def ring_volume():
 
 
 def ringtone_file():
-    """Our bundled melody in a checkout or under the installation prefix."""
+    """Our bundled melody in a checkout or under the installation prefix,
+    where this code is PREFIX/lib/haltia-messenger/haltia_messenger_main.py
+    (PREFIX/bin/haltia-messenger, as an older install.sh put it)."""
     here = os.path.dirname(os.path.realpath(__file__))
     for path in (os.path.join(here, "data", "ringtone.wav"),
-                 os.path.join(here, "..", "share", "haltia-messenger", "ringtone.wav")):
+                 os.path.join(here, "..", "share", "haltia-messenger", "ringtone.wav"),
+                 os.path.join(here, "..", "..", "share", "haltia-messenger", "ringtone.wav")):
         if os.path.isfile(path):
             return os.path.abspath(path)
     raise FileNotFoundError("ringtone.wav")

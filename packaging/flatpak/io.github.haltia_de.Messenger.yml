@@ -190,12 +190,27 @@ modules:
   - name: haltia-messenger
     buildsystem: simple
     build-commands:
-      - install -D -m 755 haltia-messenger /app/bin/haltia-messenger
+      # The program runs from a module, which Python loads compiled; /app/bin/haltia-messenger
+      # is a stub, as install.sh writes it.
+      - install -D -m 644 haltia-messenger /app/lib/haltia-messenger/haltia_messenger_main.py
+      - |
+        mkdir -p /app/bin
+        cat > /app/bin/haltia-messenger <<'EOF'
+        #!/usr/bin/env python3
+        # The code is /app/lib/haltia-messenger/haltia_messenger_main.py, run from there so that Python loads it compiled.
+        import runpy
+        import sys
+        sys.path.insert(0, "/app/lib/haltia-messenger")
+        runpy.run_module("haltia_messenger_main", run_name="__main__", alter_sys=False)
+        EOF
+        chmod 755 /app/bin/haltia-messenger
       - install -D -m 644 data/io.github.haltia_de.Messenger.desktop /app/share/applications/io.github.haltia_de.Messenger.desktop
       - install -D -m 644 data/io.github.haltia_de.Messenger.svg /app/share/icons/hicolor/scalable/apps/io.github.haltia_de.Messenger.svg
       - install -D -m 644 data/io.github.haltia_de.Messenger.metainfo.xml /app/share/metainfo/io.github.haltia_de.Messenger.metainfo.xml
       - install -D -m 644 data/ringtone.wav /app/share/haltia-messenger/ringtone.wav
       - install -D -m 644 data/ringtone.md /app/share/haltia-messenger/ringtone.md
+      # Compiled here, as /app is read-only when it runs (hashes: OSTree drops mtimes).
+      - python3 -m compileall -q --invalidation-mode checked-hash /app/lib/haltia-messenger
     sources:
       - type: dir
         path: ../..

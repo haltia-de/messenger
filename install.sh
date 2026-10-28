@@ -17,9 +17,6 @@ here=$(cd "$(dirname "$0")" && pwd)
 share=$root$prefix/share
 app=io.github.haltia_de.Messenger
 old=io.github.trudenboy.Max  # b8k-max before 2.0
-install -D -m 755 "$here/haltia-messenger" "$root$prefix/bin/haltia-messenger"
-# The old command, till 3.0.
-ln -sf haltia-messenger "$root$prefix/bin/b8k-max"
 install -D -m 644 "$here/data/$app.desktop" "$share/applications/$app.desktop"
 install -D -m 644 "$here/data/$app.svg" "$share/icons/hicolor/scalable/apps/$app.svg"
 install -D -m 644 "$here/data/$app.metainfo.xml" "$share/metainfo/$app.metainfo.xml"
@@ -41,6 +38,24 @@ lib=$root$prefix/lib/haltia-messenger
 rm -rf "$lib"
 mkdir -p "$lib"
 unzip -q -o "$cache/$whl" -d "$lib"
+# The program runs from a module, which Python loads compiled (its
+# __pycache__, made by the package), while the script Python is started
+# with is compiled anew at every start. PREFIX/bin/haltia-messenger is a stub that
+# runs the module as __main__ with sys.argv as given: the shell knows the
+# program by its command line, python3 PREFIX/bin/haltia-messenger.
+install -D -m 644 "$here/haltia-messenger" "$root$prefix/lib/haltia-messenger/haltia_messenger_main.py"
+mkdir -p "$root$prefix/bin"
+cat > "$root$prefix/bin/haltia-messenger" <<EOF
+#!/usr/bin/env python3
+# The code is $prefix/lib/haltia-messenger/haltia_messenger_main.py, run from there so that Python loads it compiled.
+import runpy
+import sys
+sys.path.insert(0, "$prefix/lib/haltia-messenger")
+runpy.run_module("haltia_messenger_main", run_name="__main__", alter_sys=False)
+EOF
+chmod 755 "$root$prefix/bin/haltia-messenger"
+# The old command, till 3.0.
+ln -sf haltia-messenger "$root$prefix/bin/b8k-max"
 # What b8k-max (before 2.0) installed under this prefix, and the shell's
 # old entry for it from before the .desktop file (a package's old files go
 # with the old package).

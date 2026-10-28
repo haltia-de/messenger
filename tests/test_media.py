@@ -58,6 +58,11 @@ with tempfile.TemporaryDirectory() as prefix:
     shutil.copyfile(ringtone, installed)
     with patch.object(bm, "__file__", os.path.join(prefix, "bin", "haltia-messenger")):
         assert bm.ringtone_file() == installed
+    # install.sh puts the code in PREFIX/lib/haltia-messenger, under a stub in bin.
+    main = os.path.join(prefix, "lib", "haltia-messenger", "haltia_messenger_main.py")
+    os.makedirs(os.path.dirname(main))
+    with patch.object(bm, "__file__", main):
+        assert bm.ringtone_file() == installed
 ok("bundled ringtone PCM, headroom, phrases, quiet tail and installation-prefix lookup")
 
 
