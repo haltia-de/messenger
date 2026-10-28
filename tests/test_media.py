@@ -20,12 +20,16 @@ from fake_hands import FakeHands  # noqa: E402
 from gi.repository import GLib  # noqa: E402
 
 
-def drain(sec=0.5):
+def drain(sec=0.5, until=None):
+    """Run the main loop for sec, or until until() holds (a photo is scaled
+    on a thread of its own, which may take longer on a busy machine)."""
     end = time.monotonic() + sec
     ctx = GLib.MainContext.default()
     while time.monotonic() < end:
         while ctx.iteration(False):
             pass
+        if until is not None and until():
+            return
         time.sleep(0.01)
 
 
@@ -84,19 +88,21 @@ media.photo("https://evil.com/p.png", got.append)
 drain(0.2)
 assert not hands.fetched and not got and "photo refused: evil.com/p.png" in log()
 media.photo("https://i.oneme.ru/p.png?sig=SECRET", got.append)
-drain()
+drain(5, lambda: got)
 assert hands.fetched == [("https://i.oneme.ru/p.png?sig=SECRET", {"User-Agent": media.agent})]
 assert got and got[-1] is not None, (got, log())
 cached = [n for n in os.listdir(bm.PHOTOS) if n.endswith(".img")]
 assert len(cached) == 1
 path = os.path.join(bm.PHOTOS, cached[0])
 os.utime(path, (0, 0))
+n = len(got)
 media.photo("https://i.oneme.ru/p.png?sig=SECRET", got.append)
-drain()
+drain(5, lambda: len(got) > n)
 assert len(hands.fetched) == 1 and os.path.getmtime(path) > time.time() - 60  # cached, touched
 hands.photo_bytes = b"not a picture"
+n = len(got)
 media.photo("https://i.oneme.ru/broken.png", got.append)
-drain()
+drain(5, lambda: len(got) > n)
 assert got[-1] is None and "photo i.oneme.ru/broken.png" in log()
 old = os.path.join(bm.PHOTOS, "old.img")
 open(old, "w").close()

@@ -20,6 +20,18 @@
   </content_rating>
   <requires><control>touch</control></requires>
   <releases>
+    <release version="2.9.6" date="2026-10-28">
+      <description>
+        <p>Messages starts faster: its network parts load when they are first needed, not before the window appears.</p>
+        <p>Photos and attached pictures are scaled in the background, so the window does not stutter. A long chat list at the first sign-in fills in steps, and the first chats show at once. The «↓» button over a chat is drawn more simply and no longer slows scrolling.</p>
+        <p>A message deleted in Telegram is removed without going through every chat.</p>
+        <p>A message that arrives during a reconnect is no longer lost. The list of known people is saved safely and survives a sudden power loss. If its file is damaged, the strangers filter stays closed. A stuck attachment download is cancelled.</p>
+        <p xml:lang="ru">Сообщения открываются быстрее: сетевые части загружаются, когда они понадобятся, а не до появления окна.</p>
+        <p xml:lang="ru">Фотографии и прикреплённые картинки уменьшаются в фоне, поэтому окно не подтормаживает. Длинный список чатов при первом входе заполняется частями, и первые чаты видны сразу. Кнопка «↓» над чатом рисуется проще и не замедляет прокрутку.</p>
+        <p xml:lang="ru">Удалённое в Telegram сообщение убирается без перебора всех чатов.</p>
+        <p xml:lang="ru">Сообщение, пришедшее во время переподключения, больше не теряется. Список знакомых людей сохраняется надёжно и переживает внезапное отключение питания. Если его файл повреждён, фильтр незнакомцев остаётся закрытым. Зависшая загрузка вложения отменяется.</p>
+      </description>
+    </release>
     <release version="2.9.5" date="2026-10-23">
       <description>
         <p>While an outgoing call rings, you hear a ringback tone.</p>
