@@ -1,3 +1,15 @@
+haltia-messenger (2.9.6) unstable; urgency=medium
+
+  * Start faster: network modules load on first use.
+  * Scale photos and attached pictures off the window's thread, fill a long
+    first chat list in steps, and draw the «↓» button without a blur.
+  * Find a deleted Telegram message's chat without loading every chat.
+  * Keep a message received during a reconnect and the known people through
+    a power loss; keep the strangers filter closed when its file is damaged;
+    cancel a stuck download.
+
+ -- Haltia <rensomail@gmail.com>  Wed, 28 Oct 2026 12:00:00 +0300
+
 haltia-messenger (2.9.5) unstable; urgency=medium
 
   * While an outgoing call rings, you hear a ringback tone.

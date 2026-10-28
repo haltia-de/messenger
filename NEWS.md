@@ -1,5 +1,27 @@
 # Что нового · What's new
 
+## 2.9.6 (2026-10-28)
+
+### Русский
+
+Сообщения открываются быстрее: сетевые части загружаются, когда они понадобятся, а не до появления окна.
+
+Фотографии и прикреплённые картинки уменьшаются в фоне, поэтому окно не подтормаживает. Длинный список чатов при первом входе заполняется частями, и первые чаты видны сразу. Кнопка «↓» над чатом рисуется проще и не замедляет прокрутку.
+
+Удалённое в Telegram сообщение убирается без перебора всех чатов.
+
+Сообщение, пришедшее во время переподключения, больше не теряется. Список знакомых людей сохраняется надёжно и переживает внезапное отключение питания. Если его файл повреждён, фильтр незнакомцев остаётся закрытым. Зависшая загрузка вложения отменяется.
+
+### English
+
+Messages starts faster: its network parts load when they are first needed, not before the window appears.
+
+Photos and attached pictures are scaled in the background, so the window does not stutter. A long chat list at the first sign-in fills in steps, and the first chats show at once. The «↓» button over a chat is drawn more simply and no longer slows scrolling.
+
+A message deleted in Telegram is removed without going through every chat.
+
+A message that arrives during a reconnect is no longer lost. The list of known people is saved safely and survives a sudden power loss. If its file is damaged, the strangers filter stays closed. A stuck attachment download is cancelled.
+
 ## 2.9.5 (2026-10-23)
 
 ### Русский
