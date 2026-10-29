@@ -177,6 +177,7 @@ async def pair(passive=False):
             peer.close()
             peer.close()  # cleanup is idempotent, including partially built pipelines
             assert peer.pipeline is None and peer.rtc is None and peer.bus is None
+            peer.stopped.result(5)  # stopped on MEDIA_WORKER, not on the loop
         assert all(pipeline.get_state(0)[1] == peers[0].Gst.State.NULL for pipeline in pipelines)
         assert all(not rtc.handler_is_connected(handler) for rtc, ids in handlers for handler in ids)
         loop.set_exception_handler(previous_handler)

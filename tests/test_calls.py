@@ -281,6 +281,96 @@ def sender_rebuilt():
 sender_rebuilt()
 
 
+def stand_in_audio(pipeline):
+    """A CallAudio as the call holds it, on a stand-in pipeline."""
+    audio = bm.CallAudio.__new__(bm.CallAudio)
+    audio.Gst = SimpleNamespace(State=SimpleNamespace(NULL="null"),
+                                PadDirection=SimpleNamespace(SRC="src"))
+    audio.closed, audio.video_generation, audio.camera = False, 0, None
+    audio.frame = audio.video_bin = audio.video_pad = audio.rtc = audio.bus = None
+    audio.signals, audio.pending, audio.failed_bins = [], [], []
+    audio.candidate = audio.status = lambda _value: None
+    audio.sink, audio.video_ok, audio.remote_bin = "fakesink", True, None
+    audio.pipeline = pipeline
+    return audio
+
+
+class StoppingPipeline:
+    """Stops its children with itself, as a Gst.Bin does."""
+    def __init__(self, release=None):
+        self.state, self.children, self.release = "playing", [], release
+        self.stopping = threading.Event()
+    def add(self, element):
+        self.children.append(element)
+    def set_state(self, state):
+        self.stopping.set()
+        if self.release is not None:
+            self.release.wait(5)  # the microphone's and libnice's threads stopping
+        self.state = state
+        for child in self.children:
+            child.set_state(state)
+        return "success"
+
+
+def media_teardown():
+    # MSG2-12 (#84): hanging up stopped the pipeline on the asyncio loop,
+    # which waited for every streaming thread. Now MEDIA_WORKER does.
+    import time
+    release = threading.Event()
+    pipeline = StoppingPipeline(release)
+    audio = stand_in_audio(pipeline)
+    began = time.monotonic()
+    audio.close()
+    assert time.monotonic() - began < 1, "close() waited for the pipeline"
+    assert pipeline.stopping.wait(5) and pipeline.state == "playing"  # still stopping
+    assert audio.closed and audio.pipeline is None
+    stopped = audio.stopped
+    audio.close()  # idempotent: stopped once
+    assert audio.stopped is stopped
+    release.set()
+    assert stopped.result(5) == "success" and pipeline.state == "null"
+    ok("a call's pipeline stops on its own worker, never on the loop")
+
+    # MSG2-13 (#84): a peer's stream added by its streaming thread while the
+    # loop hangs up. The bin read its parent's PLAYING, then the pipeline
+    # stopped before the bin followed: it was left playing in a dead call.
+    pipeline = StoppingPipeline()
+    audio = stand_in_audio(pipeline)
+    audio._phone_streams = lambda _bin: None
+
+    class Received:
+        state = "null"
+        def get_static_pad(self, _name):
+            return "sink"
+        def sync_state_with_parent(self):
+            seen = pipeline.state
+            audio.close()  # on the loop, meanwhile
+            deadline = time.monotonic() + 5
+            while pipeline.state != "null" and time.monotonic() < deadline:
+                time.sleep(.01)
+            self.state = seen
+        def set_state(self, state):
+            self.state = state
+    received = Received()
+    audio.Gst.parse_bin_from_description = lambda _description, _ghost: received
+    structure = SimpleNamespace(get_string=lambda _field: "audio")
+    caps = SimpleNamespace(get_structure=lambda _n: structure)
+    linked = []
+    pad = SimpleNamespace(direction="src", get_current_caps=lambda: caps, link=linked.append)
+    audio._received(None, pad)
+    assert received in pipeline.children and linked == ["sink"]
+    assert pipeline.state == "null" and received.state == "null", received.state
+    # Once closed, a stream coming late is not added at all.
+    late = Received()
+    audio.Gst.parse_bin_from_description = lambda _description, _ghost: late
+    audio._received(None, pad)
+    assert late not in pipeline.children and late.state == "null"
+    ok("a peer's stream added while the call closes is stopped with it")
+
+
+media_teardown()
+
+
 def literal(value):
     data = json.dumps(value).encode()
     n = len(data) - 15
