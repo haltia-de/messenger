@@ -125,6 +125,7 @@ async def pair(passive=False):
                                      states[n].add, {},
                                      source="audiotestsrc is-live=true wave=sine",
                                      sink="fakesink name=received sync=false signal-handoffs=true"))
+            await peers[-1].start()
             if n == 0:
                 offer = await peers[0].description("offer")
         assert "m=audio" in offer["sdp"] and "m=video" in offer["sdp"]

@@ -2,8 +2,10 @@
 """Calls on a fake signalling service: no account, network or microphone."""
 import asyncio
 import base64
+import concurrent.futures
 import json
 import threading
+import time
 from unittest.mock import AsyncMock, Mock, patch
 from types import SimpleNamespace
 from common import load, ok
@@ -266,15 +268,19 @@ def sender_rebuilt():
     audio.pipeline.add(audio.video_bin)
     audio.video_bin.get_static_pad("src").link(audio.video_pad)
     old = audio.video_bin
-    assert audio.rebuild_sender()
-    assert audio.video_bin is not old and old.get_parent() is None
-    assert audio.video_bin.get_by_name("video_pay").get_property("pt") == 102
-    assert audio.video_bin.get_by_name("video_encoder").get_property("target-bitrate") == \
-        bm.VIDEO_BITRATE[audio.video_size[0]]  # not vp8enc's default
-    assert audio.video_bin.get_static_pad("src").get_peer() == audio.video_pad
-    audio.closed = True
-    assert not audio.rebuild_sender()
-    audio.pipeline.set_state(Gst.State.NULL)
+
+    async def rebuild():
+        assert await audio.rebuild_sender()
+        assert audio.video_bin is not old and old.get_parent() is None
+        assert audio.video_bin.get_by_name("video_pay").get_property("pt") == 102
+        assert audio.video_bin.get_by_name("video_encoder").get_property("target-bitrate") == \
+            bm.VIDEO_BITRATE[audio.video_size[0]]  # not vp8enc's default
+        assert audio.video_bin.get_static_pad("src").get_peer() == audio.video_pad
+        audio.closed = True
+        assert not await audio.rebuild_sender()
+        audio.pipeline.set_state(Gst.State.NULL)
+
+    asyncio.run(rebuild())
     ok("a failed video sender is rebuilt on the same pad with the same payload")
 
 
@@ -284,13 +290,17 @@ sender_rebuilt()
 def stand_in_audio(pipeline):
     """A CallAudio as the call holds it, on a stand-in pipeline."""
     audio = bm.CallAudio.__new__(bm.CallAudio)
-    audio.Gst = SimpleNamespace(State=SimpleNamespace(NULL="null"),
-                                PadDirection=SimpleNamespace(SRC="src"))
-    audio.closed, audio.video_generation, audio.camera = False, 0, None
+    audio.Gst = SimpleNamespace(State=SimpleNamespace(NULL="null", PLAYING="playing"),
+                                StateChangeReturn=SimpleNamespace(FAILURE="failure"),
+                                PadDirection=SimpleNamespace(SRC="src"),
+                                PadLinkReturn=SimpleNamespace(OK="ok"),
+                                Caps=SimpleNamespace(from_string=lambda text: text))
+    audio.closed, audio.video_generation, audio.media_generation, audio.camera = False, 0, 0, None
     audio.frame = audio.video_bin = audio.video_pad = audio.rtc = audio.bus = None
     audio.signals, audio.pending, audio.failed_bins = [], [], []
     audio.candidate = audio.status = lambda _value: None
     audio.sink, audio.video_ok, audio.remote_bin = "fakesink", True, None
+    audio.video_size = (320, 240, 15)
     audio.pipeline = pipeline
     return audio
 
@@ -310,6 +320,50 @@ class StoppingPipeline:
         for child in self.children:
             child.set_state(state)
         return "success"
+
+
+class DelayedState:
+    """A Gst element stand-in: set_state waits until release is set."""
+
+    def __init__(self, release, order=None, name="el"):
+        self.release, self.order, self.name = release, order if order is not None else [], name
+        self.states, self.started, self.fail = [], threading.Event(), False
+
+    def set_state(self, state):
+        self.started.set()
+        assert self.release.wait(5)
+        if self.fail:
+            return "failure"
+        self.states.append(state)
+        self.order.append((self.name, state))
+        return "success"
+
+
+class FakeBin:
+    """A video sender stand-in for rebuild_sender/remote without GStreamer."""
+
+    def __init__(self, delayed=None, pt=96):
+        self.delayed, self.pt, self.synced, self.caps = delayed, pt, False, None
+        self.encoder_rate = None
+
+    def set_state(self, state):
+        return self.delayed.set_state(state) if self.delayed is not None else "success"
+
+    def get_by_name(self, name):
+        if name == "video_pay":
+            return SimpleNamespace(get_property=lambda _p: self.pt,
+                                   set_property=lambda _k, value: setattr(self, "pt", value))
+        if name == "video_encoder":
+            return SimpleNamespace(set_property=lambda _k, value: setattr(self, "encoder_rate", value))
+        if name == "video_caps":
+            return SimpleNamespace(set_property=lambda _k, value: setattr(self, "caps", value))
+        return None
+
+    def get_static_pad(self, _name):
+        return SimpleNamespace(unlink=lambda _pad: None, link=lambda _pad: "ok")
+
+    def sync_state_with_parent(self):
+        self.synced = True
 
 
 def media_teardown():
@@ -1246,7 +1300,285 @@ async def signalling_tolerance():
     ok("refused candidates, stray and malformed frames keep a call; the end is told before the hang-up goes")
 
 
+async def media_state_transitions():
+    # Remaining MSG2-12 (#84): PLAYING, rebuild_sender's old NULL and remote()'s
+    # video-bin NULL still ran on the loop. Delayed fakes keep the loop moving
+    # and preserve caller order; close/stale generation/failure drop the work.
+
+    async def poke_while(pending):
+        ticks = []
+        while not pending.done():
+            ticks.append(True)
+            await asyncio.sleep(.01)
+        return ticks
+
+    def collecting_pipeline():
+        pipe = SimpleNamespace(added=[], removed=[], state=None)
+        pipe.add = pipe.added.append
+        pipe.remove = pipe.removed.append
+        pipe.set_state = lambda state: setattr(pipe, "state", state) or "success"
+        return pipe
+
+    # start PLAYING in flight: the loop stays responsive, then PLAYING, then NULL.
+    release = threading.Event()
+    order = []
+    pipeline = DelayedState(release, order, "pipe")
+    audio = stand_in_audio(pipeline)
+    starting = asyncio.create_task(audio.start())
+    try:
+        await until(pipeline.started.is_set)
+        began = time.monotonic()
+        audio.close()
+        assert time.monotonic() - began < .5 and not starting.done()
+        poker = asyncio.create_task(poke_while(starting))
+        await asyncio.sleep(.05)
+        assert not starting.done()
+        release.set()
+        await starting
+        ticks = await poker
+        assert ticks, "PLAYING blocked the loop"
+        assert audio.stopped.result(5) == "success"
+        assert order == [("pipe", "playing"), ("pipe", "null")]
+    finally:
+        release.set()
+        if not starting.done():
+            starting.cancel()
+    ok("start PLAYING leaves the loop free; close in flight keeps PLAYING then NULL")
+
+    # PLAYING still queued behind a stuck FIFO job: close queues NULL after it.
+    occupied, hold = threading.Event(), threading.Event()
+    release = threading.Event()
+    release.set()
+    order = []
+    pipeline = DelayedState(release, order, "pipe")
+    audio = stand_in_audio(pipeline)
+    bm.MEDIA_WORKER.submit(lambda: occupied.set() or hold.wait(5))
+    assert occupied.wait(5)
+    try:
+        starting = asyncio.create_task(audio.start())
+        await asyncio.sleep(.05)
+        assert not pipeline.started.is_set() and not starting.done()
+        audio.close()
+        hold.set()
+        await starting
+        assert audio.stopped.result(5) == "success"
+        assert order == [("pipe", "playing"), ("pipe", "null")]
+    finally:
+        hold.set()
+    ok("start PLAYING queued on the FIFO still runs before the close NULL")
+
+    # PLAYING failure closes the pipeline.
+    release = threading.Event()
+    release.set()
+    pipeline = DelayedState(release, name="fail")
+    pipeline.fail = True
+    audio = stand_in_audio(pipeline)
+    try:
+        await audio.start()
+        raise AssertionError("failed PLAYING must raise")
+    except RuntimeError:
+        pass
+    assert audio.closed and audio.pipeline is None
+    ok("start PLAYING failure closes the pipeline")
+
+    # rebuild_sender: old NULL in flight, loop free, then a new sender; close
+    # and a stale generation do not install one; FAILURE keeps the old bin.
+    release = threading.Event()
+    delayed = DelayedState(release, name="old")
+    old = FakeBin(delayed, pt=102)
+    pipe = collecting_pipeline()
+    audio = stand_in_audio(pipe)
+    audio.video_bin, audio.video_pad = old, "pad"
+    made = []
+    audio._sender_bin = lambda payload: made.append(FakeBin(pt=payload)) or made[-1]
+    rebuilding = asyncio.create_task(audio.rebuild_sender())
+    try:
+        await until(delayed.started.is_set)
+        poker = asyncio.create_task(poke_while(rebuilding))
+        await asyncio.sleep(.05)
+        assert not rebuilding.done()
+        release.set()
+        assert await rebuilding is True
+        assert await poker
+        assert pipe.removed == [old] and made and audio.video_bin is made[0]
+        assert made[0].pt == 102 and made[0].synced and made[0].encoder_rate == bm.VIDEO_BITRATE[320]
+    finally:
+        release.set()
+        if not rebuilding.done():
+            rebuilding.cancel()
+    ok("rebuild_sender waits for old NULL off the loop and keeps the payload")
+
+    release = threading.Event()
+    delayed = DelayedState(release, name="stale")
+    old = FakeBin(delayed)
+    audio = stand_in_audio(collecting_pipeline())
+    audio.video_bin, audio.video_pad = old, "pad"
+    audio._sender_bin = lambda _payload: FakeBin()
+    generation = audio.media_generation
+    rebuilding = asyncio.create_task(audio.rebuild_sender())
+    try:
+        await until(delayed.started.is_set)
+        audio.close()
+        release.set()
+        assert await rebuilding is False
+        assert audio.media_generation != generation and audio.video_bin is None
+    finally:
+        release.set()
+        if not rebuilding.done():
+            rebuilding.cancel()
+    ok("rebuild_sender drops a stale generation when close runs in flight")
+
+    release = threading.Event()
+    release.set()
+    delayed = DelayedState(release, name="fail")
+    delayed.fail = True
+    old = FakeBin(delayed)
+    pipe = collecting_pipeline()
+    audio = stand_in_audio(pipe)
+    audio.video_bin, audio.video_pad = old, "pad"
+    audio._sender_bin = lambda _payload: FakeBin()
+    assert await audio.rebuild_sender() is False
+    assert audio.video_bin is old and not pipe.removed
+    ok("rebuild_sender FAILURE keeps the old sender")
+
+    # remote(): video-bin NULL off the loop; payload after it; close skips it.
+    offer = {"type": "offer", "sdp": "v=0\r\nm=video 9 UDP/TLS/RTP/SAVPF 102\r\na=rtpmap:102 VP8/90000\r\n"}
+    promised = []
+
+    def stub_remote(audio):
+        audio.RTC = SimpleNamespace(WebRTCSDPType=SimpleNamespace(OFFER="offer", ANSWER="answer"),
+                                    WebRTCSessionDescription=SimpleNamespace(new=lambda kind, sdp: (kind, sdp)))
+        audio.Sdp = SimpleNamespace(SDPResult=SimpleNamespace(OK="ok"),
+                                    SDPMessage=SimpleNamespace(new_from_text=lambda _sdp: ("ok", object())))
+        async def promise(command, *_args):
+            promised.append(command)
+        audio._promise = promise
+
+    release = threading.Event()
+    delayed = DelayedState(release, name="video")
+    video = FakeBin(delayed, pt=96)
+    audio = stand_in_audio(StoppingPipeline())
+    audio.video_bin = video
+    stub_remote(audio)
+    remoting = asyncio.create_task(audio.remote(offer))
+    try:
+        await until(delayed.started.is_set)
+        poker = asyncio.create_task(poke_while(remoting))
+        await asyncio.sleep(.05)
+        assert not remoting.done() and video.pt == 96
+        release.set()
+        await remoting
+        assert await poker
+        assert video.pt == 102 and video.synced and promised == ["set-remote-description"]
+    finally:
+        release.set()
+        if not remoting.done():
+            remoting.cancel()
+    ok("remote() waits for video-bin NULL off the loop, then the payload and SDP")
+
+    promised.clear()
+    release = threading.Event()
+    delayed = DelayedState(release, name="closed")
+    video = FakeBin(delayed, pt=96)
+    audio = stand_in_audio(StoppingPipeline())
+    audio.video_bin = video
+    stub_remote(audio)
+    remoting = asyncio.create_task(audio.remote(offer))
+    try:
+        await until(delayed.started.is_set)
+        audio.close()
+        release.set()
+        await remoting
+        assert video.pt == 96 and not video.synced and promised == []
+    finally:
+        release.set()
+        if not remoting.done():
+            remoting.cancel()
+    ok("remote() close in flight skips the payload change and set-remote-description")
+
+    # negotiate owns SDP: description waits until start() finishes; hang-up
+    # during start does not create an offer.
+    order = []
+    gate = asyncio.Event()
+
+    class OrderAudio(Audio):
+        async def start(self):
+            order.append("start")
+            await gate.wait()
+            order.append("started")
+        async def description(self, kind):
+            order.append("description")
+            return {"type": kind, "sdp": "synthetic"}
+        async def remote(self, value):
+            order.append("remote")
+            await super().remote(value)
+
+    call = bm.VoiceCall("order", "test-person", False, lambda *_a: None, audio=OrderAudio)
+    call.transmit = AsyncMock()
+    call.command = AsyncMock()
+    negotiating = asyncio.create_task(call.negotiate())
+    await until(lambda: order == ["start"])
+    poker = asyncio.create_task(poke_while(negotiating))
+    await asyncio.sleep(.05)
+    assert "description" not in order and not negotiating.done()
+    gate.set()
+    await negotiating
+    assert await poker
+    assert order == ["start", "started", "description"]
+    ok("negotiate awaits start PLAYING before creating SDP")
+
+    order.clear()
+    gate = asyncio.Event()
+    call = bm.VoiceCall("order-close", "test-person", False, lambda *_a: None, audio=OrderAudio)
+    call.transmit = AsyncMock()
+    call.command = AsyncMock()
+    negotiating = asyncio.create_task(call.negotiate())
+    await until(lambda: order == ["start"])
+    await call.end("HUNGUP")
+    gate.set()
+    await asyncio.wait_for(negotiating, 1)
+    assert order == ["start", "started"] and "description" not in order
+    ok("negotiate close during start does not create SDP")
+
+
+async def media_stop_observed():
+    from fake_link import FakeLink
+    backend = bm.Backend(object(), FakeLink())
+    account = backend.accounts["max"]
+
+    class FailedAudio:
+        closed = False
+        stopped = concurrent.futures.Future()
+        def close(self):
+            self.closed = True
+    failed = FailedAudio()
+    failed.stopped.set_exception(RuntimeError("synthetic stop"))
+    call = account.call = bm.VoiceCall("stop-fail", 10, False, lambda *_a: None)
+    call.accepted, call.audio, call.socket = True, failed, Socket()
+    lines = []
+    with patch.object(bm, "log_line", side_effect=lines.append):
+        await backend.hangup_calls()
+    assert any("media stop failed" in line for line in lines)
+    ok("hangup_calls logs a failed media stop future")
+
+    class StuckAudio:
+        closed = False
+        stopped = concurrent.futures.Future()
+        def close(self):
+            self.closed = True
+    account.call = call = bm.VoiceCall("stop-wait", 10, False, lambda *_a: None)
+    call.accepted, call.audio, call.socket = True, StuckAudio(), Socket()
+    began = time.monotonic()
+    with patch.object(bm, "MEDIA_STOP_WAIT", .05), patch.object(bm, "log_line") as log:
+        await backend.hangup_calls()
+    assert time.monotonic() - began < .5
+    assert any("media stop still running" in c.args[0] for c in log.call_args_list)
+    ok("hangup_calls logs a media stop still running after the bound")
+
+
 async def main():
+    await media_state_transitions()
+    await media_stop_observed()
     await end_logging()
     await video_dial_flag()
     await video_consent()
