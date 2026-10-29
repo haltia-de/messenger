@@ -2620,8 +2620,9 @@ class CallAudio:
         finally:
             buffer.unmap(info)
         # The UI mailbox coalesces frames; never queue unbounded idle callbacks.
-        if self.frame:
-            self.frame(own, (width, height, data))
+        frame = self.frame  # read once: close() on another thread clears it
+        if frame:
+            frame(own, (width, height, data))
         return self.Gst.FlowReturn.OK
 
     def _encoded_video(self, pad, info):
@@ -2790,10 +2791,13 @@ class CallAudio:
         future = self.loop.create_future()
 
         def complete(promise, *_unused):
-            reply = promise.get_reply()
+            # Interrupted or expired is no answer (set-*-description replies
+            # with no structure when it worked, so None alone is not one).
+            answered = promise.wait() == self.Gst.PromiseResult.REPLIED
+            reply = promise.get_reply() if answered else None
             def deliver():
                 if not future.done():
-                    if reply is not None and reply.has_field("error"):
+                    if not answered or reply is not None and reply.has_field("error"):
                         future.set_exception(RuntimeError("WebRTC negotiation failed"))
                     else:
                         future.set_result(reply)
@@ -3053,19 +3057,48 @@ class VoiceCall:
                             else:
                                 future.set_result(event)
                         elif event["type"] == "error":
-                            raise RuntimeError("call service error")
+                            self.service_error(event)
                     elif event.get("type") == "notification":
                         await self.event(event)
         except asyncio.CancelledError:
             raise
         except Exception:
             # Exceptions can include the endpoint token; log only the phase.
-            log_line("voice call: signalling failed")
+            # A local hang-up closes the socket under recv(): no failure.
+            if not self.closed:
+                log_line("voice call: signalling failed")
             await self.end(None, "failed")
         finally:
             await self.end(None, "ended")
             if self.end_reason:
                 self.hangup_done.set()  # connection failed before a hangup could be delivered
+
+    # The service's errors that mean the call is over; any other one not
+    # answering a command waiting (a late reply to one given up, a refused
+    # candidate) leaves a call whose media flow over ICE anyway.
+    FATAL_ERRORS = frozenset({"conversation-ended", "invalid-token", "service-unavailable",
+                              "gen.obsoleteClient"})
+    KNOWN_ERRORS = FATAL_ERRORS | {"participant-not-found", "illegal-participant-state"}
+
+    def service_error(self, event):
+        """An error frame no command waits for: the end of the call only
+        when it says so. Logged by its known name only (it is untrusted)."""
+        code = event.get("error") or event.get("message")
+        known = code if isinstance(code, str) and code in self.KNOWN_ERRORS else "other"
+        log_line("voice call: service error %s" % known)
+        if known in self.FATAL_ERRORS:
+            self.job(self.end("FAILED", "failed"))
+
+    async def best_effort(self, what, command, *args):
+        """A command the media do not need: its failure is logged, never
+        the call's end (ICE goes on with the candidates that did go)."""
+        try:
+            await command(*args)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            if not self.closed:
+                log_line("voice call: %s not acknowledged" % what)
 
     async def initialize(self):
         await asyncio.wait_for(self.ready.wait(), 10)
@@ -3104,10 +3137,13 @@ class VoiceCall:
                     elif data["sdp"]["type"] == "answer" and self.audio and not self.incoming:
                         self.job(self.audio.remote(data["sdp"]))
                 if "candidate" in data:
-                    if self.audio:
-                        self.audio.add_candidate(data["candidate"])
+                    candidate = data["candidate"]
+                    if not isinstance(candidate, dict) or not isinstance(candidate.get("candidate"), str):
+                        log_line("voice call: invalid candidate skipped")
+                    elif self.audio:
+                        self.audio.add_candidate(candidate)
                     elif len(self.candidates) < 256:
-                        self.candidates.append(data["candidate"])
+                        self.candidates.append(candidate)
         elif name == "media-settings-changed":
             said = event.get("mediaSettings") or {}
             ours = self.participant is not None and str(event.get("participantId")) == str(self.participant)
@@ -3146,7 +3182,7 @@ class VoiceCall:
 
     def candidate(self, value):
         if self.local_sent:
-            self.job(self.transmit({"candidate": value}))
+            self.job(self.best_effort("candidate", self.transmit, {"candidate": value}))
         else:
             self.local_candidates.append(value)
 
@@ -3203,7 +3239,7 @@ class VoiceCall:
         await self.transmit({"sdp": description})
         self.local_sent = True
         for candidate in self.local_candidates:
-            self.job(self.transmit({"candidate": candidate}))
+            self.job(self.best_effort("candidate", self.transmit, {"candidate": candidate}))
         self.local_candidates.clear()
         await self.command("change-media-settings", mediaSettings=self.media_settings())
         if self.video:
@@ -3353,24 +3389,27 @@ class VoiceCall:
         try:
             if self.audio:
                 self.audio.close()
-            for task in list(self.jobs):
-                if task is not current:
-                    task.cancel()
-            for future in list(self.pending.values()):
-                if not future.done():
-                    future.cancel()
-            if self.socket:
-                await self.send_hangup()
-                try:
-                    await self.socket.close()
-                except Exception:
-                    pass
-            if self.socket and self.task and self.task is not current:
-                self.task.cancel()
-        finally:
-            # Always told, whatever the teardown did: the window takes the
-            # ringing, its notification and the inhibitors away on this.
-            self.changed(self, state)
+        except Exception:
+            log_line("voice call: media teardown failed")
+        for task in list(self.jobs):
+            if task is not current:
+                task.cancel()
+        for future in list(self.pending.values()):
+            if not future.done():
+                future.cancel()
+        # Told before the hang-up goes (up to 4 s on a bad network), with
+        # nothing awaited before it, so a cancelled end() still tells: the
+        # window takes the call screen, the ringing, its notification and
+        # the inhibitors away at once, and the next call is not BUSY.
+        self.changed(self, state)
+        if self.socket:
+            await self.send_hangup()
+            try:
+                await self.socket.close()
+            except Exception:
+                pass
+        if self.socket and self.task and self.task is not current:
+            self.task.cancel()
 
 
 class Offline(Exception):
