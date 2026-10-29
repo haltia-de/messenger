@@ -229,7 +229,9 @@ chats of the message's messenger (between messengers: step 4). At the
   (`ON_HALTIA`: `Haltia` in `XDG_CURRENT_DESKTOP`), whose own ✕ closes windows. With
   `--background` the window is not shown at start.
 - **Caches.** `~/.cache/haltia-messenger/chats/<id>.json` keeps the last `KEEP` messages per chat and
-  `list.json` the chat list (all mode 600, written atomically via `.new` + `os.replace`). The
+  `list.json` the chat list (all mode 600, written atomically via `.new` + `os.replace`).
+  Chat *files* themselves are not bounded (MSG2-14); `docs/cache-retention.md` is the proposed
+  retention policy and is not applied — no production pass deletes them. The
   messages go through `MessageCache` (`Backend.cache`): read from disk once and kept in memory,
   written by a timer thread 2 s after the last change and at `do_shutdown` (`flush`); both
   threads use it, `read` gives copies — never touch the files themselves. A chat whose
@@ -443,10 +445,11 @@ chats of the message's messenger (between messengers: step 4). At the
 ## Tests
 
 `sh tests/run.sh` makes `.cache/venv` once (system PyGObject plus the PyMax wheel `install.sh`
-pins, haltia-kit 2.2.0 from GitHub, or `HALTIA_KIT=path/to/checkout`, and Telethon 1.43.2), starts a `broadwayd` of its own for each script (one takes no second program) and runs five plain scripts with `assert`s, each printing
+pins, haltia-kit 2.2.0 from GitHub, or `HALTIA_KIT=path/to/checkout`, and Telethon 1.43.2), starts a `broadwayd` of its own for each script (one takes no second program) and runs plain scripts with `assert`s, each printing
 «… ok» per part: `tests/test_chatlist.py` (the chat list's rules: no MAX, no window),
 `tests/test_media.py` (Media with fake hands: hosts, the header, redirects, cache, players),
-`tests/test_backend.py` (Backend on the fake link, no window), `tests/test_window.py` (the real
+`tests/test_backend.py` (Backend on the fake link, no window), `tests/test_cache_retention.py`
+(proposed message-cache retention on a scratch tree, issue #86), `tests/test_window.py` (the real
 window and Backend on the fake link) and `tests/test_login.py` (the sign-in: the first start,
 the cards, switching off, the logout, a closed keyring, a second fake as Telegram with its cloud
 password; the fake's `kept`, `scan()`, `refuse`, `password`, `split`). `test_backend.py` checks
