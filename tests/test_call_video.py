@@ -89,6 +89,7 @@ async def video_pair():
         for peer in peers:
             peer.close()
             peer.close()
+            peer.stopped.result(5)  # no streaming thread left before the next test
 
 
 asyncio.run(video_pair())
@@ -161,6 +162,7 @@ async def h264_receive():
     finally:
         for peer in peers:
             peer.close()
+            peer.stopped.result(5)
 
 
 asyncio.run(h264_receive())

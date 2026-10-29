@@ -2295,14 +2295,15 @@ class CameraWorker:
     a second or more with libcamera): taps stay in order, the asyncio loop
     never waits for it, and a wedged driver cannot keep the program alive."""
 
-    def __init__(self):
+    def __init__(self, name="camera"):
         self.jobs = None
+        self.name = name
 
     def submit(self, fn, *args):
         if self.jobs is None:
             import queue
             self.jobs = queue.SimpleQueue()
-            threading.Thread(target=self._run, name="camera", daemon=True).start()
+            threading.Thread(target=self._run, name=self.name, daemon=True).start()
         future = concurrent.futures.Future()
         self.jobs.put((future, fn, args))
         return future
@@ -2318,6 +2319,10 @@ class CameraWorker:
 
 
 CAMERA_WORKER = CameraWorker()
+# A call's pipeline stopped (NULL waits for its streaming threads: the
+# microphone's, the speaker's, libnice's): never on the asyncio loop, and
+# never behind a camera still being found.
+MEDIA_WORKER = CameraWorker("call media")
 
 
 class CallPicture(Gtk.DrawingArea):
@@ -2383,6 +2388,7 @@ class CallAudio:
         self.pending = []
         self.sink = sink
         self.pipeline = None
+        self.stopped = None  # MEDIA_WORKER's future of the pipeline's NULL, once closed
         self.rtc = None
         self.bus = None
         self.signals = []
@@ -2604,6 +2610,11 @@ class CallAudio:
         pipeline.add(received)
         pad.link(received.get_static_pad("sink"))
         received.sync_state_with_parent()
+        if self.closed:
+            # close() came on the loop meanwhile: its pipeline may already be
+            # stopped, or stop before this bin was synced to PLAYING. Stopped
+            # here too, so no speaker or decoder is left running.
+            received.set_state(self.Gst.State.NULL)
 
     def _frame_sample(self, sink, own, generation):
         sample = sink.emit("pull-sample")
@@ -2883,7 +2894,9 @@ class CallAudio:
 
     def close(self):
         # Never waits for the camera: an opening one sees closed between its
-        # steps, and the worker releases it after whatever it is doing.
+        # steps, and the worker releases it after whatever it is doing. Nor
+        # for the pipeline: MEDIA_WORKER stops it (stopped), the handlers
+        # already gone, and a peer's stream added meanwhile stops itself.
         self.closed = True
         self.video_generation += 1  # late frames of any camera are dropped
         CAMERA_WORKER.submit(self._set_video, False)
@@ -2900,7 +2913,7 @@ class CallAudio:
                 rtc.disconnect(handler)
         self.signals.clear()
         if pipeline is not None:
-            pipeline.set_state(self.Gst.State.NULL)
+            self.stopped = MEDIA_WORKER.submit(pipeline.set_state, self.Gst.State.NULL)
         self.pending.clear()
         self.candidate = self.status = None
 
@@ -3610,6 +3623,12 @@ class Backend:
         # A dial request or ws2 handshake may still be finishing. Keep the
         # process alive for its cancellation send within do_shutdown's budget.
         await asyncio.gather(*(call.hangup_done.wait() for call in calls if call.end_reason))
+        # The pipelines stop on MEDIA_WORKER: done before the interpreter goes,
+        # so no streaming thread calls into Python after it.
+        stopping = [asyncio.wrap_future(call.audio.stopped) for call in calls
+                    if isinstance(getattr(call.audio, "stopped", None), concurrent.futures.Future)]
+        if stopping:
+            await asyncio.wait(stopping, timeout=1)
 
     async def logout(self, name):
         """Out of a messenger's account: disconnected, the login and the
