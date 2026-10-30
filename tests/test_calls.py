@@ -426,6 +426,42 @@ def media_teardown():
 media_teardown()
 
 
+def media_wait_shutdown():
+    # Bounded shutdown closes the asyncio loop while MEDIA_WORKER may still
+    # finish a job; the done-callback must not log RuntimeError.
+    import logging
+    loop = asyncio.new_event_loop()
+    job = concurrent.futures.Future()
+
+    async def begin():
+        return bm.media_wait(job)
+
+    waiter = loop.run_until_complete(begin())
+    loop.close()
+    with patch.object(logging.getLogger("concurrent.futures"), "exception") as logged:
+        job.set_result("ok")
+        assert not logged.called, logged.call_args_list
+    assert not waiter.done()
+    ok("media_wait after the loop closes does not log RuntimeError")
+
+    async def propagates():
+        failed = concurrent.futures.Future()
+        waiting = bm.media_wait(failed)
+        failed.set_exception(RuntimeError("synthetic media"))
+        try:
+            await waiting
+        except RuntimeError as exc:
+            assert str(exc) == "synthetic media"
+        else:
+            raise AssertionError("media_wait must propagate the job exception")
+
+    asyncio.run(propagates())
+    ok("media_wait still propagates a job exception on an open loop")
+
+
+media_wait_shutdown()
+
+
 def literal(value):
     data = json.dumps(value).encode()
     n = len(data) - 15
@@ -1519,7 +1555,7 @@ async def media_state_transitions():
             remoting.cancel()
     ok("remote() close in flight skips the payload change and set-remote-description")
 
-    # remote() VP8 NULL FAILURE must not mutate a still-running bin.
+    # remote() VP8 NULL FAILURE must not mutate a still-running bin or apply SDP 102.
     promised.clear()
     release = threading.Event()
     release.set()
@@ -1529,11 +1565,18 @@ async def media_state_transitions():
     audio = stand_in_audio(StoppingPipeline())
     audio.video_bin = video
     stub_remote(audio)
-    await audio.remote(offer)
-    assert video.pt == 96 and not video.synced and promised == ["set-remote-description"]
-    ok("remote() VP8 NULL FAILURE leaves payload and still applies SDP")
+    with patch.object(bm, "log_line") as log:
+        try:
+            await audio.remote(offer)
+            raise AssertionError("VP8 NULL FAILURE must fail negotiation")
+        except RuntimeError as exc:
+            assert "video bin failed to stop" in str(exc)
+    assert video.pt == 96 and not video.synced and promised == []
+    assert audio.video_bin is video
+    assert any("video bin failed to stop" in c.args[0] for c in log.call_args_list)
+    ok("remote() VP8 NULL FAILURE leaves payload and does not apply SDP")
 
-    # remote() H264: NULL first; FAILURE keeps the running bin; success removes it.
+    # remote() H264: NULL first; FAILURE keeps the running bin and skips SDP.
     h264_offer = {"type": "offer", "sdp":
                   "v=0\r\nm=video 9 UDP/TLS/RTP/SAVPF 102\r\na=rtpmap:102 H264/90000\r\n"}
     promised.clear()
@@ -1548,9 +1591,16 @@ async def media_state_transitions():
     audio.video_bin, audio.video_pad = video, pad
     audio.rtc = SimpleNamespace(release_request_pad=released.append)
     stub_remote(audio, h264=True)
-    await audio.remote(h264_offer)
-    assert audio.video_bin is video and not pipe.removed and released == []
-    assert promised == ["set-remote-description"]
+    with patch.object(bm, "log_line") as log:
+        try:
+            await audio.remote(h264_offer)
+            raise AssertionError("H264 NULL FAILURE must fail negotiation")
+        except RuntimeError as exc:
+            assert "video bin failed to stop" in str(exc)
+    assert audio.video_bin is video and audio.video_pad is pad
+    assert not pipe.removed and released == [] and promised == []
+    assert pad.direction is None
+    assert any("video bin failed to stop" in c.args[0] for c in log.call_args_list)
     ok("remote() H264 NULL FAILURE does not remove the still-running bin")
 
     promised.clear()
@@ -1634,7 +1684,9 @@ async def media_state_transitions():
             rebuilding.cancel()
     ok("remote() overlapping rebuild_sender still rebuilds with payload 102")
 
-    # H264 remote overlapping rebuild: no stale pad unlink, no double-remove.
+    # H264 remote overlapping rebuild: the lock runs rebuild first, then
+    # remote() on the new sender. Rebuild succeeds; remote() then removes
+    # that sender and releases the original pad. No double-remove.
     promised.clear()
     release = threading.Event()
     delayed = DelayedState(release, name="h264-overlap")
@@ -1657,12 +1709,11 @@ async def media_state_transitions():
         release.set()
         rebuilt = await rebuilding
         await remoting
-        assert len(pipe.removed) == len(set(pipe.removed))
-        if rebuilt:
-            assert audio.video_bin is None and old in pipe.removed
-            assert released[-1] is pad or audio.video_pad is None
-        else:
-            assert audio.video_bin is None and pipe.removed == [old]
+        assert rebuilt is True
+        assert pipe.removed == [old, made[0]]
+        assert released == [pad]
+        assert audio.video_bin is None and audio.video_pad is None
+        assert promised == ["set-remote-description"]
     finally:
         release.set()
         if not rebuilding.done():
@@ -1717,6 +1768,28 @@ async def media_state_transitions():
     assert call.audio is not None and call.audio.closed
     assert not call.transmit.called
     ok("negotiate close during start does not create SDP")
+
+    # remote() raising (NULL FAILURE) ends the call; no answer is sent.
+    class FailRemote(Audio):
+        async def start(self):
+            pass
+        async def remote(self, value):
+            raise RuntimeError("video bin failed to stop")
+        async def description(self, kind):
+            raise AssertionError("SDP must not be created after a failed remote")
+
+    states = []
+    call = bm.VoiceCall("fail-sdp", "test-person", True,
+                        lambda _c, s: states.append(s), audio=FailRemote)
+    call.offer = offer
+    call.offer_ready.set()
+    call.transmit = AsyncMock()
+    call.command = AsyncMock()
+    call.job(call.negotiate())
+    await until(lambda: call.closed)
+    assert call.state == "failed" and "failed" in states
+    assert not call.transmit.called
+    ok("negotiate remote() failure ends the call without sending SDP")
 
 
 async def media_stop_observed():

@@ -2339,6 +2339,8 @@ def media_wait(future):
     then skips the job (set_running_or_notify_cancel is false) and a queued
     pipeline NULL never runs. hangup_calls may give up at MEDIA_STOP_WAIT
     or be cancelled by do_shutdown; the FIFO still stops the pipeline.
+    The worker callback must not raise RuntimeError after the loop has
+    closed (bounded shutdown); a still-running loop still sees the result.
     """
     loop = asyncio.get_running_loop()
     waiter = loop.create_future()
@@ -2355,7 +2357,15 @@ def media_wait(future):
         else:
             waiter.set_result(future.result())
 
-    future.add_done_callback(lambda _f: loop.call_soon_threadsafe(copied))
+    def deliver(_f):
+        if loop.is_closed():
+            return
+        try:
+            loop.call_soon_threadsafe(copied)
+        except RuntimeError:
+            pass  # closed between the check and the call
+
+    future.add_done_callback(deliver)
     if future.done():
         copied()
     return waiter
@@ -2920,10 +2930,15 @@ class CallAudio:
                             self.sender_generation = getattr(self, "sender_generation", 0) + 1
                             mine = self.sender_generation
                             result = await self._set_state(bin, self.Gst.State.NULL)
-                            if not self.closed and generation == getattr(self, "media_generation", generation) \
-                                    and mine == getattr(self, "sender_generation", mine) \
-                                    and self.video_bin is bin \
-                                    and result not in (None, self.Gst.StateChangeReturn.FAILURE):
+                            still = (not self.closed
+                                     and generation == getattr(self, "media_generation", generation)
+                                     and mine == getattr(self, "sender_generation", mine)
+                                     and self.video_bin is bin)
+                            if still:
+                                if result in (None, self.Gst.StateChangeReturn.FAILURE):
+                                    # Still running: do not retarget pt or apply SDP 102 on 96.
+                                    log_line("voice call: video bin failed to stop")
+                                    raise RuntimeError("video bin failed to stop")
                                 bin.get_by_name("video_pay").set_property("pt", payload)
                                 bin.get_by_name("video_caps").set_property(
                                     "caps", self.Gst.Caps.from_string(VIDEO_CAPS % payload))
@@ -2943,11 +2958,16 @@ class CallAudio:
                                 self.sender_generation = getattr(self, "sender_generation", 0) + 1
                                 mine = self.sender_generation
                                 result = await self._set_state(bin, self.Gst.State.NULL)
-                                if not self.closed and generation == getattr(self, "media_generation", generation) \
-                                        and mine == getattr(self, "sender_generation", mine) \
-                                        and self.video_bin is bin and self.pipeline is pipeline \
-                                        and pipeline is not None \
-                                        and result not in (None, self.Gst.StateChangeReturn.FAILURE):
+                                still = (not self.closed
+                                         and generation == getattr(self, "media_generation", generation)
+                                         and mine == getattr(self, "sender_generation", mine)
+                                         and self.video_bin is bin and self.pipeline is pipeline
+                                         and pipeline is not None)
+                                if still:
+                                    if result in (None, self.Gst.StateChangeReturn.FAILURE):
+                                        # Still running: do not unlink it or apply H264-only SDP.
+                                        log_line("voice call: video bin failed to stop")
+                                        raise RuntimeError("video bin failed to stop")
                                     bin.get_static_pad("src").unlink(pad)
                                     if self.video_pad is pad and self.rtc is not None:
                                         self.rtc.release_request_pad(pad)
