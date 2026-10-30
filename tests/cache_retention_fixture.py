@@ -5,10 +5,11 @@
 Builds a temporary CHATS tree in the current format, plans which chat files
 a bounded pass would evict, and can apply that plan to an *owned* scratch
 tree. Nothing here is imported by haltia-messenger. It never looks at a
-real profile: tests point it at a directory under the test HOME, and
-apply_plan refuses any other root.
+real profile: own_scratch itself accepts only a directory under the process
+temporary area, and apply_plan refuses any other root.
 """
 import json
+import math
 import os
 import stat
 import tempfile
@@ -22,10 +23,13 @@ PROTECTED_NAMES = {"list.json"}
 LOCAL_STATES = {"sending", "failed"}
 SCRATCH_MARKER = ".cache-retention-scratch"
 SCRATCH_TOKEN = "haltia-cache-retention-scratch\n"
+# Present .accessed that is not a finite Unix time. Distinct from None
+# (the file is absent: never opened). plan_eviction skips that chat.
+STAMP_INVALID = object()
 
 
 class ScratchGuardError(ValueError):
-    """apply_plan refused the root or a path; nothing was deleted."""
+    """own_scratch or apply_plan refused the root or a path; nothing was deleted."""
 
 
 def canonical_int_stem(stem):
@@ -90,9 +94,22 @@ def _listdir(folder):
         return []
 
 
+def _orphan_stamp(path):
+    """A .accessed file whose sibling .json is missing (drop left it)."""
+    if not path.endswith(".accessed") or not os.path.isfile(path):
+        return False
+    sibling = path[:-len(".accessed")] + ".json"
+    return not os.path.isfile(sibling)
+
+
 def classify_tree(folder):
-    """Canonical chat files, ignored paths, leftover .new. Follows no symlink."""
-    chats, ignored, orphan_new = [], [], []
+    """Canonical chat files, ignored paths, leftover .new, orphan stamps.
+
+    Follows no symlink. A .accessed next to a present .json is the chat's
+    stamp, not listed here. A .accessed with no sibling JSON is an orphan:
+    this pass counts it and does not sweep it (same limit as leftover .new).
+    """
+    chats, ignored, orphan_new, orphan_stamps = [], [], [], []
     for name in _listdir(folder):
         path = os.path.join(folder, name)
         if name in PROTECTED_NAMES or name == SCRATCH_MARKER:
@@ -104,6 +121,8 @@ def classify_tree(folder):
             orphan_new.append(path)
             continue
         if name.endswith(".accessed"):
+            if _orphan_stamp(path):
+                orphan_stamps.append(path)
             continue
         if name.endswith(".json") and os.path.isfile(path):
             stem = name[:-5]
@@ -125,6 +144,8 @@ def classify_tree(folder):
                     orphan_new.append(fpath)
                     continue
                 if inner_name.endswith(".accessed"):
+                    if _orphan_stamp(fpath):
+                        orphan_stamps.append(fpath)
                     continue
                 if inner_name.endswith(".json") and os.path.isfile(fpath):
                     stem = inner_name[:-5]
@@ -137,12 +158,12 @@ def classify_tree(folder):
                     ignored.append(fpath)
             continue
         ignored.append(path)
-    return chats, ignored, orphan_new
+    return chats, ignored, orphan_new, orphan_stamps
 
 
 def iter_chat_files(folder):
     """Committed canonical chat files: MAX `<id>.json`, Telegram `tg/<id>.json`."""
-    chats, _ignored, _new = classify_tree(folder)
+    chats, _ignored, _new, _stamps = classify_tree(folder)
     for item in chats:
         yield item
 
@@ -154,34 +175,47 @@ def access_stamp_path(chat_path):
 
 
 def read_access_stamp(path):
-    """User-access time, or None if the chat was never opened under this policy.
+    """User-access time, None if never opened, or STAMP_INVALID if present junk.
 
-    Missing or unreadable stamp: migration default, never accessed. Not the
-    file mtime — incoming flush rewrites mtime.
+    Absent file: migration default, never accessed. Present but unreadable,
+    empty, non-numeric, NaN or ±Infinity: unknown metadata — fail closed
+    (the chat is skipped, not ranked as never-opened). Not the JSON mtime;
+    incoming flush rewrites mtime and must not move this stamp.
     """
-    try:
-        with open(access_stamp_path(path)) as fh:
-            return float(fh.read().strip())
-    except (OSError, TypeError, ValueError):
+    stamp = access_stamp_path(path)
+    if not os.path.lexists(stamp):
         return None
+    try:
+        if os.path.islink(stamp):
+            return STAMP_INVALID
+        with open(stamp) as fh:
+            text = fh.read().strip()
+        value = float(text)
+    except (OSError, TypeError, ValueError):
+        return STAMP_INVALID
+    if not math.isfinite(value):
+        return STAMP_INVALID
+    return value
 
 
 def mark_accessed(path, when):
     """Record that the person opened this chat. Incoming writes do not call this."""
+    when = float(when)
+    if not math.isfinite(when):
+        raise ValueError("access stamp must be a finite Unix time")
     stamp = access_stamp_path(path)
     fd = os.open(stamp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w") as fh:
         fh.write("%.6f\n" % when)
 
 
-def simulate_incoming_write(path, msgs, mtime):
-    """Rewrite like MessageCache.flush: new bytes and mtime, access stamp unchanged."""
-    tmp = path + ".new"
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+def write_stamp_raw(path, text):
+    """Write sibling stamp bytes as-is (malformed-stamp tests)."""
+    stamp = access_stamp_path(path)
+    fd = os.open(stamp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w") as fh:
-        json.dump(msgs, fh, ensure_ascii=False)
-    os.replace(tmp, path)
-    os.utime(path, (mtime, mtime))
+        fh.write(text)
+    return stamp
 
 
 def _load_messages(path):
@@ -202,21 +236,28 @@ def _rank(info):
 def plan_eviction(folder, keep=CHATS_KEPT, protect_ids=()):
     """Which scratch chat files a bounded pass would drop. Deletes nothing.
 
-    keep is the maximum number of *readable canonical* chat files to leave.
-    Protected files (local-only messages, protect_ids) always stay, even if
-    that is more than keep. Unreadable canonical files are skipped (they
-    stay, are counted, and can make the tree exceed keep). Unknown prefixes
-    and non-canonical names are ignored and never evicted. Among unprotected
-    readable files, the least recently accessed go until the cap is met or
-    nothing unprotected remains. Ranking is the access stamp, then mtime,
-    then chat id. Incoming writes move mtime only.
+    keep is the maximum number of *readable canonical* chat files with a
+    usable stamp (absent or a finite number) to leave. Protected files
+    (local-only messages, protect_ids) always stay, even if that is more
+    than keep. Unreadable canonical files, and chats whose .accessed is
+    present but not a finite number, are skipped (they stay, are counted,
+    and can make the tree exceed keep). Unknown prefixes and non-canonical
+    names are ignored and never evicted. Among unprotected readable files,
+    the least recently accessed go until the cap is met or nothing
+    unprotected remains. Ranking is the access stamp, then mtime, then
+    chat id. Incoming writes move mtime only. Orphan stamps and leftover
+    .new are counted and not swept.
     """
     protect_ids = set(protect_ids)
-    chats, ignored, orphan_new = classify_tree(folder)
+    chats, ignored, orphan_new, orphan_stamps = classify_tree(folder)
     protected, skipped, candidates = [], [], []
     for chat_id, path, account in chats:
         msgs = _load_messages(path)
         if msgs is None:
+            skipped.append(path)
+            continue
+        accessed = read_access_stamp(path)
+        if accessed is STAMP_INVALID:
             skipped.append(path)
             continue
         try:
@@ -230,7 +271,7 @@ def plan_eviction(folder, keep=CHATS_KEPT, protect_ids=()):
             "path": path,
             "account": account,
             "mtime": mtime,
-            "accessed": read_access_stamp(path),
+            "accessed": accessed,
             "bytes": nbytes,
             "messages": len(msgs),
         }
@@ -254,6 +295,7 @@ def plan_eviction(folder, keep=CHATS_KEPT, protect_ids=()):
         "skipped": skipped,
         "ignored": ignored,
         "orphan_new": orphan_new,
+        "orphan_stamps": orphan_stamps,
         "bytes_before": bytes_before,
         "bytes_after": bytes_after,
         "files_before": len(protected) + len(candidates),
@@ -261,6 +303,7 @@ def plan_eviction(folder, keep=CHATS_KEPT, protect_ids=()):
         "skipped_count": len(skipped),
         "ignored_count": len(ignored),
         "orphan_new_count": len(orphan_new),
+        "orphan_stamp_count": len(orphan_stamps),
         # Readable kept files may already exceed keep (protected). Skipped
         # files stay on disk on top of that: the cap is not a byte bound
         # and not a hard file-count of the directory.
@@ -269,8 +312,22 @@ def plan_eviction(folder, keep=CHATS_KEPT, protect_ids=()):
 
 
 def own_scratch(root):
-    """Mark a temporary directory as the only tree apply_plan may delete in."""
+    """Mark a directory under the process temp dir as apply_plan's only tree.
+
+    Refuses a symlink and any path whose resolved location is outside
+    tempfile.gettempdir(), and does not create that path. Not a general
+    sandbox: only this fixture's deletion guard.
+    """
+    if not root:
+        raise ScratchGuardError("scratch root is required")
+    tmp = os.path.realpath(tempfile.gettempdir())
+    if os.path.lexists(root) and _is_link(root):
+        raise ScratchGuardError("scratch root is a symlink")
+    if not _under(root, tmp):
+        raise ScratchGuardError("scratch root is not a temporary directory")
     os.makedirs(root, exist_ok=True)
+    if _is_link(root) or not os.path.isdir(root) or not _under(root, tmp):
+        raise ScratchGuardError("scratch root is not a temporary directory")
     marker = os.path.join(root, SCRATCH_MARKER)
     fd = os.open(marker, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w") as fh:
@@ -426,27 +483,35 @@ def build_scratch(cache, folder, keep_files=3):
 def build_access_scratch(cache, folder):
     """Quiet user-accessed chat vs a noisy unopened channel.
 
-    Chat 1 was opened (access stamp 50) and then went quiet (mtime 10).
-    Channel 2 was never opened; repeated incoming flushes move mtime past
-    200. Under write-mtime LRU the channel would be kept; the access-stamp
-    policy keeps the quiet chat.
+    Chat 1 was opened (access stamp 50). Channel 2 was never opened.
+    Incoming messages go through the production MessageCache.add and flush
+    (not a helper that leaves the stamp alone by construction). After those
+    writes the stamp on chat 1 is unchanged; mtimes are then set so a
+    write-mtime LRU would keep the channel. The access-stamp policy keeps
+    the quiet chat.
     """
     own_scratch(folder)
     cache.folder = folder
-    quiet = [remote_message(1, 10, "quiet-personal")]
-    noisy = [remote_message(1, 20, "noisy-channel")]
-    cache.add(1, quiet)
-    cache.add(2, noisy)
+    cache.add(1, [remote_message(1, 10, "quiet-personal")])
+    cache.add(2, [remote_message(1, 20, "noisy-channel")])
     cache.flush()
     quiet_path, noisy_path = cache._path(1), cache._path(2)
-    os.utime(quiet_path, (10, 10))
-    os.utime(noisy_path, (20, 20))
     mark_accessed(quiet_path, 50)
+    stamp_path = access_stamp_path(quiet_path)
+    with open(stamp_path) as fh:
+        stamp_text = fh.read()
+    stamp_mtime = os.path.getmtime(stamp_path)
+    cache.add(1, [remote_message(2, 11, "quiet-later")])
     for step in range(3):
-        noisy.append(remote_message(step + 2, 30 + step, "incoming-%d" % step))
-        simulate_incoming_write(noisy_path, noisy, 200 + step)
+        cache.add(2, [remote_message(step + 2, 30 + step, "incoming-%d" % step)])
+    cache.flush()
+    os.utime(quiet_path, (10, 10))
+    os.utime(noisy_path, (200, 200))
     return {
         "folder": folder,
         "quiet_path": quiet_path,
         "noisy_path": noisy_path,
+        "stamp_path": stamp_path,
+        "stamp_text": stamp_text,
+        "stamp_mtime": stamp_mtime,
     }

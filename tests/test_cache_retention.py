@@ -10,11 +10,11 @@ import tempfile
 
 from common import load, ok
 from cache_retention_fixture import (
-    CHATS_KEPT, KNOWN_PREFIXES, ScratchGuardError, apply_plan,
-    build_access_scratch, build_scratch, canonical_int_stem, classify_tree,
-    is_local_message, iter_chat_files, local_message, mark_accessed,
-    messages_readable, own_scratch, plan_eviction, plan_trim, remote_message,
-    simulate_incoming_write,
+    CHATS_KEPT, KNOWN_PREFIXES, STAMP_INVALID, ScratchGuardError,
+    access_stamp_path, apply_plan, build_access_scratch, build_scratch,
+    canonical_int_stem, classify_tree, is_local_message, iter_chat_files,
+    local_message, mark_accessed, messages_readable, own_scratch, plan_eviction,
+    plan_trim, read_access_stamp, remote_message, write_stamp_raw,
 )
 
 bm = load()
@@ -100,6 +100,7 @@ assert plan["bytes_after"] < plan["bytes_before"]
 assert plan["skipped"] == [] and plan["skipped_count"] == 0
 assert plan["orphan_new"] == [scratch["leftover_new"]]
 assert plan["orphan_new_count"] == 1
+assert plan["orphan_stamps"] == [] and plan["orphan_stamp_count"] == 0
 # Ownership: a recent Telegram file stays, an old one of the same prefix goes.
 assert any(i["account"] == "tg" for i in plan["keep"])
 assert any(i["account"] == "tg" for i in plan["evict"])
@@ -109,7 +110,8 @@ assert scratch["list_path"] not in [i["path"] for i in plan["keep"] + plan["evic
 assert scratch["leftover_new"] not in [i["path"] for i in plan["keep"] + plan["evict"]]
 # DATA lives outside CHATS: the walk never yields it, the decoy is not planned.
 plan_paths = ([i["path"] for i in plan["keep"] + plan["evict"]]
-              + plan["skipped"] + plan["ignored"] + plan["orphan_new"])
+              + plan["skipped"] + plan["ignored"] + plan["orphan_new"]
+              + plan["orphan_stamps"])
 assert all(os.path.realpath(p).startswith(os.path.realpath(chats) + os.sep)
            for p in plan_paths)
 assert scratch["known_path"] not in plan_paths
@@ -117,6 +119,17 @@ assert scratch["decoy_path"] not in plan_paths
 assert os.path.dirname(os.path.realpath(scratch["known_path"])) != os.path.realpath(chats)
 assert not os.path.realpath(scratch["known_path"]).startswith(os.path.realpath(chats) + os.sep)
 assert not os.path.realpath(scratch["decoy_path"]).startswith(os.path.realpath(chats) + os.sep)
+# Walking the parent, DATA and chats are unknown prefixes, not walked for files.
+parent_plan = plan_eviction(scratch_root, keep=3)
+parent_paths = ([i["path"] for i in parent_plan["keep"] + parent_plan["evict"]]
+                + parent_plan["skipped"] + parent_plan["ignored"]
+                + parent_plan["orphan_new"] + parent_plan["orphan_stamps"])
+assert parent_plan["keep"] == [] and parent_plan["evict"] == []
+assert chats in parent_plan["ignored"]
+assert os.path.join(scratch_root, "data") in parent_plan["ignored"]
+assert scratch["known_path"] not in parent_paths
+assert scratch["decoy_path"] not in parent_paths
+assert scratch["recent_max"] not in parent_paths
 ok("expected eviction plan")
 
 # Applying the plan is allowed only on this owned scratch tree, and must spare
@@ -149,12 +162,19 @@ assert fresh.read(101) == [] and fresh.read("tg:201") == []
 assert any(is_local_message(m) for m in fresh.read(104))
 ok("scratch apply preserves unsent and ownership")
 
-# --- access stamp: incoming writes to an unopened channel do not outrank a
-# user-accessed quiet chat. Write-mtime LRU would keep the channel. ----------
+# --- access stamp: production add/flush must not move it. Incoming writes
+# to an unopened channel do not outrank a user-accessed quiet chat.
+# Write-mtime LRU would keep the channel. -----------------------------------
 access_root = tempfile.mkdtemp(prefix="cache-retention-access-")
 access_chats = os.path.join(access_root, "chats")
 access_cache = bm.MessageCache(access_chats, delay=3600)
 access = build_access_scratch(access_cache, access_chats)
+with open(access["stamp_path"]) as fh:
+    assert fh.read() == access["stamp_text"] == "50.000000\n"
+assert os.path.getmtime(access["stamp_path"]) == access["stamp_mtime"]
+assert read_access_stamp(access["quiet_path"]) == 50
+assert read_access_stamp(access["noisy_path"]) is None
+assert not os.path.exists(access_stamp_path(access["noisy_path"]))
 assert os.path.getmtime(access["noisy_path"]) > os.path.getmtime(access["quiet_path"])
 assert os.path.getmtime(access["noisy_path"]) >= 200
 plan = plan_eviction(access_chats, keep=1)
@@ -164,8 +184,9 @@ assert plan["keep"][0]["accessed"] == 50
 assert plan["evict"][0]["accessed"] is None
 apply_plan(plan, access_chats)
 assert os.path.isfile(access["quiet_path"])
+assert os.path.isfile(access["stamp_path"])
 assert not os.path.exists(access["noisy_path"])
-ok("access stamp beats incoming writes")
+ok("access stamp survives add/flush and beats incoming writes")
 
 # --- protected files may exceed CHATS_KEPT; room is 0; exact evict set ------
 over_root = tempfile.mkdtemp(prefix="cache-retention-overcap-")
@@ -237,7 +258,8 @@ assert plan["over_cap"] is True
 assert plan["files_before"] == 6  # six readable canonical chats
 assert 109 not in [i["chat_id"] for i in plan["keep"] + plan["evict"]]
 all_planned = (list(paths) + [i["path"] for i in plan["keep"]]
-               + plan["skipped"] + plan["ignored"] + plan["orphan_new"])
+               + plan["skipped"] + plan["ignored"] + plan["orphan_new"]
+               + plan["orphan_stamps"])
 assert built["known_path"] not in all_planned
 assert built["decoy_path"] not in all_planned
 assert os.path.isfile(built["known_path"]) and os.path.isfile(built["decoy_path"])
@@ -248,6 +270,17 @@ assert not os.path.realpath(built["known_path"]).startswith(
     os.path.realpath(protect_chats) + os.sep)
 assert not os.path.realpath(built["decoy_path"]).startswith(
     os.path.realpath(protect_chats) + os.sep)
+# Parent walk: DATA and chats are unknown prefixes, files inside are unseen.
+parent = os.path.dirname(protect_chats)
+parent_plan = plan_eviction(parent, keep=3)
+parent_all = ([i["path"] for i in parent_plan["keep"] + parent_plan["evict"]]
+              + parent_plan["skipped"] + parent_plan["ignored"]
+              + parent_plan["orphan_new"] + parent_plan["orphan_stamps"])
+assert parent_plan["keep"] == [] and parent_plan["evict"] == []
+assert protect_chats in parent_plan["ignored"]
+assert os.path.join(parent, "data") in parent_plan["ignored"]
+assert built["known_path"] not in parent_all
+assert built["decoy_path"] not in parent_all
 ok("protect_ids, unreadable shape, DATA sentinel")
 
 # --- unknown prefixes and non-canonical ids are left untouched --------------
@@ -316,7 +349,7 @@ with open(victim, "w") as fh:
     json.dump([remote_message(1, 1, "victim")], fh)
 link = os.path.join(guard_chats, "888.json")
 os.symlink(victim, link)
-_chats, ignored, _new = classify_tree(guard_chats)
+_chats, ignored, _new, _stamps = classify_tree(guard_chats)
 assert link in ignored
 assert 888 not in [cid for cid, _p, _a in iter_chat_files(guard_chats)]
 link_plan = {"evict": [{"path": link}]}
@@ -361,21 +394,100 @@ with open(guard["known_path"]) as fh:
     assert json.load(fh) == [10, 20]
 ok("apply_plan rejects outside, symlink and foreign paths")
 
-# A user-accessed quiet chat still wins after more incoming writes.
-more = tempfile.mkdtemp(prefix="cache-retention-more-")
-more_chats = os.path.join(more, "chats")
-more_cache = bm.MessageCache(more_chats, delay=3600)
-acc = build_access_scratch(more_cache, more_chats)
-for step in range(5):
-    simulate_incoming_write(
-        acc["noisy_path"],
-        [remote_message(10 + step, 100 + step, "more")],
-        500 + step,
-    )
-# Quiet stamp left at 50; noisy still has none.
-mark_accessed(acc["quiet_path"], 50)
-plan = plan_eviction(more_chats, keep=1)
-assert [i["path"] for i in plan["keep"]] == [acc["quiet_path"]]
-assert [i["path"] for i in plan["evict"]] == [acc["noisy_path"]]
-ok("repeated incoming writes still lose to access")
+# own_scratch itself refuses a path outside the process temp dir and does
+# not create it. HOME is under temp, so this uses a path that cannot be a
+# profile and cannot sit under tempfile.gettempdir().
+outside_own = os.path.join(os.sep, "haltia-must-not-own-scratch")
+assert not os.path.exists(outside_own)
+try:
+    own_scratch(outside_own)
+    raise AssertionError("own_scratch accepted a path outside the temp dir")
+except ScratchGuardError:
+    pass
+assert not os.path.exists(outside_own)
+ok("own_scratch stays in the process temp dir")
+
+# --- present but unreadable/non-finite stamp: fail closed (skip), unlike
+# a truly absent stamp. Exact kept/evicted/skipped/over_cap. ---------------
+bad_root = tempfile.mkdtemp(prefix="cache-retention-badstamp-")
+bad_chats = os.path.join(bad_root, "chats")
+bad_cache = bm.MessageCache(bad_chats, delay=3600)
+own_scratch(bad_chats)
+bad_cache.folder = bad_chats
+for cid in (1, 2, 3, 4, 5, 6):
+    bad_cache.add(cid, [remote_message(1, cid, "c%d" % cid)])
+bad_cache.flush()
+p1, p2 = bad_cache._path(1), bad_cache._path(2)
+mark_accessed(p1, 50)
+os.utime(p1, (10, 10))
+os.utime(p2, (200, 200))
+write_stamp_raw(bad_cache._path(3), "not-a-number\n")
+write_stamp_raw(bad_cache._path(4), "nan\n")
+write_stamp_raw(bad_cache._path(5), "inf\n")
+write_stamp_raw(bad_cache._path(6), "-inf\n")
+assert read_access_stamp(p1) == 50
+assert read_access_stamp(p2) is None
+assert read_access_stamp(bad_cache._path(3)) is STAMP_INVALID
+assert read_access_stamp(bad_cache._path(4)) is STAMP_INVALID
+assert read_access_stamp(bad_cache._path(5)) is STAMP_INVALID
+assert read_access_stamp(bad_cache._path(6)) is STAMP_INVALID
+plan = plan_eviction(bad_chats, keep=1)
+assert rels(bad_chats, plan["keep"]) == ["1.json"]
+assert rels(bad_chats, plan["evict"]) == ["2.json"]
+assert plan["keep"][0]["accessed"] == 50
+assert plan["evict"][0]["accessed"] is None
+assert plan["protected"] == []
+skipped = set(plan["skipped"])
+for cid in (3, 4, 5, 6):
+    assert bad_cache._path(cid) in skipped
+assert plan["skipped_count"] == 4
+assert plan["files_before"] == 2
+assert plan["files_after"] == 1
+assert plan["over_cap"] is True
+apply_plan(plan, bad_chats)
+assert os.path.isfile(p1) and os.path.isfile(access_stamp_path(p1))
+assert not os.path.exists(p2)
+for cid in (3, 4, 5, 6):
+    assert os.path.isfile(bad_cache._path(cid)), cid
+    assert os.path.isfile(access_stamp_path(bad_cache._path(cid))), cid
+ok("invalid access stamp fails closed")
+
+# --- stamp lifecycle: production drop leaves an orphan; a recreated chat
+# inherits it; fixture eviction of a stamped chat removes the stamp. This
+# is design/test behaviour, not a production drop change. ------------------
+life_root = tempfile.mkdtemp(prefix="cache-retention-lifecycle-")
+life_chats = os.path.join(life_root, "chats")
+life_cache = bm.MessageCache(life_chats, delay=3600)
+own_scratch(life_chats)
+life_cache.folder = life_chats
+life_cache.add(1, [remote_message(1, 10, "keep")])
+life_cache.add(2, [remote_message(1, 20, "drop-me")])
+life_cache.flush()
+life1, life2 = life_cache._path(1), life_cache._path(2)
+mark_accessed(life1, 50)
+mark_accessed(life2, 40)
+stamp2 = access_stamp_path(life2)
+assert os.path.isfile(stamp2)
+life_cache.drop(2)
+assert not os.path.isfile(life2)
+assert os.path.isfile(stamp2)  # today's drop removes JSON only
+plan = plan_eviction(life_chats, keep=1)
+assert stamp2 in plan["orphan_stamps"]
+assert plan["orphan_stamp_count"] == 1
+assert rels(life_chats, plan["keep"]) == ["1.json"]
+assert plan["evict"] == []
+# Same id written again: the orphan stamp credits the new file.
+life_cache.add(2, [remote_message(1, 30, "rejoined")])
+life_cache.flush()
+plan = plan_eviction(life_chats, keep=1)
+assert plan["orphan_stamp_count"] == 0
+assert rels(life_chats, plan["keep"]) == ["1.json"]
+assert rels(life_chats, plan["evict"]) == ["2.json"]
+assert plan["keep"][0]["accessed"] == 50
+assert plan["evict"][0]["accessed"] == 40
+apply_plan(plan, life_chats)
+assert os.path.isfile(life1) and os.path.isfile(access_stamp_path(life1))
+assert not os.path.exists(life2)
+assert not os.path.exists(stamp2)
+ok("stamp lifecycle drop orphan and evict removes stamp")
 print("cache retention ok")
