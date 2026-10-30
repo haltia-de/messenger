@@ -33,6 +33,7 @@ async def video_pair():
         for n in range(2):
             peer = bm.CallAudio(loop, lambda v, n=n: candidate(n,v), states[n].add, {},
                                 source="audiotestsrc is-live=true", sink="fakesink name=heard sync=false", video_payload=100 if n == 0 else 96)
+            await peer.start()
             peers.append(peer)
             def frame(own, picture, n=n):
                 w,h,data = picture
@@ -137,6 +138,7 @@ async def h264_receive():
     try:
         receiver = bm.CallAudio(loop, lambda v: candidate(1,v), states[1].add, {},
                                 source="audiotestsrc is-live=true", sink="fakesink name=heard sync=false")
+        await receiver.start()
         peers.append(receiver)
         receiver.frame = lambda own, frame: frames.append(frame) if not own else None
         offer = await phone.description("offer")
