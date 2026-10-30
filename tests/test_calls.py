@@ -3,6 +3,7 @@
 import asyncio
 import base64
 import concurrent.futures
+import gc
 import json
 import threading
 import time
@@ -949,7 +950,7 @@ async def quit_hangup():
 
 async def quit_after_ui_end():
     from fake_link import FakeLink
-    ui = SimpleNamespace(call_changed=Mock())
+    ui = SimpleNamespace(call_changed=Mock(return_value=None))
     backend = bm.Backend(ui, FakeLink())
     account = backend.accounts["max"]
     other = bm.Account(ui, FakeLink(), backend.cache, account.folder)
@@ -977,8 +978,8 @@ async def quit_after_ui_end():
         # Late notification must also leave the replacement alone.
         call.changed(call, "ended")
         assert account.call is replacement
-    await replacement.end()
-    await other_call.end()
+        await replacement.end()
+        await other_call.end()
     ok("real account terminal UI stays immediate; quit waits for old hangup without crossing ownership")
 
 
@@ -1287,10 +1288,11 @@ async def end_logging():
     ok("terminal logs contain only allowed reasons and local/remote origin, once, without identifiers")
 
 
-async def signalling_tolerance(candidate_error="participant-not-found"):
+async def signalling_tolerance(candidate_error="participant-not-found", suspend_send=False):
     # What the media do not need never ends a talk: an error frame no command
     # waits for (a late reply, a refused candidate), a candidate the service
     # refuses, a malformed one from the peer. Only a fatal error ends it.
+    send_cancelled = asyncio.Event()
     class Refusing(Socket):
         async def send(self, raw):
             value = json.loads(raw) if raw != "pong" else raw
@@ -1298,6 +1300,11 @@ async def signalling_tolerance(candidate_error="participant-not-found"):
                 self.sent.append(value)
                 await self.queue.put(json.dumps({"type": "error", "sequence": value["sequence"],
                                                  "error": candidate_error}))
+                if suspend_send:
+                    try:
+                        await asyncio.Event().wait()
+                    finally:
+                        send_cancelled.set()
                 return
             await super().send(raw)
     socket = Refusing()
@@ -1317,6 +1324,8 @@ async def signalling_tolerance(candidate_error="participant-not-found"):
             await asyncio.gather(call.task, return_exceptions=True)
             assert states[-1] == "failed" and Audio.made[-1].closed
             assert not call.pending
+            if suspend_send:
+                assert send_cancelled.is_set()
             assert "voice call: service error " + candidate_error in [c.args[0] for c in log.call_args_list]
             return
         await socket.queue.put(json.dumps({"type": "error", "sequence": 999, "error": "private-text"}))
@@ -1377,6 +1386,24 @@ async def signalling_tolerance(candidate_error="participant-not-found"):
         assert states.count("ended") == 1
         assert not any("signalling failed" in c.args[0] for c in log.call_args_list)
     ok("refused candidates, stray and malformed frames keep a call; the end is told before the hang-up goes")
+
+
+async def terminal_reply_during_send():
+    loop = asyncio.get_running_loop()
+    previous = loop.get_exception_handler()
+    errors = []
+    loop.set_exception_handler(lambda _loop, context: errors.append(context))
+    try:
+        await signalling_tolerance("conversation-ended", suspend_send=True)
+        # Collect traceback cycles while the loop and its handler still exist.
+        # Checking only at end() can miss delayed Future diagnostics.
+        for _ in range(3):
+            gc.collect()
+            await asyncio.sleep(0)
+        assert not errors, [context.get("message") for context in errors]
+    finally:
+        loop.set_exception_handler(previous)
+    ok("matched terminal reply during suspended send leaves no unretrieved Future exception")
 
 
 async def media_state_transitions():
@@ -1979,6 +2006,7 @@ async def main():
     await signalling_tolerance()
     for code in sorted(bm.VoiceCall.FATAL_ERRORS):
         await signalling_tolerance(code)
+    await terminal_reply_during_send()
 
 
 asyncio.run(main())

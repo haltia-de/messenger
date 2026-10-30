@@ -3159,6 +3159,10 @@ class VoiceCall:
             return await asyncio.wait_for(future, 10)
         finally:
             self.pending.pop(sequence, None)
+            # A reply may arrive while send() is still suspended. Cancellation
+            # then skips awaiting its Future, but must still retrieve its error.
+            if future.done() and not future.cancelled():
+                future.exception()
 
     def start(self, params):
         # Kept separately from negotiation jobs: even a cancelled invitation
