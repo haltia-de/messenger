@@ -231,7 +231,7 @@ chats of the message's messenger (between messengers: step 4). At the
 - **Caches.** `~/.cache/haltia-messenger/chats/<id>.json` keeps the last `KEEP` messages per chat and
   `list.json` the chat list (all mode 600, written atomically via `.new` + `os.replace`).
   Chat *files* themselves are not bounded (MSG2-14); `docs/cache-retention.md` is the proposed
-  retention policy and is not applied — no production pass deletes them. The
+  access-stamp retention policy and is not applied — no production pass deletes them. The
   messages go through `MessageCache` (`Backend.cache`): read from disk once and kept in memory,
   written by a timer thread 2 s after the last change and at `do_shutdown` (`flush`); both
   threads use it, `read` gives copies — never touch the files themselves. A chat whose
