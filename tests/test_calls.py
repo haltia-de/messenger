@@ -296,6 +296,7 @@ def stand_in_audio(pipeline):
                                 PadLinkReturn=SimpleNamespace(OK="ok"),
                                 Caps=SimpleNamespace(from_string=lambda text: text))
     audio.closed, audio.video_generation, audio.media_generation, audio.camera = False, 0, 0, None
+    audio.sender_generation, audio.sender_lock = 0, None
     audio.frame = audio.video_bin = audio.video_pad = audio.rtc = audio.bus = None
     audio.signals, audio.pending, audio.failed_bins = [], [], []
     audio.candidate = audio.status = lambda _value: None
@@ -1315,7 +1316,10 @@ async def media_state_transitions():
     def collecting_pipeline():
         pipe = SimpleNamespace(added=[], removed=[], state=None)
         pipe.add = pipe.added.append
-        pipe.remove = pipe.removed.append
+        def remove(el):
+            assert el not in pipe.removed, "video bin removed twice"
+            pipe.removed.append(el)
+        pipe.remove = remove
         pipe.set_state = lambda state: setattr(pipe, "state", state) or "success"
         return pipe
 
@@ -1445,14 +1449,33 @@ async def media_state_transitions():
     offer = {"type": "offer", "sdp": "v=0\r\nm=video 9 UDP/TLS/RTP/SAVPF 102\r\na=rtpmap:102 VP8/90000\r\n"}
     promised = []
 
-    def stub_remote(audio):
+    def stub_remote(audio, h264=False):
         audio.RTC = SimpleNamespace(WebRTCSDPType=SimpleNamespace(OFFER="offer", ANSWER="answer"),
-                                    WebRTCSessionDescription=SimpleNamespace(new=lambda kind, sdp: (kind, sdp)))
+                                    WebRTCSessionDescription=SimpleNamespace(new=lambda kind, sdp: (kind, sdp)),
+                                    WebRTCRTPTransceiverDirection=SimpleNamespace(RECVONLY="recvonly"))
         audio.Sdp = SimpleNamespace(SDPResult=SimpleNamespace(OK="ok"),
                                     SDPMessage=SimpleNamespace(new_from_text=lambda _sdp: ("ok", object())))
         async def promise(command, *_args):
             promised.append(command)
         audio._promise = promise
+        if h264:
+            audio.Gst.ElementFactory = SimpleNamespace(
+                find=lambda n: object() if n in ("avdec_h264", "openh264dec") else None)
+
+    class FakePad:
+        def __init__(self):
+            self.direction = self.codecs = None
+            self.transceiver = SimpleNamespace(set_property=self._set)
+
+        def _set(self, key, value):
+            if key == "direction":
+                self.direction = value
+            else:
+                self.codecs = value
+
+        def get_property(self, name):
+            assert name == "transceiver"
+            return self.transceiver
 
     release = threading.Event()
     delayed = DelayedState(release, name="video")
@@ -1496,6 +1519,158 @@ async def media_state_transitions():
             remoting.cancel()
     ok("remote() close in flight skips the payload change and set-remote-description")
 
+    # remote() VP8 NULL FAILURE must not mutate a still-running bin.
+    promised.clear()
+    release = threading.Event()
+    release.set()
+    delayed = DelayedState(release, name="vp8-fail")
+    delayed.fail = True
+    video = FakeBin(delayed, pt=96)
+    audio = stand_in_audio(StoppingPipeline())
+    audio.video_bin = video
+    stub_remote(audio)
+    await audio.remote(offer)
+    assert video.pt == 96 and not video.synced and promised == ["set-remote-description"]
+    ok("remote() VP8 NULL FAILURE leaves payload and still applies SDP")
+
+    # remote() H264: NULL first; FAILURE keeps the running bin; success removes it.
+    h264_offer = {"type": "offer", "sdp":
+                  "v=0\r\nm=video 9 UDP/TLS/RTP/SAVPF 102\r\na=rtpmap:102 H264/90000\r\n"}
+    promised.clear()
+    release = threading.Event()
+    release.set()
+    delayed = DelayedState(release, name="h264-fail")
+    delayed.fail = True
+    video = FakeBin(delayed, pt=96)
+    pipe = collecting_pipeline()
+    audio = stand_in_audio(pipe)
+    pad, released = FakePad(), []
+    audio.video_bin, audio.video_pad = video, pad
+    audio.rtc = SimpleNamespace(release_request_pad=released.append)
+    stub_remote(audio, h264=True)
+    await audio.remote(h264_offer)
+    assert audio.video_bin is video and not pipe.removed and released == []
+    assert promised == ["set-remote-description"]
+    ok("remote() H264 NULL FAILURE does not remove the still-running bin")
+
+    promised.clear()
+    release = threading.Event()
+    release.set()
+    delayed = DelayedState(release, name="h264-ok")
+    video = FakeBin(delayed, pt=96)
+    pipe = collecting_pipeline()
+    audio = stand_in_audio(pipe)
+    pad, released = FakePad(), []
+    audio.video_bin, audio.video_pad = video, pad
+    audio.rtc = SimpleNamespace(release_request_pad=released.append)
+    stub_remote(audio, h264=True)
+    await audio.remote(h264_offer)
+    assert audio.video_bin is None and pipe.removed == [video] and released == [pad]
+    assert pad.direction == "recvonly" and promised == ["set-remote-description"]
+    ok("remote() H264 NULL success releases the VP8 sender")
+
+    # Overlap: remote VP8 payload 102 while rebuild_sender's NULL is in flight.
+    # FIFO orders worker jobs; the lock serializes loop-side snapshot/commit.
+    promised.clear()
+    release = threading.Event()
+    delayed = DelayedState(release, name="overlap")
+    old = FakeBin(delayed, pt=96)
+    pipe = collecting_pipeline()
+    audio = stand_in_audio(pipe)
+    audio.video_bin, audio.video_pad = old, "pad"
+    made = []
+    audio._sender_bin = lambda payload: made.append(FakeBin(pt=payload)) or made[-1]
+    stub_remote(audio)
+    rebuilding = asyncio.create_task(audio.rebuild_sender())
+    remoting = None
+    try:
+        await until(delayed.started.is_set)
+        remoting = asyncio.create_task(audio.remote(offer))
+        await asyncio.sleep(.05)
+        assert not remoting.done() and old.pt == 96
+        release.set()
+        assert await rebuilding is True
+        await remoting
+        assert audio.video_bin is made[0] and audio.video_bin.pt == 102
+        assert old.pt == 96 and pipe.removed == [old]
+        assert promised == ["set-remote-description"]
+    finally:
+        release.set()
+        if not rebuilding.done():
+            rebuilding.cancel()
+        if remoting is not None and not remoting.done():
+            remoting.cancel()
+    ok("rebuild_sender overlapping remote() VP8 keeps the negotiated payload")
+
+    # The other order: remote() applies 102, then rebuild installs 102, not 96.
+    promised.clear()
+    release = threading.Event()
+    delayed = DelayedState(release, name="overlap-remote")
+    old = FakeBin(delayed, pt=96)
+    pipe = collecting_pipeline()
+    audio = stand_in_audio(pipe)
+    audio.video_bin, audio.video_pad = old, "pad"
+    made = []
+    audio._sender_bin = lambda payload: made.append(FakeBin(pt=payload)) or made[-1]
+    stub_remote(audio)
+    remoting = asyncio.create_task(audio.remote(offer))
+    rebuilding = None
+    try:
+        await until(delayed.started.is_set)
+        rebuilding = asyncio.create_task(audio.rebuild_sender())
+        await asyncio.sleep(.05)
+        assert not rebuilding.done()
+        release.set()
+        await remoting
+        assert old.pt == 102
+        assert await rebuilding is True
+        assert audio.video_bin is made[0] and audio.video_bin.pt == 102
+        assert pipe.removed == [old]
+    finally:
+        release.set()
+        if not remoting.done():
+            remoting.cancel()
+        if rebuilding is not None and not rebuilding.done():
+            rebuilding.cancel()
+    ok("remote() overlapping rebuild_sender still rebuilds with payload 102")
+
+    # H264 remote overlapping rebuild: no stale pad unlink, no double-remove.
+    promised.clear()
+    release = threading.Event()
+    delayed = DelayedState(release, name="h264-overlap")
+    old = FakeBin(delayed, pt=96)
+    pipe = collecting_pipeline()
+    audio = stand_in_audio(pipe)
+    pad, released = FakePad(), []
+    audio.video_bin, audio.video_pad = old, pad
+    audio.rtc = SimpleNamespace(release_request_pad=released.append)
+    made = []
+    audio._sender_bin = lambda payload: made.append(FakeBin(pt=payload)) or made[-1]
+    stub_remote(audio, h264=True)
+    rebuilding = asyncio.create_task(audio.rebuild_sender())
+    remoting = None
+    try:
+        await until(delayed.started.is_set)
+        remoting = asyncio.create_task(audio.remote(h264_offer))
+        await asyncio.sleep(.05)
+        assert not remoting.done()
+        release.set()
+        rebuilt = await rebuilding
+        await remoting
+        assert len(pipe.removed) == len(set(pipe.removed))
+        if rebuilt:
+            assert audio.video_bin is None and old in pipe.removed
+            assert released[-1] is pad or audio.video_pad is None
+        else:
+            assert audio.video_bin is None and pipe.removed == [old]
+    finally:
+        release.set()
+        if not rebuilding.done():
+            rebuilding.cancel()
+        if remoting is not None and not remoting.done():
+            remoting.cancel()
+    ok("rebuild_sender overlapping remote() H264 does not double-remove")
+
     # negotiate owns SDP: description waits until start() finishes; hang-up
     # during start does not create an offer.
     order = []
@@ -1534,10 +1709,13 @@ async def media_state_transitions():
     call.command = AsyncMock()
     negotiating = asyncio.create_task(call.negotiate())
     await until(lambda: order == ["start"])
+    assert call.audio is not None  # assigned before start(); SDP is not sent yet
     await call.end("HUNGUP")
     gate.set()
     await asyncio.wait_for(negotiating, 1)
     assert order == ["start", "started"] and "description" not in order
+    assert call.audio is not None and call.audio.closed
+    assert not call.transmit.called
     ok("negotiate close during start does not create SDP")
 
 
@@ -1566,14 +1744,97 @@ async def media_stop_observed():
         stopped = concurrent.futures.Future()
         def close(self):
             self.closed = True
+    stuck = StuckAudio()
     account.call = call = bm.VoiceCall("stop-wait", 10, False, lambda *_a: None)
-    call.accepted, call.audio, call.socket = True, StuckAudio(), Socket()
+    call.accepted, call.audio, call.socket = True, stuck, Socket()
     began = time.monotonic()
     with patch.object(bm, "MEDIA_STOP_WAIT", .05), patch.object(bm, "log_line") as log:
         await backend.hangup_calls()
     assert time.monotonic() - began < .5
     assert any("media stop still running" in c.args[0] for c in log.call_args_list)
+    assert not stuck.stopped.cancelled()
     ok("hangup_calls logs a media stop still running after the bound")
+
+    class TrackingPipeline:
+        def __init__(self):
+            self.states, self.children = [], []
+        def add(self, element):
+            self.children.append(element)
+        def set_state(self, state):
+            self.states.append(state)
+            return "success"
+
+    def occupy_media():
+        occupied, hold = threading.Event(), threading.Event()
+        bm.MEDIA_WORKER.submit(lambda: occupied.set() or hold.wait(5))
+        assert occupied.wait(5)
+        return hold
+
+    def media_barrier():
+        return bm.MEDIA_WORKER.submit(lambda: None).result(5)
+
+    # Queue pipeline NULL behind a blocked MEDIA_WORKER job; hangup_calls
+    # times out; loop turns must not cancel the source; NULL still runs.
+    hold = occupy_media()
+    pipeline = TrackingPipeline()
+    audio = stand_in_audio(pipeline)
+    account.call = call = bm.VoiceCall("stop-fifo", 10, False, lambda *_a: None)
+    call.accepted, call.audio, call.socket = True, audio, Socket()
+    audio.close()
+    source = audio.stopped
+    assert source is not None and not source.done() and pipeline.states == []
+    try:
+        with patch.object(bm, "MEDIA_STOP_WAIT", .05), patch.object(bm, "log_line") as log:
+            await backend.hangup_calls()
+        assert any("media stop still running" in c.args[0] for c in log.call_args_list)
+        assert not source.cancelled() and not source.done()
+        for _ in range(10):
+            await asyncio.sleep(0)
+        assert not source.cancelled() and pipeline.states == []
+        hold.set()
+        media_barrier()
+        assert not source.cancelled() and source.result(5) == "success"
+        assert pipeline.states == ["null"], "queued pipeline NULL was skipped"
+    finally:
+        hold.set()
+    ok("hangup_calls timeout leaves a queued pipeline NULL running")
+
+    # Outer shutdown cancels hangup_calls itself (do_shutdown's future.cancel()).
+    hold = occupy_media()
+    pipeline = TrackingPipeline()
+    audio = stand_in_audio(pipeline)
+    account.call = call = bm.VoiceCall("stop-cancel", 10, False, lambda *_a: None)
+    call.accepted, call.audio, call.socket = True, audio, Socket()
+    audio.close()
+    source = audio.stopped
+    hanging = None
+    try:
+        with patch.object(bm, "MEDIA_STOP_WAIT", 5), patch.object(bm, "log_line") as log:
+            hanging = asyncio.create_task(backend.hangup_calls())
+            await until(lambda: call.hangup_done.is_set() and not hanging.done())
+            await asyncio.sleep(.05)  # inside asyncio.wait on the media stop
+            assert not hanging.done()
+            hanging.cancel()
+            try:
+                await hanging
+            except asyncio.CancelledError:
+                pass
+            else:
+                raise AssertionError("hangup_calls should be cancelled")
+        assert any("media stop still running" in c.args[0] for c in log.call_args_list)
+        assert not source.cancelled() and not source.done()
+        for _ in range(10):
+            await asyncio.sleep(0)
+        assert not source.cancelled() and pipeline.states == []
+        hold.set()
+        media_barrier()
+        assert not source.cancelled() and source.result(5) == "success"
+        assert pipeline.states == ["null"], "queued pipeline NULL was skipped"
+    finally:
+        hold.set()
+        if hanging is not None and not hanging.done():
+            hanging.cancel()
+    ok("hangup_calls task cancellation leaves a queued pipeline NULL running")
 
 
 async def main():

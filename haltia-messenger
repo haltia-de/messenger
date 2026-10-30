@@ -2322,13 +2322,43 @@ CAMERA_WORKER = CameraWorker()
 # One FIFO thread for a call pipeline's PLAYING and NULL, and for the
 # video-bin NULL of rebuild_sender/remote: Gst waits for streaming threads
 # (the microphone, the speaker, libnice), never on the asyncio loop, and
-# never behind a camera still being found. One stuck job delays later ones
-# on this worker; hangup_calls waits MEDIA_STOP_WAIT seconds, logs a stop
-# that failed or is still running, and proceeds. The thread is a daemon:
-# quit does not kill a wedged driver, and a streaming thread may still be
-# inside set_state when the wait ends.
+# never behind a camera still being found. The queue is unbounded: a call
+# enqueues a handful of PLAYING/NULL jobs (the pipeline and its video bin).
+# One stuck job delays later ones on this worker; hangup_calls waits
+# MEDIA_STOP_WAIT seconds, logs a stop that failed or is still running, and
+# proceeds. The thread is a daemon: quit does not kill a wedged driver, and
+# a streaming thread may still be inside set_state when the wait ends.
 MEDIA_WORKER = CameraWorker("call media")
 MEDIA_STOP_WAIT = 1
+
+
+def media_wait(future):
+    """Follow a MEDIA_WORKER job from asyncio without cancelling it.
+
+    wrap_future links cancellation to the concurrent Future; CameraWorker
+    then skips the job (set_running_or_notify_cancel is false) and a queued
+    pipeline NULL never runs. hangup_calls may give up at MEDIA_STOP_WAIT
+    or be cancelled by do_shutdown; the FIFO still stops the pipeline.
+    """
+    loop = asyncio.get_running_loop()
+    waiter = loop.create_future()
+
+    def copied():
+        if waiter.done():
+            return
+        if future.cancelled():
+            waiter.cancel()
+            return
+        error = future.exception()
+        if error is not None:
+            waiter.set_exception(error)
+        else:
+            waiter.set_result(future.result())
+
+    future.add_done_callback(lambda _f: loop.call_soon_threadsafe(copied))
+    if future.done():
+        copied()
+    return waiter
 
 
 class CallPicture(Gtk.DrawingArea):
@@ -2404,6 +2434,8 @@ class CallAudio:
         self.frame = None
         self.video_generation = 0
         self.media_generation = 0  # PLAYING/video-bin NULL: close invalidates in-flight changes
+        self.sender_generation = 0  # remote/rebuild_sender: who owns the bin across awaits
+        self.sender_lock = None  # asyncio.Lock, made on the first video-bin transition
         self.video_frames = 0  # pictures encoded
         self.video_pushed = 0  # the camera's frames handed to the encoder
         self.remote_bin = None  # the peer's video decoding, once it comes
@@ -2465,11 +2497,17 @@ class CallAudio:
             self.close()
             raise
 
+    def _sender_lock(self):
+        lock = getattr(self, "sender_lock", None)
+        if lock is None:
+            self.sender_lock = lock = asyncio.Lock()
+        return lock
+
     async def _set_state(self, element, state):
         """Gst waits for streaming threads: never on the asyncio loop."""
         if element is None:
             return None
-        return await asyncio.wrap_future(MEDIA_WORKER.submit(element.set_state, state))
+        return await media_wait(MEDIA_WORKER.submit(element.set_state, state))
 
     async def start(self):
         """Bring the pipeline to PLAYING off the loop. SDP and ICE stay here."""
@@ -2555,36 +2593,43 @@ class CallAudio:
     async def rebuild_sender(self):
         """The sending branch failed (its encoder): a new one in its place, on
         the same transceiver, so the camera's picture goes on. The old bin's
-        NULL waits on MEDIA_WORKER; unlink and the new bin stay on the loop."""
-        old, pad = self.video_bin, self.video_pad
-        pipeline = self.pipeline
-        generation = getattr(self, "media_generation", 0)
-        if self.closed or old is None or pad is None or pipeline is None:
-            return False
-        payload = old.get_by_name("video_pay").get_property("pt")
-        if old not in self.failed_bins:
-            self.failed_bins.append(old)  # late errors from it count no more
-        result = await self._set_state(old, self.Gst.State.NULL)
-        if self.closed or generation != getattr(self, "media_generation", generation) \
-                or self.video_bin is not old or self.pipeline is not pipeline:
-            return False
-        if result == self.Gst.StateChangeReturn.FAILURE:
-            return False
-        old.get_static_pad("src").unlink(pad)
-        pipeline.remove(old)
-        sender = self._sender_bin(payload)
-        # As many bits as the picture's size wants, not vp8enc's default.
-        sender.get_by_name("video_encoder").set_property(
-            "target-bitrate", VIDEO_BITRATE.get(self.video_size[0], 350000))
-        pipeline.add(sender)
-        if not sender.get_static_pad("src").link(pad) == self.Gst.PadLinkReturn.OK:
-            pipeline.remove(sender)
-            if self.video_bin is old:
-                self.video_bin = None
-            return False
-        sender.sync_state_with_parent()
-        self.video_bin = sender
-        return True
+        NULL waits on MEDIA_WORKER; unlink and the new bin stay on the loop.
+        remote() may run at the same time: the lock and sender_generation
+        keep pad and payload owned by one transition."""
+        async with self._sender_lock():
+            old, pad = self.video_bin, self.video_pad
+            pipeline = self.pipeline
+            generation = getattr(self, "media_generation", 0)
+            if self.closed or old is None or pad is None or pipeline is None:
+                return False
+            self.sender_generation = getattr(self, "sender_generation", 0) + 1
+            mine = self.sender_generation
+            if old not in self.failed_bins:
+                self.failed_bins.append(old)  # late errors from it count no more
+            result = await self._set_state(old, self.Gst.State.NULL)
+            if self.closed or generation != getattr(self, "media_generation", generation) \
+                    or mine != getattr(self, "sender_generation", mine) \
+                    or self.video_bin is not old or self.video_pad is not pad \
+                    or self.pipeline is not pipeline:
+                return False
+            if result in (None, self.Gst.StateChangeReturn.FAILURE):
+                return False
+            payload = old.get_by_name("video_pay").get_property("pt")
+            old.get_static_pad("src").unlink(pad)
+            pipeline.remove(old)
+            sender = self._sender_bin(payload)
+            # As many bits as the picture's size wants, not vp8enc's default.
+            sender.get_by_name("video_encoder").set_property(
+                "target-bitrate", VIDEO_BITRATE.get(self.video_size[0], 350000))
+            pipeline.add(sender)
+            if not sender.get_static_pad("src").link(pad) == self.Gst.PadLinkReturn.OK:
+                pipeline.remove(sender)
+                if self.video_bin is old:
+                    self.video_bin = None
+                return False
+            sender.sync_state_with_parent()
+            self.video_bin = sender
+            return True
 
     def _bus(self, _bus, message, _data):
         if message.type == self.Gst.MessageType.ERROR:
@@ -2868,37 +2913,50 @@ class CallAudio:
                 match = re.search(r"a=rtpmap:(\d+) VP8/90000", video[1], re.IGNORECASE)
                 if match:
                     payload = int(match.group(1))
-                    bin = self.video_bin
-                    generation = getattr(self, "media_generation", 0)
-                    await self._set_state(bin, self.Gst.State.NULL)
-                    if not self.closed and generation == getattr(self, "media_generation", generation) \
-                            and self.video_bin is bin:
-                        bin.get_by_name("video_pay").set_property("pt", payload)
-                        bin.get_by_name("video_caps").set_property(
-                            "caps", self.Gst.Caps.from_string(VIDEO_CAPS % payload))
-                        bin.sync_state_with_parent()
+                    async with self._sender_lock():
+                        bin = self.video_bin
+                        generation = getattr(self, "media_generation", 0)
+                        if not self.closed and bin is not None:
+                            self.sender_generation = getattr(self, "sender_generation", 0) + 1
+                            mine = self.sender_generation
+                            result = await self._set_state(bin, self.Gst.State.NULL)
+                            if not self.closed and generation == getattr(self, "media_generation", generation) \
+                                    and mine == getattr(self, "sender_generation", mine) \
+                                    and self.video_bin is bin \
+                                    and result not in (None, self.Gst.StateChangeReturn.FAILURE):
+                                bin.get_by_name("video_pay").set_property("pt", payload)
+                                bin.get_by_name("video_caps").set_property(
+                                    "caps", self.Gst.Caps.from_string(VIDEO_CAPS % payload))
+                                bin.sync_state_with_parent()
                 else:
                     h264 = re.search(r"a=rtpmap:(\d+) H264/90000", video[1], re.IGNORECASE)
                     decoder = any(self.Gst.ElementFactory.find(n) for n in ("avdec_h264", "openh264dec"))
                     if h264 and decoder:
                         # We send VP8; a H264-only peer can still send its picture.
                         # Keep the reserved receiver but release its VP8 sender.
-                        self.set_video(False)
-                        if not self.closed and self.video_bin is not None and self.video_pad is not None:
-                            transceiver = self.video_pad.get_property("transceiver")
-                            bin = self.video_bin
-                            generation = getattr(self, "media_generation", 0)
-                            bin.get_static_pad("src").unlink(self.video_pad)
-                            self.rtc.release_request_pad(self.video_pad)
-                            self.video_pad = None
-                            await self._set_state(bin, self.Gst.State.NULL)
-                            if not self.closed and generation == getattr(self, "media_generation", generation) \
-                                    and self.pipeline is not None:
-                                self.pipeline.remove(bin)
-                                self.video_bin = None
-                                transceiver.set_property("direction", self.RTC.WebRTCRTPTransceiverDirection.RECVONLY)
-                                transceiver.set_property("codec-preferences", self.Gst.Caps.from_string(
-                                    "application/x-rtp,media=video,encoding-name=H264,payload=%s,clock-rate=90000" % h264.group(1)))
+                        async with self._sender_lock():
+                            self.set_video(False)
+                            if not self.closed and self.video_bin is not None and self.video_pad is not None:
+                                transceiver = self.video_pad.get_property("transceiver")
+                                bin, pad, pipeline = self.video_bin, self.video_pad, self.pipeline
+                                generation = getattr(self, "media_generation", 0)
+                                self.sender_generation = getattr(self, "sender_generation", 0) + 1
+                                mine = self.sender_generation
+                                result = await self._set_state(bin, self.Gst.State.NULL)
+                                if not self.closed and generation == getattr(self, "media_generation", generation) \
+                                        and mine == getattr(self, "sender_generation", mine) \
+                                        and self.video_bin is bin and self.pipeline is pipeline \
+                                        and pipeline is not None \
+                                        and result not in (None, self.Gst.StateChangeReturn.FAILURE):
+                                    bin.get_static_pad("src").unlink(pad)
+                                    if self.video_pad is pad and self.rtc is not None:
+                                        self.rtc.release_request_pad(pad)
+                                    self.video_pad = None
+                                    pipeline.remove(bin)
+                                    self.video_bin = None
+                                    transceiver.set_property("direction", self.RTC.WebRTCRTPTransceiverDirection.RECVONLY)
+                                    transceiver.set_property("codec-preferences", self.Gst.Caps.from_string(
+                                        "application/x-rtp,media=video,encoding-name=H264,payload=%s,clock-rate=90000" % h264.group(1)))
         if self.closed:
             return
         result, sdp = self.Sdp.SDPMessage.new_from_text(description["sdp"])
@@ -2953,6 +3011,7 @@ class CallAudio:
         self.closed = True
         self.video_generation += 1  # late frames of any camera are dropped
         self.media_generation = getattr(self, "media_generation", 0) + 1  # in-flight PLAYING/NULL is stale
+        self.sender_generation = getattr(self, "sender_generation", 0) + 1  # video-bin transition lost
         CAMERA_WORKER.submit(self._set_video, False)
         self.frame = None
         self.video_bin = None
@@ -3708,11 +3767,20 @@ class Backend:
         # stuck job can still be inside set_state when it ends, and a
         # streaming thread may still call into Python. Quit stays inside
         # do_shutdown's two seconds; we do not kill the driver. Failed or
-        # unfinished stops are logged.
-        stopping = [asyncio.wrap_future(call.audio.stopped) for call in calls
+        # unfinished stops are logged. Waiters may be cancelled (timeout or
+        # do_shutdown); media_wait does not cancel the FIFO job.
+        stopping = [media_wait(call.audio.stopped) for call in calls
                     if isinstance(getattr(call.audio, "stopped", None), concurrent.futures.Future)]
         if stopping:
-            done, pending = await asyncio.wait(stopping, timeout=MEDIA_STOP_WAIT)
+            try:
+                done, pending = await asyncio.wait(stopping, timeout=MEDIA_STOP_WAIT)
+            except asyncio.CancelledError:
+                leftover = [waiter for waiter in stopping if not waiter.done()]
+                if leftover:
+                    log_line("voice call: media stop still running after shutdown cancelled")
+                    for waiter in leftover:
+                        waiter.cancel()  # the waiter only; MEDIA_WORKER keeps the NULL
+                raise
             for task in done:
                 if task.cancelled():
                     continue
