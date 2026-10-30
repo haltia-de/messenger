@@ -3104,6 +3104,8 @@ class VoiceCall:
         self.task = None
         self.disconnect_timer = None
         self.hangup_done = asyncio.Event()  # send attempt finished, including pending ws2 opens
+        self.dial_pending = False  # setup may still produce a ws2 task
+        self.hangup_finished = None  # account-owned registry cleanup, no waiter task
 
     def media_settings(self):
         return dict(self.SETTINGS, isVideoEnabled=self.video, isAudioEnabled=not self.muted)
@@ -3169,6 +3171,11 @@ class VoiceCall:
         # must finish opening ws2 long enough to deliver the person's hangup.
         self.task = asyncio.create_task(self.run(params))
 
+    def finish_hangup(self):
+        self.hangup_done.set()
+        if self.hangup_finished is not None:
+            self.hangup_finished(self)
+
     async def send_hangup(self):
         if self.end_reason and self.socket:
             self.sequence += 1
@@ -3179,7 +3186,7 @@ class VoiceCall:
             except Exception:
                 pass
             finally:
-                self.hangup_done.set()
+                self.finish_hangup()
 
     async def run(self, params):
         self.task = asyncio.current_task()
@@ -3229,7 +3236,7 @@ class VoiceCall:
         finally:
             await self.end(None, "ended")
             if self.end_reason:
-                self.hangup_done.set()  # connection failed before a hangup could be delivered
+                self.finish_hangup()  # connection failed before a hangup could be delivered
 
     # The service's errors that mean the call is over; any other one not
     # answering a command waiting (a late reply to one given up, a refused
@@ -3586,6 +3593,8 @@ class VoiceCall:
         # nothing awaited before it, so a cancelled end() still tells: the
         # window takes the call screen, the ringing, its notification and
         # the inhibitors away at once, and the next call is not BUSY.
+        if self.socket is None and self.task is None and not self.dial_pending:
+            self.finish_hangup()  # no signalling producer can send a hangup
         self.changed(self, state)
         if self.socket:
             await self.send_hangup()
@@ -3855,6 +3864,7 @@ class Backend:
             if person is None or person == account.me:
                 raise ValueError("not another person")
             call = account.new_call(str(uuid.uuid4()), person, False, video=video)
+            call.dial_pending = True
             try:
                 params = await account.link.dial(call.id, person, video=True) if video else await account.link.dial(call.id, person)
                 if not call.closed or call.end_reason:
@@ -3863,8 +3873,10 @@ class Backend:
                 await call.end(None, "failed")
                 # No ws2 task will be started after a failed dial request.
                 # Release shutdown even if it already canceled this call.
-                call.hangup_done.set()
+                call.finish_hangup()
                 raise
+            finally:
+                call.dial_pending = False
         else:
             call = account.call
             if call is None or call.id != conversation:
@@ -4191,10 +4203,6 @@ class Account:
                 if call.closed:
                     if call.end_reason and not call.hangup_done.is_set():
                         self.ending_calls.add(call)
-                        async def finished():
-                            await call.hangup_done.wait()
-                            self.ending_calls.discard(call)
-                        asyncio.create_task(finished())
                     self.call = None
                     if (call.incoming and not call.accepted
                             and call.end_reason not in ("REJECTED", "BUSY")):
@@ -4203,6 +4211,7 @@ class Account:
                             "peer": call.peer, "name": self.name(call.peer, "Собеседник"),
                             "time": now_ms()})
         call = self.call = VoiceCall(conversation, peer, incoming, changed, self.agent, video=video)
+        call.hangup_finished = self.ending_calls.discard
         def frame(own, picture):
             if self.call is call and not call.closed:
                 receiver = getattr(self.ui, "call_frame", None)

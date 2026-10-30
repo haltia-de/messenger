@@ -983,6 +983,25 @@ async def quit_after_ui_end():
     ok("real account terminal UI stays immediate; quit waits for old hangup without crossing ownership")
 
 
+async def end_without_signalling():
+    from fake_link import FakeLink
+    ui = SimpleNamespace(call_changed=Mock(return_value=None), missed_call=Mock(return_value=None))
+    backend = bm.Backend(ui, FakeLink())
+    account = backend.accounts["max"]
+    tasks = asyncio.all_tasks()
+    with patch.object(bm.GLib, "idle_add", side_effect=lambda cb, *args: cb(*args)):
+        for incoming in (False, True):
+            call = account.new_call("never-started", 10, incoming)
+            await call.end(call.hangup_reason())
+            assert account.call is None and not account.ending_calls
+            assert call.hangup_done.is_set()
+            assert ui.call_changed.call_args.args[0]["state"] == "ended"
+        await asyncio.wait_for(backend.hangup_calls(), .2)
+        await asyncio.sleep(0)
+        assert asyncio.all_tasks() == tasks, "ending a call created an orphan cleanup task"
+    ok("unstarted account calls complete without retained entries or cleanup tasks")
+
+
 async def quit_during_dial(fails=False):
     from fake_link import FakeLink
     fake = FakeLink(can={"calls"})
@@ -1009,6 +1028,7 @@ async def quit_during_dial(fails=False):
     ending = asyncio.create_task(backend.hangup_calls())
     await asyncio.sleep(.01)
     assert not ending.done() and call.closed
+    assert call in account.ending_calls and not call.hangup_done.is_set()
     gate.set()
     if fails:
         try:
@@ -1019,11 +1039,13 @@ async def quit_during_dial(fails=False):
             raise AssertionError("dial should fail")
         await asyncio.wait_for(ending, .2)
         assert call.hangup_done.is_set() and call.task is None
+        assert not account.ending_calls
         ok("failed setup releases the quit waiter without the two-second timeout")
         return
     await pending
     await asyncio.wait_for(ending, 1)
     await call.task
+    assert not account.ending_calls
     assert socket.commands() == ["hangup"] and socket.sent[0]["reason"] == "CANCELED"
     ok("quit waits for cancellation while outgoing setup is still pending")
 
@@ -2000,6 +2022,7 @@ async def main():
     await busy_invitation()
     await quit_hangup()
     await quit_after_ui_end()
+    await end_without_signalling()
     await quit_during_dial()
     await quit_during_dial(fails=True)
     await missed_calls()
