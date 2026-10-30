@@ -947,6 +947,41 @@ async def quit_hangup():
     ok("quit waits for a delayed hangup send and releases media first")
 
 
+async def quit_after_ui_end():
+    from fake_link import FakeLink
+    ui = SimpleNamespace(call_changed=Mock())
+    backend = bm.Backend(ui, FakeLink())
+    account = backend.accounts["max"]
+    other = bm.Account(ui, FakeLink(), backend.cache, account.folder)
+    other_call = other.new_call("other-account", 20, False)
+    gate, attempted = asyncio.Event(), asyncio.Event()
+    class Gated(Socket):
+        async def send(self, raw):
+            attempted.set()
+            await gate.wait()
+            await super().send(raw)
+    call = account.new_call("old-call", 10, False)
+    call.accepted, call.socket = True, Gated()
+    with patch.object(bm.GLib, "idle_add", side_effect=lambda cb, *args: cb(*args)):
+        end = asyncio.create_task(call.end("HUNGUP"))
+        await asyncio.wait_for(attempted.wait(), .5)
+        assert account.call is None and ui.call_changed.call_args.args[0]["state"] == "ended"
+        quit = asyncio.create_task(backend.hangup_calls())
+        await asyncio.sleep(.01)
+        assert not quit.done() and call in account.ending_calls
+        replacement = account.new_call("replacement", 10, False)
+        gate.set()
+        await asyncio.wait_for(asyncio.gather(end, quit), .5)
+        assert other.call is other_call and not other_call.closed
+        assert call not in account.ending_calls
+        # Late notification must also leave the replacement alone.
+        call.changed(call, "ended")
+        assert account.call is replacement
+    await replacement.end()
+    await other_call.end()
+    ok("real account terminal UI stays immediate; quit waits for old hangup without crossing ownership")
+
+
 async def quit_during_dial(fails=False):
     from fake_link import FakeLink
     fake = FakeLink(can={"calls"})
@@ -1252,7 +1287,7 @@ async def end_logging():
     ok("terminal logs contain only allowed reasons and local/remote origin, once, without identifiers")
 
 
-async def signalling_tolerance():
+async def signalling_tolerance(candidate_error="participant-not-found"):
     # What the media do not need never ends a talk: an error frame no command
     # waits for (a late reply, a refused candidate), a candidate the service
     # refuses, a malformed one from the peer. Only a fatal error ends it.
@@ -1262,7 +1297,7 @@ async def signalling_tolerance():
             if isinstance(value, dict) and "candidate" in (value.get("data") or {}):
                 self.sent.append(value)
                 await self.queue.put(json.dumps({"type": "error", "sequence": value["sequence"],
-                                                 "error": "participant-not-found"}))
+                                                 "error": candidate_error}))
                 return
             await super().send(raw)
     socket = Refusing()
@@ -1277,6 +1312,13 @@ async def signalling_tolerance():
     Audio.made[-1].state("connected")
     with patch.object(bm, "log_line") as log:
         call.candidate({"candidate": "refused", "sdpMLineIndex": 0})
+        if candidate_error in bm.VoiceCall.FATAL_ERRORS:
+            await until(lambda: call.closed)
+            await asyncio.gather(call.task, return_exceptions=True)
+            assert states[-1] == "failed" and Audio.made[-1].closed
+            assert not call.pending
+            assert "voice call: service error " + candidate_error in [c.args[0] for c in log.call_args_list]
+            return
         await socket.queue.put(json.dumps({"type": "error", "sequence": 999, "error": "private-text"}))
         await socket.queue.put(json.dumps({"type": "error", "error": "illegal-participant-state"}))
         for bad in (None, {"sdpMLineIndex": 0}, "text"):
@@ -1930,10 +1972,13 @@ async def main():
     await calls_switched_off()
     await busy_invitation()
     await quit_hangup()
+    await quit_after_ui_end()
     await quit_during_dial()
     await quit_during_dial(fails=True)
     await missed_calls()
     await signalling_tolerance()
+    for code in sorted(bm.VoiceCall.FATAL_ERRORS):
+        await signalling_tolerance(code)
 
 
 asyncio.run(main())

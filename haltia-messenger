@@ -3203,6 +3203,11 @@ class VoiceCall:
                         if future is not None and not future.done():
                             if event["type"] == "error":
                                 future.set_exception(RuntimeError("call command refused"))
+                                # Owned replies bypass unmatched-error handling,
+                                # but known terminal errors still end the call.
+                                code = event.get("error") or event.get("message")
+                                if isinstance(code, str) and code in self.FATAL_ERRORS:
+                                    self.service_error(event)
                             else:
                                 future.set_result(event)
                         elif event["type"] == "error":
@@ -3239,8 +3244,8 @@ class VoiceCall:
             self.job(self.end("FAILED", "failed"))
 
     async def best_effort(self, what, command, *args):
-        """A command the media do not need: its failure is logged, never
-        the call's end (ICE goes on with the candidates that did go)."""
+        """Log recoverable command failure; the reader handles terminal errors.
+        ICE goes on with the candidates that did go."""
         try:
             await command(*args)
         except asyncio.CancelledError:
@@ -3781,7 +3786,8 @@ class Backend:
 
     async def hangup_calls(self):
         """Finish active signalling before quit; no GTK callback is needed."""
-        calls = [account.call for account in self.accounts.values() if account.call is not None]
+        calls = list({call for account in self.accounts.values()
+                      for call in account.ending_calls | ({account.call} if account.call else set())})
         await asyncio.gather(*(call.end(call.hangup_reason()) for call in calls))
         # A dial request or ws2 handshake may still be finishing. Keep the
         # process alive for its cancellation send within do_shutdown's budget.
@@ -4067,6 +4073,7 @@ class Account:
         self.secret = None  # a future the sign-in waits on for the cloud password
         self.me = None
         self.call = None
+        self.ending_calls = set()  # terminal UI delivered, hangup still pending
         self.declining = set()  # invitations currently being answered BUSY
         self.names = {}
         self.portraits = {}
@@ -4178,6 +4185,12 @@ class Account:
                     "video_wanted": call.video_wanted,
                     "muted": getattr(call, "muted", False), "since": getattr(call, "since", None)})
                 if call.closed:
+                    if call.end_reason and not call.hangup_done.is_set():
+                        self.ending_calls.add(call)
+                        async def finished():
+                            await call.hangup_done.wait()
+                            self.ending_calls.discard(call)
+                        asyncio.create_task(finished())
                     self.call = None
                     if (call.incoming and not call.accepted
                             and call.end_reason not in ("REJECTED", "BUSY")):

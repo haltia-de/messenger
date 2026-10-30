@@ -36,10 +36,14 @@ errors = []
 
 
 async def setup():
-    call = bm.VoiceCall("quit-timeout", 10, False, lambda *_args: None)
+    call = app.backend.accounts["max"].new_call("quit-timeout", 10, False)
     call.accepted = True
     call.socket, call.audio = socket, audio
-    app.backend.accounts["max"].call = call
+    asyncio.create_task(call.end("HUNGUP"))
+    while socket.attempted is None:
+        await asyncio.sleep(.001)
+    assert app.backend.accounts["max"].call is None
+    assert call in app.backend.accounts["max"].ending_calls
 
 
 def ready(_result, error):

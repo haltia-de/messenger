@@ -184,8 +184,37 @@ async def pair(passive=False):
         loop.set_exception_handler(previous_handler)
 
 
+async def promise_outcomes():
+    Gst, _rtc, _sdp = bm.call_media()
+    Gst.init(None)
+    audio = bm.CallAudio.__new__(bm.CallAudio)
+    audio.Gst, audio.loop = Gst, asyncio.get_running_loop()
+    # Use the actual Gst promise callback path; no pipeline or device opens.
+    for outcome in ("reply", "interrupt", "expire", "error"):
+        def emit(command, *args):
+            assert command == "set-remote-description"
+            promise = args[-1]
+            if outcome == "error":
+                reply = Gst.Structure.new_empty("reply")
+                reply.set_value("error", "synthetic failure")
+                promise.reply(reply)
+            elif outcome == "reply":
+                promise.reply(None)
+            else:
+                getattr(promise, outcome)()
+        audio.rtc = type("RTC", (), {"emit": staticmethod(emit)})()
+        try:
+            result = await audio._promise("set-remote-description", None)
+        except RuntimeError as error:
+            assert outcome != "reply" and str(error) == "WebRTC negotiation failed"
+        else:
+            assert outcome == "reply" and result is None
+    ok("real Gst promises accept empty replies and reject interrupted, expired and error replies")
+
+
 async def main():
     assert bm.calls_supported()  # the complete Flatpak media stack is advertised
+    await promise_outcomes()
     phone_streams()
     await ringtone()
     await ringback()
