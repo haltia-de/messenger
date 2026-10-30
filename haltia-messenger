@@ -213,6 +213,9 @@ PHOTO_DAYS = 30  # cached photos older than this are removed
 PHOTO_WORKERS = 2  # photos fetched at once; saves go one at a time beside them
 CHATS = os.path.join(PHOTOS, "chats")  # message cache, one file per chat
 KEEP = 80  # messages kept per chat on disk
+# The number of those files is not bounded (MSG2-14 eviction). The proposed
+# access-stamp retention policy is docs/cache-retention.md; nothing here
+# deletes them. drop() removes the JSON only; a sibling .accessed is left.
 VIEWS = 6  # chats kept built in memory
 RETRY = (3, 10, 30, 60)  # s before the link to MAX is started again, then every last one
 
@@ -4784,7 +4787,10 @@ class MessageCache:
                 self._changed(chat_id)
 
     def drop(self, chat_id):
-        """The chat's cache gone, on disk too (a gap, or the chat removed)."""
+        """The chat's cache gone, on disk too (a gap, or the chat removed).
+
+        The proposed sibling .accessed stamp is not removed here (docs/cache-retention.md).
+        No production prune exists."""
         with self.lock:
             self.chats[chat_id] = []
             self.dirty.discard(chat_id)

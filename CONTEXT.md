@@ -26,6 +26,9 @@ line: the term, its name in the code, what it is.
   stranger.
 - **Кэш сообщений** (Message cache, `MessageCache`, `Backend.cache`; files in `~/.cache/haltia-messenger/chats`):
   the newest `KEEP` messages of each chat on disk, so a chat opens at once.
+  The number of chat files is not bounded; the proposed access-stamp
+  retention policy (not applied) is `docs/cache-retention.md`. `drop`
+  removes the JSON only.
 - **Свои люди** (Known people, `Backend.known`, `known.json`): contacts,
   people written to here, and those already in a dialog the first time;
   dialogs of others are hidden while «только от контактов» is on.
