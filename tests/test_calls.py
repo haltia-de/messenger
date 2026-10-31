@@ -3,6 +3,7 @@
 import asyncio
 import base64
 import concurrent.futures
+import gc
 import json
 import threading
 import time
@@ -896,24 +897,38 @@ async def busy_invitation():
     primary.state = "active"
     made = len(Audio.made)
     connected = asyncio.Event()
+    sending, release = asyncio.Event(), asyncio.Event()
     class BusySocket(Socket):
         async def __aenter__(self):
             await connected.wait()
             return await super().__aenter__()
+        async def send(self, raw):
+            sending.set()
+            await release.wait()
+            await super().send(raw)
     socket = BusySocket()
     real_call = bm.VoiceCall
+    calls = []
     def other(*args, **kwargs):
-        return real_call(*args, **kwargs, audio=Audio, connect=lambda *_args, **_kwargs: socket)
+        call = real_call(*args, **kwargs, audio=Audio, connect=lambda *_args, **_kwargs: socket)
+        calls.append(call)
+        return call
     with patch.object(bm, "VoiceCall", side_effect=other) as factory:
         invitation = {"conversationId": "second", "callerId": 20, "vcp": literal(params)}
         await account.on_call_frame(137, dict(invitation, conversationId="primary"))
         assert factory.call_count == 0  # a duplicate of the current call must not reject it
         pending = asyncio.create_task(account.on_call_frame(137, invitation))
         await until(lambda: factory.call_count == 1)
+        busy = calls[0]
+        assert busy.closed and busy.dial_pending and not busy.hangup_done.is_set()
         await account.on_call_frame(137, invitation)  # duplicate during the pending handshake
         assert factory.call_count == 1
         connected.set()
-        await pending
+        await asyncio.wait_for(sending.wait(), .5)
+        assert not pending.done() and not busy.hangup_done.is_set()
+        release.set()
+        await asyncio.wait_for(pending, .5)
+        assert busy.hangup_done.is_set() and not busy.dial_pending
     assert account.call is primary and not primary.closed and primary.state == "active"
     assert len(Audio.made) == made
     assert socket.commands() == ["hangup"] and socket.sent[0]["reason"] == "BUSY"
@@ -947,6 +962,60 @@ async def quit_hangup():
     ok("quit waits for a delayed hangup send and releases media first")
 
 
+async def quit_after_ui_end():
+    from fake_link import FakeLink
+    ui = SimpleNamespace(call_changed=Mock(return_value=None))
+    backend = bm.Backend(ui, FakeLink())
+    account = backend.accounts["max"]
+    other = bm.Account(ui, FakeLink(), backend.cache, account.folder)
+    other_call = other.new_call("other-account", 20, False)
+    gate, attempted = asyncio.Event(), asyncio.Event()
+    class Gated(Socket):
+        async def send(self, raw):
+            attempted.set()
+            await gate.wait()
+            await super().send(raw)
+    call = account.new_call("old-call", 10, False)
+    call.accepted, call.socket = True, Gated()
+    with patch.object(bm.GLib, "idle_add", side_effect=lambda cb, *args: cb(*args)):
+        end = asyncio.create_task(call.end("HUNGUP"))
+        await asyncio.wait_for(attempted.wait(), .5)
+        assert account.call is None and ui.call_changed.call_args.args[0]["state"] == "ended"
+        quit = asyncio.create_task(backend.hangup_calls())
+        await asyncio.sleep(.01)
+        assert not quit.done() and call in account.ending_calls
+        replacement = account.new_call("replacement", 10, False)
+        gate.set()
+        await asyncio.wait_for(asyncio.gather(end, quit), .5)
+        assert other.call is other_call and not other_call.closed
+        assert call not in account.ending_calls
+        # Late notification must also leave the replacement alone.
+        call.changed(call, "ended")
+        assert account.call is replacement
+        await replacement.end()
+        await other_call.end()
+    ok("real account terminal UI stays immediate; quit waits for old hangup without crossing ownership")
+
+
+async def end_without_signalling():
+    from fake_link import FakeLink
+    ui = SimpleNamespace(call_changed=Mock(return_value=None), missed_call=Mock(return_value=None))
+    backend = bm.Backend(ui, FakeLink())
+    account = backend.accounts["max"]
+    tasks = asyncio.all_tasks()
+    with patch.object(bm.GLib, "idle_add", side_effect=lambda cb, *args: cb(*args)):
+        for incoming in (False, True):
+            call = account.new_call("never-started", 10, incoming)
+            await call.end(call.hangup_reason())
+            assert account.call is None and not account.ending_calls
+            assert call.hangup_done.is_set()
+            assert ui.call_changed.call_args.args[0]["state"] == "ended"
+        await asyncio.wait_for(backend.hangup_calls(), .2)
+        await asyncio.sleep(0)
+        assert asyncio.all_tasks() == tasks, "ending a call created an orphan cleanup task"
+    ok("unstarted account calls complete without retained entries or cleanup tasks")
+
+
 async def quit_during_dial(fails=False):
     from fake_link import FakeLink
     fake = FakeLink(can={"calls"})
@@ -973,6 +1042,7 @@ async def quit_during_dial(fails=False):
     ending = asyncio.create_task(backend.hangup_calls())
     await asyncio.sleep(.01)
     assert not ending.done() and call.closed
+    assert call in account.ending_calls and not call.hangup_done.is_set()
     gate.set()
     if fails:
         try:
@@ -983,11 +1053,13 @@ async def quit_during_dial(fails=False):
             raise AssertionError("dial should fail")
         await asyncio.wait_for(ending, .2)
         assert call.hangup_done.is_set() and call.task is None
+        assert not account.ending_calls
         ok("failed setup releases the quit waiter without the two-second timeout")
         return
     await pending
     await asyncio.wait_for(ending, 1)
     await call.task
+    assert not account.ending_calls
     assert socket.commands() == ["hangup"] and socket.sent[0]["reason"] == "CANCELED"
     ok("quit waits for cancellation while outgoing setup is still pending")
 
@@ -1252,17 +1324,23 @@ async def end_logging():
     ok("terminal logs contain only allowed reasons and local/remote origin, once, without identifiers")
 
 
-async def signalling_tolerance():
+async def signalling_tolerance(candidate_error="participant-not-found", suspend_send=False):
     # What the media do not need never ends a talk: an error frame no command
     # waits for (a late reply, a refused candidate), a candidate the service
     # refuses, a malformed one from the peer. Only a fatal error ends it.
+    send_cancelled = asyncio.Event()
     class Refusing(Socket):
         async def send(self, raw):
             value = json.loads(raw) if raw != "pong" else raw
             if isinstance(value, dict) and "candidate" in (value.get("data") or {}):
                 self.sent.append(value)
                 await self.queue.put(json.dumps({"type": "error", "sequence": value["sequence"],
-                                                 "error": "participant-not-found"}))
+                                                 "error": candidate_error}))
+                if suspend_send:
+                    try:
+                        await asyncio.Event().wait()
+                    finally:
+                        send_cancelled.set()
                 return
             await super().send(raw)
     socket = Refusing()
@@ -1277,6 +1355,15 @@ async def signalling_tolerance():
     Audio.made[-1].state("connected")
     with patch.object(bm, "log_line") as log:
         call.candidate({"candidate": "refused", "sdpMLineIndex": 0})
+        if candidate_error in bm.VoiceCall.FATAL_ERRORS:
+            await until(lambda: call.closed)
+            await asyncio.gather(call.task, return_exceptions=True)
+            assert states[-1] == "failed" and Audio.made[-1].closed
+            assert not call.pending
+            if suspend_send:
+                assert send_cancelled.is_set()
+            assert "voice call: service error " + candidate_error in [c.args[0] for c in log.call_args_list]
+            return
         await socket.queue.put(json.dumps({"type": "error", "sequence": 999, "error": "private-text"}))
         await socket.queue.put(json.dumps({"type": "error", "error": "illegal-participant-state"}))
         for bad in (None, {"sdpMLineIndex": 0}, "text"):
@@ -1335,6 +1422,24 @@ async def signalling_tolerance():
         assert states.count("ended") == 1
         assert not any("signalling failed" in c.args[0] for c in log.call_args_list)
     ok("refused candidates, stray and malformed frames keep a call; the end is told before the hang-up goes")
+
+
+async def terminal_reply_during_send():
+    loop = asyncio.get_running_loop()
+    previous = loop.get_exception_handler()
+    errors = []
+    loop.set_exception_handler(lambda _loop, context: errors.append(context))
+    try:
+        await signalling_tolerance("conversation-ended", suspend_send=True)
+        # Collect traceback cycles while the loop and its handler still exist.
+        # Checking only at end() can miss delayed Future diagnostics.
+        for _ in range(3):
+            gc.collect()
+            await asyncio.sleep(0)
+        assert not errors, [context.get("message") for context in errors]
+    finally:
+        loop.set_exception_handler(previous)
+    ok("matched terminal reply during suspended send leaves no unretrieved Future exception")
 
 
 async def media_state_transitions():
@@ -1930,10 +2035,15 @@ async def main():
     await calls_switched_off()
     await busy_invitation()
     await quit_hangup()
+    await quit_after_ui_end()
+    await end_without_signalling()
     await quit_during_dial()
     await quit_during_dial(fails=True)
     await missed_calls()
     await signalling_tolerance()
+    for code in sorted(bm.VoiceCall.FATAL_ERRORS):
+        await signalling_tolerance(code)
+    await terminal_reply_during_send()
 
 
 asyncio.run(main())
