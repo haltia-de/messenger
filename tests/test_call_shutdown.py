@@ -12,7 +12,9 @@ from gi.repository import GLib
 
 class SilentSocket:
     attempted = None
+    send_started = None
     async def send(self, raw):
+        self.send_started = time.monotonic()
         self.attempted = json.loads(raw)
         await asyncio.Future()  # the network cannot make quitting wait forever
     async def close(self):
@@ -71,8 +73,10 @@ def stuck():
 GLib.timeout_add(10, prepare)
 GLib.timeout_add_seconds(10, stuck)
 app.run([])
+finished = time.monotonic()
 assert not errors, errors
-assert started and 1.8 <= time.monotonic() - started[0] < 3.5
+assert started and finished - started[0] < 3.5
+assert socket.send_started is not None and 1.8 <= finished - socket.send_started < 3.5
 assert audio.closed and socket.attempted["reason"] == "HUNGUP"
 assert app.call_logind.fd is None and logind.released()
 logind.close()

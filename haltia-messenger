@@ -4249,10 +4249,15 @@ class Account:
             self.declining.add(conversation)
             try:
                 busy = VoiceCall(conversation, peer, True, lambda *_args: None, self.agent)
-                await busy.end("BUSY")
-                # A terminal VoiceCall opens ws2 only to send hangup; no
-                # acceptance, media pipeline or UI callback is created.
-                await busy.run(params)
+                busy.dial_pending = True  # run() is planned even though end() comes first
+                try:
+                    await busy.end("BUSY")
+                    # A terminal VoiceCall opens ws2 only to send hangup; no
+                    # acceptance, media pipeline or UI callback is created.
+                    await busy.run(params)
+                finally:
+                    busy.dial_pending = False
+                    busy.finish_hangup()
             finally:
                 self.declining.discard(conversation)
             return

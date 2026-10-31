@@ -897,24 +897,38 @@ async def busy_invitation():
     primary.state = "active"
     made = len(Audio.made)
     connected = asyncio.Event()
+    sending, release = asyncio.Event(), asyncio.Event()
     class BusySocket(Socket):
         async def __aenter__(self):
             await connected.wait()
             return await super().__aenter__()
+        async def send(self, raw):
+            sending.set()
+            await release.wait()
+            await super().send(raw)
     socket = BusySocket()
     real_call = bm.VoiceCall
+    calls = []
     def other(*args, **kwargs):
-        return real_call(*args, **kwargs, audio=Audio, connect=lambda *_args, **_kwargs: socket)
+        call = real_call(*args, **kwargs, audio=Audio, connect=lambda *_args, **_kwargs: socket)
+        calls.append(call)
+        return call
     with patch.object(bm, "VoiceCall", side_effect=other) as factory:
         invitation = {"conversationId": "second", "callerId": 20, "vcp": literal(params)}
         await account.on_call_frame(137, dict(invitation, conversationId="primary"))
         assert factory.call_count == 0  # a duplicate of the current call must not reject it
         pending = asyncio.create_task(account.on_call_frame(137, invitation))
         await until(lambda: factory.call_count == 1)
+        busy = calls[0]
+        assert busy.closed and busy.dial_pending and not busy.hangup_done.is_set()
         await account.on_call_frame(137, invitation)  # duplicate during the pending handshake
         assert factory.call_count == 1
         connected.set()
-        await pending
+        await asyncio.wait_for(sending.wait(), .5)
+        assert not pending.done() and not busy.hangup_done.is_set()
+        release.set()
+        await asyncio.wait_for(pending, .5)
+        assert busy.hangup_done.is_set() and not busy.dial_pending
     assert account.call is primary and not primary.closed and primary.state == "active"
     assert len(Audio.made) == made
     assert socket.commands() == ["hangup"] and socket.sent[0]["reason"] == "BUSY"
